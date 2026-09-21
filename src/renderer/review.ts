@@ -1,13 +1,14 @@
 import type { KineBridge } from '../preload/preload';
 import type { Clip, Settings, Visibility } from '../shared/types';
 import { makeT } from '../shared/i18n';
-import { clear, clipMeta, fileUrl, formatDuration, h } from './ui';
+import { clear, clipMeta, fileUrl, formatDuration, h, inlinePlayer } from './ui';
 import { applyBrandColor } from '../shared/plan';
 
 /**
  * Okýnko po hře: klipy z posledního hraní, každý s náhledem a
  * zaškrtávátkem (výchozí: všechny vybrané), názvy jdou přepsat. Jedno
  * tlačítko nahraje vybrané - nahrávání běží až teď, když se nehraje.
+ * Kliknutí na náhled klip přehraje přímo tady (karta se roztáhne).
  */
 declare const window: Window & { kine: KineBridge };
 const kine = window.kine;
@@ -18,12 +19,22 @@ let clips: Clip[] = [];
 let selected = new Set<string>();
 const titles = new Map<string, string>();
 let visibility: Visibility = 'private';
+let playing: string | null = null;
+let player: HTMLElement | null = null;
 
 async function load(sessionId: string) {
   settings = await kine.getSettings();
   visibility = settings.visibility;
   clips = (await kine.reviewClips(sessionId)).filter((c) => !c.upload || c.upload.state === 'error');
   selected = new Set(clips.map((c) => c.id));
+  playing = null;
+  player = null;
+  render();
+}
+
+function togglePlay(clip: Clip) {
+  playing = playing === clip.id ? null : clip.id;
+  player = null;
   render();
 }
 
@@ -31,7 +42,9 @@ function render() {
   const t = makeT(settings.lang);
   applyBrandColor(document.documentElement, settings.brandColor || null);
   clear(app);
-  const game = clips.find((c) => c.game)?.game ?? null;
+  // Titulek podle hry, když je u všech stejná; jinak jen počet.
+  const games = new Set(clips.map((c) => c.game).filter(Boolean));
+  const game = games.size === 1 ? [...games][0] : null;
   const count = clips.length;
 
   const grid = h('div', { class: 'clips' });
@@ -41,19 +54,13 @@ function render() {
       type: 'checkbox',
       class: 'pick',
       checked: isSelected,
+      onclick: (e: Event) => e.stopPropagation(),
       onchange: (e: Event) => {
         if ((e.target as HTMLInputElement).checked) selected.add(clip.id);
         else selected.delete(clip.id);
         render();
       },
     });
-    const thumb = h(
-      'div',
-      { class: 'thumb', ondblclick: () => void kine.openClip(clip.id) },
-      clip.thumb ? h('img', { src: fileUrl(clip.thumb), alt: '' }) : null,
-      check,
-      h('span', { class: 'dur' }, formatDuration(clip.durationSeconds))
-    );
     const title = h('input', {
       type: 'text',
       class: 'title-edit',
@@ -62,15 +69,32 @@ function render() {
       maxlength: '150',
       oninput: (e: Event) => titles.set(clip.id, (e.target as HTMLInputElement).value),
     });
-    grid.append(
-      h(
-        'div',
-        { class: `clip ${isSelected ? 'selected' : ''}` },
-        thumb,
-        h('div', { class: 'body' }, title, h('div', { class: 'meta' }, clipMeta(clip, settings.lang)),
-          h('div', { class: 'actions' }, h('button', { class: 'small quiet', onclick: () => void kine.openClip(clip.id) }, t('libraryOpen'))))
-      )
+    const isPlaying = playing === clip.id;
+    const body = h(
+      'div',
+      { class: 'body' },
+      title,
+      h('div', { class: 'meta' }, [clip.game, clipMeta(clip, settings.lang)].filter(Boolean).join(' · ')),
+      h('div', { class: 'actions' }, h('button', { class: 'small quiet', onclick: () => togglePlay(clip) }, isPlaying ? t('playerClose') : '▶ ' + t('libraryOpen')))
     );
+    if (isPlaying) {
+      player ??= inlinePlayer(clip, t('playerClose'), () => {
+        playing = null;
+        player = null;
+        render();
+      });
+      grid.append(h('div', { class: `clip playing ${isSelected ? 'selected' : ''}` }, h('div', { class: 'player-wrap' }, player, check), body));
+    } else {
+      const thumb = h(
+        'div',
+        { class: 'thumb', onclick: () => togglePlay(clip) },
+        clip.thumb ? h('img', { src: fileUrl(clip.thumb), alt: '' }) : null,
+        check,
+        h('span', { class: 'play-badge' }, '▶'),
+        h('span', { class: 'dur' }, formatDuration(clip.durationSeconds))
+      );
+      grid.append(h('div', { class: `clip ${isSelected ? 'selected' : ''}` }, thumb, body));
+    }
   }
 
   const selectedCount = selected.size;
@@ -122,3 +146,7 @@ function render() {
 const params = new URLSearchParams(location.search);
 void load(params.get('session') ?? '');
 kine.onNavigate((sessionId) => void load(sessionId));
+kine.onSettings((s) => {
+  settings = s;
+  render();
+});

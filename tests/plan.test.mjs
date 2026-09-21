@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { hexToRgbTriplet, maxClipSecondsFor, clipOptionsFor, applyBrandColor, FREE_CLIP_MAX_SECONDS, PLUS_CLIP_MAX_SECONDS } from '../dist/esm/plan.js';
+import { hexToRgbTriplet, maxClipSecondsFor, clipOptionsFor, applyBrandColor, hasClipsPlus, hasKinePlus, normalizePlan, FREE_CLIP_MAX_SECONDS, PLUS_CLIP_MAX_SECONDS } from '../dist/esm/plan.js';
 
 test('barva Kine -> rgb složky', () => {
   assert.equal(hexToRgbTriplet('#a34ff7'), '163, 79, 247');
@@ -13,10 +13,24 @@ test('barva Kine -> rgb složky', () => {
 test('strop délky klipu podle plánu', () => {
   assert.equal(maxClipSecondsFor(null), FREE_CLIP_MAX_SECONDS);
   assert.equal(maxClipSecondsFor({ plan: 'free' }), 60);
-  assert.equal(maxClipSecondsFor({ plan: 'plus' }), PLUS_CLIP_MAX_SECONDS);
-  assert.equal(maxClipSecondsFor({ plan: 'plus', maxClipSeconds: 240 }), 240);
+  assert.equal(maxClipSecondsFor({ plan: 'kine' }), 60, 'Kine Plus samo dlouhé klipy nedává');
+  assert.equal(maxClipSecondsFor({ plan: 'clips' }), PLUS_CLIP_MAX_SECONDS);
+  assert.equal(maxClipSecondsFor({ plan: 'all' }), PLUS_CLIP_MAX_SECONDS);
+  assert.equal(maxClipSecondsFor({ plan: 'plus' }), PLUS_CLIP_MAX_SECONDS, 'starší hodnota plus = all');
+  assert.equal(maxClipSecondsFor({ plan: 'all', maxClipSeconds: 240 }), 240);
   assert.deepEqual([...clipOptionsFor('free')], [15, 30, 45, 60]);
-  assert.ok(clipOptionsFor('plus').includes(300));
+  assert.deepEqual([...clipOptionsFor('kine')], [15, 30, 45, 60]);
+  assert.ok(clipOptionsFor('clips').includes(300));
+});
+
+test('tři druhy předplatného', () => {
+  assert.ok(hasClipsPlus('clips') && hasClipsPlus('all') && hasClipsPlus('plus'));
+  assert.ok(!hasClipsPlus('kine') && !hasClipsPlus('free') && !hasClipsPlus(null));
+  assert.ok(hasKinePlus('kine') && hasKinePlus('all') && hasKinePlus('plus'));
+  assert.ok(!hasKinePlus('clips') && !hasKinePlus('free'));
+  assert.equal(normalizePlan('all'), 'all');
+  assert.equal(normalizePlan('premium'), 'free');
+  assert.equal(normalizePlan(undefined), 'free');
 });
 
 test('nastavení CSS proměnných barvy (i odebrání)', () => {

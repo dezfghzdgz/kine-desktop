@@ -1,70 +1,98 @@
-# Jak dostat Kine do PC na GitHub a k lidem
+# Jak vydat Kine do PC (a jak ho dostat k lidem bez GitHubu)
 
-Čtyři kroky, pak už jen tag pro každou další verzi. Web Kine si instalátor
-bere sám z GitHub Releases – lidi klikají na kine…/download a GitHub
-nevidí.
+Repo `kine-desktop` už na GitHubu máš a první vydání (v0.1.0) proběhlo.
+Tady je, co dělat dál: **A)** nahrát novou verzi kódu, **B)** zapnout
+stahování z našeho úložiště místo GitHubu, **C)** podpis proti hlášce
+antiviru/SmartScreenu.
 
-## 1. Repo na GitHubu (jednou)
+## A) Nová verze (přes web GitHubu, bez gitu)
 
-1. github.com → vpravo nahoře **+** → **New repository**
-2. Repository name: **kine-desktop** (přesně takhle – web Kine ho tak čeká;
-   kdyby jinak, nastav na Vercelu `NEXT_PUBLIC_DESKTOP_REPO=tvoje-jmeno/nazev`)
-3. **Public** – musí být veřejné, jinak si lidi instalátor nestáhnou a
-   appka se neumí sama aktualizovat
-4. Nic nezaškrtávej (README, .gitignore, licence už v balíčku jsou) → **Create repository**
+1. Rozbal `kine-desktop-zdroj.zip` do složky v počítači.
+2. Na GitHubu otevři repo **kine-desktop** → **Add file** → **Upload files**.
+3. Ve Windows otevři rozbalenou složku, označ **všechno** v ní (Ctrl+A)
+   a přetáhni to do okna prohlížeče. Soubory se stejným názvem se přepíšou,
+   nové se přidají.
+4. Dole **Commit changes** (klidně s popisem „v0.2.0“).
+5. Skryté složky (`.github`) se přetažením nahrají taky – ale kdyby ne,
+   otevři v repu `.github/workflows/release.yml` → tužka (Edit) → vlož
+   obsah stejného souboru z balíčku → Commit.
+6. **Actions** → **Vydání** → **Run workflow** → **Run workflow**.
+   Za ~6 minut je v **Releases** verze podle `package.json`
+   (teď `0.2.0`) se soubory `Kine-Setup.exe`, `Kine-Clipper-Setup.exe`
+   a `latest.yml`.
 
-## 2. Nahrát kód (jednou)
+Každá další verze: v `package.json` zvedni `"version"`, nahraj soubory,
+Run workflow. Nainstalovaným appkám se nová verze stáhne na pozadí a
+nainstaluje po ukončení.
 
-Rozbal `kine-desktop-zdroj.zip` do složky, otevři v ní terminál
-(PowerShell: pravé tlačítko ve složce → „Otevřít v terminálu“) a po řádcích:
+## B) Stahování z naší stránky (Cloudflare R2), ne z GitHubu
 
-```
-git init
-git add .
-git commit -m "Kine do PC 0.1.0"
-git branch -M main
-git remote add origin https://github.com/dezfghzdgz/kine-desktop.git
-git push -u origin main
-```
+Instalátor má 130 MB – na Vercel se nevejde, ale Cloudflare R2 je na
+takové soubory dělané a stahování z něj je zdarma (10 GB úložiště a
+10 milionů stažení měsíčně zadarmo). Workflow ho tam nahraje sám, web
+Kine pak lidi pošle na náš odkaz. Jednou nastavit:
 
-(`dezfghzdgz` nahraď svým jménem na GitHubu, když je jiné.) Když se git
-zeptá na přihlášení, použij GitHub Desktop nebo přihlášení v prohlížeči,
-které nabídne.
+1. **dash.cloudflare.com** → účet (stačí zdarma) → v levém menu **R2
+   Object Storage** → **Create bucket** → název `kine-download`, umístění
+   nech automatické → Create.
+2. V bucketu **Settings** → **Public access** → **R2.dev subdomain** →
+   **Allow Access** → potvrď. Objeví se adresa jako
+   `https://pub-1a2b3c4d.r2.dev` – tu si zkopíruj (říkejme jí *adresa úložiště*).
+   (Až budeš mít vlastní doménu, jde sem přidat třeba `stahnout.kine.cz` –
+   **Custom Domains** – a adresa úložiště bude tahle.)
+3. Zpátky na přehledu R2 vpravo **Manage R2 API Tokens** → **Create API
+   token** → název `kine-github`, Permissions **Object Read & Write**,
+   Specify bucket: `kine-download` → Create. Zkopíruj si **Access Key ID**,
+   **Secret Access Key** a nahoře na stránce R2 **Account ID** (ukazuje se
+   i v adrese `…r2.cloudflarestorage.com`).
+4. GitHub → repo kine-desktop → **Settings** → **Secrets and variables** →
+   **Actions**:
+   - záložka **Secrets** → **New repository secret**, čtyřikrát:
+     `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
+     `R2_BUCKET` (= `kine-download`)
+   - záložka **Variables** → **New repository variable**:
+     `DESKTOP_DOWNLOAD_BASE` = adresa úložiště (bez lomítka na konci)
+5. Vercel → projekt Kine → **Settings** → **Environment Variables** →
+   `NEXT_PUBLIC_DESKTOP_DOWNLOAD_BASE` = stejná adresa úložiště → Save →
+   **Redeploy** (Deployments → ⋯ u posledního → Redeploy).
+6. Spusť **Run workflow** (krok A6). V logu kroku „Nahrát do Cloudflare
+   R2“ uvidíš `nahráno: …/Kine-Setup.exe`.
 
-## 3. Vydat verzi = udělat tag
+Od té chvíle `kine…/download/windows` posílá lidi na naše úložiště a
+nainstalované appky si tam hledají aktualizace (`latest.yml`). GitHub
+Releases zůstávají jako záloha – kdyby R2 nebylo nastavené, web míří tam.
 
-```
-git tag v0.1.0
-git push origin v0.1.0
-```
+## C) Antivirus / SmartScreen („Systém Windows chránil váš počítač“)
 
-Na GitHubu v záložce **Actions** se rozjede „Vydání“ – asi 5 minut. Pak je
-v **Releases** verze v0.1.0 se souborem **Kine-Setup.exe** (a `latest.yml`,
-podle kterého si nainstalované appky samy najdou aktualizaci).
+Není to virus – hlášky jsou proto, že instalátor **není podepsaný
+certifikátem ověřeného vydavatele** a je nový (SmartScreen si buduje
+pověst podle počtu stažení). Obejít se to dá („Další informace“ →
+„Přesto spustit“; v prohlížeči „Zachovat“), ale správné řešení je podpis:
 
-Od téhle chvíle funguje na webu Kine tlačítko **Stáhnout pro Windows**
-(kine…/download/windows) – míří vždy na nejnovější vydání.
+- **Azure Trusted Signing** (Microsoft, ~10 $/měsíc) – nejlevnější a
+  SmartScreen mu věří hned. Potřebuje ověřenou firmu nebo (v podporovaných
+  zemích) ověřenou osobu: portal.azure.com → **Trusted Signing** →
+  vytvořit účet, ověřit identitu, vytvořit **Certificate profile**
+  (Public trust). Pak založit App registration (Entra ID) s tajným klíčem
+  a dát jí roli *Trusted Signing Certificate Profile Signer*.
+- Do GitHubu pak: **Secrets** `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
+  `AZURE_CLIENT_SECRET`; **Variables** `AZURE_SIGN_ENDPOINT`
+  (např. `https://weu.codesigning.azure.net`), `AZURE_SIGN_ACCOUNT`
+  (název účtu Trusted Signing), `AZURE_SIGN_PROFILE` (název profilu),
+  `AZURE_SIGN_PUBLISHER` (jméno vydavatele přesně podle certifikátu,
+  např. `CN=Kine s.r.o.`).
+- Workflow podpis přidá sám, jakmile ty hodnoty existují
+  (`scripts/publish-config.mjs`). Nic dalšího se nemění.
 
-## 4. Každá další verze
-
-1. V `package.json` zvedni `"version"` (třeba `0.1.1`).
-2. ```
-   git add .
-   git commit -m "v0.1.1"
-   git push
-   git tag v0.1.1
-   git push origin v0.1.1
-   ```
-3. Za pár minut je nová verze v Releases a všem nainstalovaným appkám se
-   stáhne na pozadí a nainstaluje po ukončení.
+Alternativa: klasický OV certifikát na podpis kódu (Certum, SSL.com,
+~100–300 € ročně) – funguje taky, ale SmartScreen mu věří až po čase.
 
 ## Když něco nejde
 
 - **Actions červené** – klikni na běh, otevři krok, který spadl, a pošli
   mi text chyby.
-- **Windows hlásí „Neznámý vydavatel“** – normální, instalátor není
-  podepsaný certifikátem. „Další informace“ → „Přesto spustit“. Podpis se
-  dá dokoupit později (Azure Trusted Signing, ~10 $/měsíc), appka se
-  nemění.
-- **Tlačítko na webu vede na 404** – zatím není žádné vydání (krok 3),
-  nebo je repo soukromé, nebo se jinak jmenuje (`NEXT_PUBLIC_DESKTOP_REPO`).
+- **Tlačítko na webu vede na 404** – R2: špatná adresa v
+  `NEXT_PUBLIC_DESKTOP_DOWNLOAD_BASE` nebo bucket bez veřejného přístupu;
+  GitHub: repo soukromé nebo jinak pojmenované (`NEXT_PUBLIC_DESKTOP_REPO`).
+- **Appka po instalaci hlásí problém se zkratkou** – zkratku drží jiný
+  program (Discord, NVIDIA…), v nastavení appky vyber jinou.

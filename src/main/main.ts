@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import {
@@ -17,7 +18,7 @@ import {
 } from 'electron';
 import type { CaptureEvent, Clip, DisplayInfo, Settings, Status, Visibility } from '../shared/types';
 import { makeT, type Key } from '../shared/i18n';
-import { acceleratorLabel } from '../shared/accelerator';
+import { hotkeyLabel } from '../shared/hotkeys';
 import { defaultClipTitle } from '../shared/clipNaming';
 import { maxClipSecondsFor } from '../shared/plan';
 import { initLog, log, logDir } from './log';
@@ -25,20 +26,27 @@ import { SettingsStore } from './settings';
 import { ClipLibrary } from './clips';
 import { CaptureManager } from './capture';
 import { GameWatcher, type DetectedGame } from './games';
+import { KNOWN_GAMES } from './gamesParse';
 import { Auth } from './auth';
 import { createKineApi } from './kineApi';
 import { Uploader } from './uploader';
 import { Toast } from './toast';
 import { checkForUpdates, initUpdater } from './updater';
 import { runTestDriver } from './testDriver';
+import { WinHelper } from './winHelper';
+import { HotkeyManager, type HotkeyId, type HotkeyReason } from './hotkeys';
 
 /**
  * Kine do PC - hlavní proces.
  *
- * Appka žije v liště u hodin. Hlídá, jestli běží hra (games.ts); když
- * ano, drží posledních N sekund obrazu (capture.ts). Zkratka uloží klip
- * (clips.ts), po hře se klipy nabídnou k nahrání nebo nahrají samy
- * (uploader.ts) - ale nikdy během hraní.
+ * Appka žije v liště u hodin. Hlídá, jestli běží hra (games.ts, na
+ * Windows s pomocníkem winHelper.ts, který ví, které okno je v popředí);
+ * když ano, drží posledních N sekund obrazu (capture.ts). Zkratka
+ * (hotkeys.ts) uloží klip (clips.ts), po hře se klipy nabídnou k nahrání
+ * nebo nahrají samy (uploader.ts) - ale nikdy během hraní.
+ *
+ * Dva režimy: "jen klipovač" (okno s klipy a nastavením) a "Kine +
+ * klipy" (navíc okno s webem Kine jako aplikace).
  */
 
 const PRELOAD = join(__dirname, '..', 'preload', 'preload.js');
@@ -65,9 +73,12 @@ class KineApp {
   auth!: Auth;
   uploader!: Uploader;
   toast!: Toast;
+  helper: WinHelper | null = null;
+  hotkeys!: HotkeyManager;
   tray: Tray | null = null;
   settingsWindow: BrowserWindow | null = null;
   reviewWindow: BrowserWindow | null = null;
+  kineWindow: BrowserWindow | null = null;
   /** Aktuální "hraní": všechny klipy z něj se po hře nabídnou naráz. */
   sessionId = randomUUID();
   paused = false;
@@ -78,15 +89,15 @@ class KineApp {
     return makeT(this.settings.get().lang)(key, vars);
   }
 
-  /** Má hráč Kine Plus? Bez přihlášení ne. */
-  hasPlus(): boolean {
-    return this.auth.current()?.plan === 'plus';
+  /** Má hráč Klipy Plus (automatické nahrávání, dlouhé klipy)? Bez přihlášení ne. */
+  hasClipsPlus(): boolean {
+    return this.auth.current()?.clipsPlus === true;
   }
 
-  /** Co se má stát po hře - "auto" je jen v Plus, jinak se chová jako "review". */
+  /** Co se má stát po hře - "auto" je jen v Klipy Plus, jinak se chová jako "review". */
   effectiveAfterGame(): Settings['afterGame'] {
     const wanted = this.settings.get().afterGame;
-    return wanted === 'auto' && !this.hasPlus() ? 'review' : wanted;
+    return wanted === 'auto' && !this.hasClipsPlus() ? 'review' : wanted;
   }
 
   /** Délka klipu podle nastavení, oříznutá stropem plánu (zdarma 60 s). */
@@ -102,6 +113,7 @@ class KineApp {
     log(`start Kine ${app.getVersion()} (${process.platform}, electron ${process.versions.electron})`);
 
     this.settings = new SettingsStore();
+    if (!this.settings.get().onboarded) await this.presetModeFromInstaller();
     this.library = new ClipLibrary(this.settings.clipsDir());
     this.library.load();
 
@@ -125,9 +137,21 @@ class KineApp {
       },
     });
 
+    if (WinHelper.supported() && !process.env.KINE_NO_HELPER) {
+      this.helper = new WinHelper(app.getPath('userData'));
+      this.helper.on({ state: () => this.pushStatus() });
+    }
+
     this.games = new GameWatcher({
       settings: () => this.settings.get(),
+      helper: this.helper,
       onChange: (game, prev) => void this.onGameChange(game, prev),
+    });
+
+    this.hotkeys = new HotkeyManager({
+      helper: this.helper,
+      onFire: (id) => this.onHotkey(id),
+      onProblemsChanged: () => this.pushStatus(),
     });
 
     this.uploader = new Uploader({
@@ -154,7 +178,9 @@ class KineApp {
 
     this.installDisplayMediaHandler();
     this.registerIpc();
+    // Nejdřív zkratky (pomocník si je vezme při startu), pak pomocník - ať se nespouští dvakrát.
     this.registerHotkeys();
+    this.helper?.start();
     this.createTray();
     this.applyLoginItem();
     initUpdater();
@@ -171,12 +197,17 @@ class KineApp {
     setInterval(() => {
       if (this.uploader.pending() > 0) this.uploader.kick();
     }, 30000);
-    // Plán (Kine Plus) a barva se občas srovnají podle Kine - když Plus
-    // vyprší, automatické nahrávání se samo vrátí na ruční.
+    // Plán (předplatné) a barva se občas srovnají podle Kine - když Klipy
+    // Plus vyprší, automatické nahrávání se samo vrátí na ruční.
     setInterval(() => void this.auth.refresh(), 6 * 60 * 60 * 1000);
 
     const hidden = process.argv.includes('--hidden');
-    if (!this.settings.get().onboarded || !hidden) this.openSettings(!this.settings.get().onboarded ? 'wizard' : undefined);
+    const s = this.settings.get();
+    if (!s.onboarded) this.openSettings('wizard');
+    else if (!hidden) {
+      if (s.appMode === 'full') this.openKine();
+      else this.openSettings();
+    }
 
     // Odkaz kine://…, kterým appku někdo spustil (Windows předává v argv).
     for (const arg of process.argv) if (arg.startsWith('kine://')) void this.handleDeepLink(arg);
@@ -185,19 +216,42 @@ class KineApp {
     this.pushStatus();
   }
 
+  /**
+   * Instalátor si zapsal svůj název do registru (build/installer.nsh):
+   * "Kine-Clipper-Setup.exe" = hráč si na webu vybral jen klipovač,
+   * "Kine-Setup.exe" = Kine + klipy. Průvodce to jen předvyplní.
+   */
+  private async presetModeFromInstaller(): Promise<void> {
+    if (process.platform !== 'win32') return;
+    const out = await new Promise<string>((resolve) => {
+      execFile('reg', ['query', 'HKCU\\Software\\Kine', '/v', 'installer'], { windowsHide: true, timeout: 5000 }, (err, stdout) => resolve(err ? '' : String(stdout)));
+    });
+    const m = /installer\s+REG_SZ\s+(.+)$/im.exec(out);
+    if (!m) return;
+    const name = m[1].trim();
+    const mode: Settings['appMode'] = /clip|klip/i.test(name) ? 'clipper' : 'full';
+    log(`instalátor: ${name} -> režim ${mode}`);
+    if (mode !== this.settings.get().appMode) this.settings.update({ appMode: mode });
+  }
+
   // ---- hry ---------------------------------------------------------------------
 
   private async onGameChange(game: DetectedGame | null, prev: DetectedGame | null): Promise<void> {
     const s = this.settings.get();
     this.pushStatus();
     this.uploader.kick();
+    const announce = (g: DetectedGame) => void this.toast.show(this.t('toastGameDetected', { game: g.name, hotkey: hotkeyLabel(s.clipHotkey) }), 'ok');
 
     if (game && !prev) {
       this.sessionId = randomUUID();
       if (s.detection === 'games' && !this.paused) {
         await this.capture.start().catch(() => undefined);
-        void this.toast.show(this.t('toastGameDetected', { game: game.name, hotkey: acceleratorLabel(s.clipHotkey) }), 'ok');
+        announce(game);
       }
+    } else if (game && prev && game.exe !== prev.exe) {
+      // Přepnutí z jedné hry do druhé (obě běží): stejné "hraní", zásobník
+      // jede dál, jen se přejmenuje, co se klipuje.
+      if (s.detection === 'games' && !this.paused) announce(game);
     }
 
     if (!game && prev) {
@@ -222,14 +276,19 @@ class KineApp {
 
   // ---- klipy -------------------------------------------------------------------
 
+  private onHotkey(id: HotkeyId): void {
+    if (id === 'clip') void this.onClipHotkey();
+    else void this.onToggleHotkey();
+  }
+
   /** Stisk zkratky. Klipy se řadí za sebe - dva rychlé stisky = dva klipy. */
   onClipHotkey(): Promise<Clip | null> {
     const run = async (): Promise<Clip | null> => {
       const s = this.settings.get();
-      const hotkeyLabel = acceleratorLabel(s.toggleHotkey);
+      const toggleLabel = hotkeyLabel(s.toggleHotkey);
       if (this.capture.state !== 'on') {
         const key: Key = s.detection === 'manual' ? 'toastNotCapturingManual' : 'toastNotCapturing';
-        void this.toast.show(this.t(key, { hotkey: hotkeyLabel }), 'warn');
+        void this.toast.show(this.t(key, { hotkey: toggleLabel }), 'warn');
         return null;
       }
       const game = this.games.current();
@@ -239,7 +298,7 @@ class KineApp {
           id: randomUUID(),
           file: result.file,
           thumb: result.thumb,
-          title: defaultClipTitle(result.createdAt, game?.name ?? null, s.lang),
+          title: defaultClipTitle(result.createdAt, game?.name ?? null, this.t('clipWord')),
           game: game?.name ?? null,
           createdAt: result.createdAt.toISOString(),
           durationSeconds: result.durationSeconds,
@@ -262,7 +321,7 @@ class KineApp {
       } catch (e) {
         const message = (e as Error).message;
         if (message === 'too-early') void this.toast.show(this.t('toastTooEarly'), 'warn');
-        else if (message === 'not-capturing') void this.toast.show(this.t('toastNotCapturing', { hotkey: hotkeyLabel }), 'warn');
+        else if (message === 'not-capturing') void this.toast.show(this.t('toastNotCapturing', { hotkey: toggleLabel }), 'warn');
         else void this.toast.show(this.t('toastClipFailed', { message }), 'error', { notification: true });
         return null;
       }
@@ -280,7 +339,7 @@ class KineApp {
     } else {
       await this.capture.start().catch(() => undefined);
       if ((this.capture.state as string) === 'on') {
-        void this.toast.show(this.t('toastBufferOn', { hotkey: acceleratorLabel(s.clipHotkey), seconds: s.clipSeconds }), 'ok');
+        void this.toast.show(this.t('toastBufferOn', { hotkey: hotkeyLabel(s.clipHotkey), seconds: s.clipSeconds }), 'ok');
       }
     }
     this.rebuildTray();
@@ -300,35 +359,33 @@ class KineApp {
       else if (s.detection === 'games' && !this.games.current()) void this.capture.stop();
       else if (s.detection === 'manual') void this.capture.stop();
     }
+    if (s.detectFullscreen !== prev.detectFullscreen) void this.games.refresh();
+    if (s.appMode !== prev.appMode && s.appMode === 'clipper' && this.kineWindow && !this.kineWindow.isDestroyed()) this.kineWindow.close();
     this.rebuildTray();
     this.pushStatus();
     this.broadcast('settings', s);
   }
 
   private registerHotkeys(): void {
-    globalShortcut.unregisterAll();
     const s = this.settings.get();
-    const ok1 = globalShortcut.register(s.clipHotkey, () => void this.onClipHotkey());
-    const ok2 = globalShortcut.register(s.toggleHotkey, () => void this.onToggleHotkey());
-    for (const [ok, key] of [[ok1, s.clipHotkey], [ok2, s.toggleHotkey]] as const) {
-      if (ok) continue;
-      log(`zkratku ${key} nejde zaregistrovat (drží ji jiný program)`);
+    const problems = this.hotkeys.apply({ clip: s.clipHotkey, toggle: s.toggleHotkey });
+    for (const p of problems) {
       // Hráč musí vědět, že F8 nic neudělá - jinak by to vypadalo jako rozbitá appka.
-      void this.toast.show(`${acceleratorLabel(key)}: ${this.t('hotkeyInUse')}`, 'warn', { notification: true });
+      if (p.reason === 'helper-down') continue; // pomocník teprve nabíhá; kdyby nenaběhl, uvidí to v nastavení
+      void this.toast.show(this.t('hotkeyProblem', { hotkey: hotkeyLabel(p.hotkey), reason: this.hotkeyReasonText(p.reason) }), 'warn', { notification: true });
     }
   }
 
-  /** Je zkratka volná? Zkusí ji zaregistrovat a hned pustit. */
-  hotkeyAvailable(accelerator: string): boolean {
-    const s = this.settings.get();
-    if (accelerator === s.clipHotkey || accelerator === s.toggleHotkey) return true;
-    if (globalShortcut.isRegistered(accelerator)) return true;
-    try {
-      const ok = globalShortcut.register(accelerator, () => undefined);
-      if (ok) globalShortcut.unregister(accelerator);
-      return ok;
-    } catch {
-      return false;
+  hotkeyReasonText(reason: HotkeyReason): string {
+    switch (reason) {
+      case 'in-use':
+        return this.t('hotkeyInUse');
+      case 'unsupported':
+        return this.t('hotkeyChordUnsupported');
+      case 'helper-down':
+        return this.t('hotkeyHelperDown');
+      default:
+        return reason;
     }
   }
 
@@ -352,7 +409,7 @@ class KineApp {
             sources.find((x) => x.display_id === s.displayId && s.displayId) ??
             sources.find((x) => x.display_id === primaryId) ??
             sources[0];
-          if (!source) throw new Error('žádná obrazovka');
+          if (!source) throw new Error('no display');
           const audio = request.audioRequested && process.platform === 'win32' && s.systemAudio ? 'loopback' : undefined;
           callback(audio ? { video: source, audio } : { video: source });
         } catch (e) {
@@ -376,8 +433,9 @@ class KineApp {
     else icon = icon.resize({ width: process.platform === 'darwin' ? 18 : 16, height: process.platform === 'darwin' ? 18 : 16 });
     if (process.platform === 'darwin') icon.setTemplateImage(true);
     this.tray = new Tray(icon);
-    this.tray.on('click', () => this.openSettings());
-    this.tray.on('double-click', () => this.openSettings());
+    const open = () => (this.settings.get().appMode === 'full' && this.settings.get().onboarded ? this.openKine() : this.openSettings());
+    this.tray.on('click', open);
+    this.tray.on('double-click', open);
     this.rebuildTray();
   }
 
@@ -388,7 +446,7 @@ class KineApp {
     if (this.capture.state === 'on' || this.capture.state === 'starting') {
       return game ? this.t('trayCapturing', { game: game.name }) : this.t('trayCapturingNoGame');
     }
-    if (s.detection === 'manual') return this.t('trayIdleManual', { hotkey: acceleratorLabel(s.toggleHotkey) });
+    if (s.detection === 'manual') return this.t('trayIdleManual', { hotkey: hotkeyLabel(s.toggleHotkey) });
     if (s.detection === 'always') return this.t('trayIdleAlways');
     return this.t('trayIdle');
   }
@@ -406,11 +464,11 @@ class KineApp {
     if (!this.auth.current()) items.push({ label: this.t('trayNotLoggedIn'), click: () => this.openSettings('account') });
     items.push(
       { type: 'separator' },
-      { label: this.t('trayClipNow', { hotkey: acceleratorLabel(s.clipHotkey) }), click: () => void this.onClipHotkey(), enabled: this.capture.state === 'on' },
-      { label: this.t('trayLibrary'), click: () => this.openSettings('library') },
-      { label: this.t('traySettings'), click: () => this.openSettings() },
+      { label: this.t('trayClipNow', { hotkey: hotkeyLabel(s.clipHotkey) }), click: () => void this.onClipHotkey(), enabled: this.capture.state === 'on' },
+      { label: this.t('trayLibrary'), click: () => this.openSettings('clips') },
+      { label: this.t('traySettings'), click: () => this.openSettings('settings') },
       { label: this.paused ? this.t('trayResume') : this.t('trayPause'), click: () => void this.togglePause() },
-      { label: this.t('trayOpenKine'), click: () => void shell.openExternal(s.siteUrl) },
+      { label: this.t('trayOpenKine'), click: () => this.openKine() },
       { type: 'separator' },
       { label: this.t('trayQuit'), click: () => this.quit() }
     );
@@ -439,12 +497,12 @@ class KineApp {
       return;
     }
     const win = new BrowserWindow({
-      width: 900,
-      height: 660,
-      minWidth: 720,
-      minHeight: 520,
+      width: 960,
+      height: 680,
+      minWidth: 760,
+      minHeight: 540,
       title: 'Kine',
-      backgroundColor: '#0e0e12',
+      backgroundColor: '#050506',
       autoHideMenuBar: true,
       icon: ICON_PNG,
       webPreferences: { preload: PRELOAD, contextIsolation: true, sandbox: true },
@@ -469,12 +527,12 @@ class KineApp {
       return;
     }
     const win = new BrowserWindow({
-      width: 680,
-      height: 600,
-      minWidth: 520,
-      minHeight: 420,
+      width: 720,
+      height: 620,
+      minWidth: 540,
+      minHeight: 440,
       title: 'Kine',
-      backgroundColor: '#0e0e12',
+      backgroundColor: '#050506',
       autoHideMenuBar: true,
       alwaysOnTop: true,
       icon: ICON_PNG,
@@ -489,6 +547,76 @@ class KineApp {
     });
   }
 
+  private isKineUrl(url: string): boolean {
+    try {
+      return new URL(url).origin === new URL(this.settings.get().siteUrl).origin;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Otevře Kine. V režimu "Kine + klipy" jako vlastní okno appky (web
+   * Kine s trvalým přihlášením), jinak v prohlížeči.
+   */
+  openKine(path = ''): void {
+    const s = this.settings.get();
+    const url = s.siteUrl + (path ? (path.startsWith('/') ? path : `/${path}`) : '');
+    if (s.appMode !== 'full') {
+      void shell.openExternal(url);
+      return;
+    }
+    if (this.kineWindow && !this.kineWindow.isDestroyed()) {
+      if (path) void this.kineWindow.loadURL(url);
+      this.kineWindow.show();
+      this.kineWindow.focus();
+      return;
+    }
+    const partition = 'persist:kine-web';
+    // Web Kine v okně: žádný preload (mluví s appkou jen přes odkazy kine://),
+    // a jen oprávnění, která web opravdu potřebuje.
+    session.fromPartition(partition).setPermissionRequestHandler((_wc, permission, cb) => {
+      cb(['fullscreen', 'notifications', 'clipboard-sanitized-write', 'pointerLock', 'media'].includes(permission));
+    });
+    const win = new BrowserWindow({
+      width: 1280,
+      height: 820,
+      minWidth: 900,
+      minHeight: 600,
+      title: 'Kine',
+      backgroundColor: '#050506',
+      autoHideMenuBar: true,
+      icon: ICON_PNG,
+      webPreferences: { partition, contextIsolation: true, sandbox: true },
+    });
+    win.setMenuBarVisibility(false);
+    // Web pozná, že běží v appce (Sidebar ukáže "Klipy v PC").
+    win.webContents.setUserAgent(`${win.webContents.getUserAgent()} KineDesktop/${app.getVersion()}`);
+    const external = (target: string) => {
+      if (target.startsWith('kine://')) {
+        void this.handleDeepLink(target);
+        return true;
+      }
+      if (/^https?:/.test(target) && !this.isKineUrl(target)) {
+        void shell.openExternal(target);
+        return true;
+      }
+      return false;
+    };
+    win.webContents.setWindowOpenHandler(({ url: target }) => {
+      if (!external(target) && this.isKineUrl(target)) void win.loadURL(target);
+      return { action: 'deny' };
+    });
+    win.webContents.on('will-navigate', (e, target) => {
+      if (external(target)) e.preventDefault();
+    });
+    win.on('closed', () => {
+      this.kineWindow = null;
+    });
+    this.kineWindow = win;
+    void win.loadURL(url);
+  }
+
   private broadcast(channel: string, payload: unknown): void {
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) win.webContents.send(channel, payload);
@@ -497,10 +625,13 @@ class KineApp {
 
   status(): Status {
     const account = this.auth.current();
+    const game = this.games.current();
     return {
       capture: this.capture.state,
       captureError: this.capture.error,
-      game: this.games.current()?.name ?? null,
+      game: game?.name ?? null,
+      gameSource: game?.source ?? null,
+      gameExe: game?.exe ?? null,
       uploadsPending: this.uploader.pending(),
       uploadsPaused: this.uploader.isPausedByGame(),
       account: account
@@ -509,12 +640,16 @@ class KineApp {
             email: account.email,
             plan: account.plan,
             planUntil: account.planUntil,
+            clipsPlus: account.clipsPlus,
+            kinePlus: account.kinePlus,
             maxClipSeconds: maxClipSecondsFor(account),
             plusAvailable: account.plusAvailable,
-            plusPriceLabel: account.plusPriceLabel,
+            prices: account.prices,
           }
         : null,
       paused: this.paused,
+      hotkeyProblems: this.hotkeys.currentProblems().map((p) => this.t('hotkeyProblem', { hotkey: hotkeyLabel(p.hotkey), reason: this.hotkeyReasonText(p.reason) })),
+      chordsSupported: this.hotkeys.chordsSupported() && (this.helper?.isRunning() ?? false),
       version: app.getVersion(),
     };
   }
@@ -553,7 +688,11 @@ class KineApp {
 
     ipcMain.handle('clips:list', () => this.library.list());
     ipcMain.handle('clips:delete', (_e, id: string) => this.library.remove(id));
-    ipcMain.handle('clips:rename', (_e, id: string, title: string) => this.library.update(id, { title: String(title).trim().slice(0, 150) || 'Klip' }));
+    ipcMain.handle('clips:rename', (_e, id: string, title: string) => this.library.update(id, { title: String(title).trim().slice(0, 150) || this.t('clipDefaultName') }));
+    ipcMain.handle('clips:setGame', (_e, id: string, game: string | null) => {
+      const name = typeof game === 'string' ? game.trim().slice(0, 80) : '';
+      return this.library.update(id, { game: name || null });
+    });
     ipcMain.handle('clips:open', (_e, id: string) => {
       const clip = this.library.get(id);
       return clip ? shell.openPath(clip.file) : '';
@@ -568,7 +707,10 @@ class KineApp {
     });
     ipcMain.handle('clips:openOnKine', (_e, id: string) => {
       const clip = this.library.get(id);
-      if (clip?.upload?.state === 'done') void shell.openExternal(clip.upload.url);
+      if (clip?.upload?.state === 'done') {
+        if (this.settings.get().appMode === 'full') this.openKine(clip.upload.url.replace(this.settings.get().siteUrl, ''));
+        else void shell.openExternal(clip.upload.url);
+      }
     });
     ipcMain.handle('clips:openDir', () => shell.openPath(this.settings.clipsDir()));
     ipcMain.handle('clips:pickDir', async () => {
@@ -599,6 +741,15 @@ class KineApp {
 
     ipcMain.handle('games:listProcesses', () => this.games.listProcesses());
     ipcMain.handle('games:current', () => this.games.current());
+    ipcMain.handle('games:names', () => {
+      const names = new Set<string>();
+      for (const c of this.library.list()) if (c.game) names.add(c.game);
+      for (const name of Object.values(this.settings.get().customGames)) names.add(name);
+      const current = this.games.current();
+      if (current) names.add(current.name);
+      for (const name of Object.values(KNOWN_GAMES)) names.add(name);
+      return [...names].sort((a, b) => a.localeCompare(b));
+    });
     ipcMain.handle('games:add', async (_e, exe: string, name: string) => {
       const key = String(exe).trim().toLowerCase();
       if (!key) return;
@@ -616,13 +767,13 @@ class KineApp {
       const primary = screen.getPrimaryDisplay().id;
       return screen.getAllDisplays().map((d, i) => ({
         id: String(d.id),
-        label: `${d.label || `Obrazovka ${i + 1}`} (${d.size.width}×${d.size.height})`,
+        label: `${d.label || this.t('displayN', { n: i + 1 })} (${d.size.width}×${d.size.height})`,
         width: d.size.width,
         height: d.size.height,
         primary: d.id === primary,
       }));
     });
-    ipcMain.handle('hotkey:available', (_e, accelerator: string) => this.hotkeyAvailable(accelerator));
+    ipcMain.handle('hotkey:available', (_e, hotkey: string) => this.hotkeys.available(String(hotkey)));
 
     ipcMain.handle('review:clips', (_e, sessionId: string) => this.library.bySession(sessionId));
     ipcMain.handle('review:done', (_e, requests: { clipId: string; visibility: Visibility; title?: string }[]) => {
@@ -636,14 +787,28 @@ class KineApp {
     ipcMain.handle('app:openExternal', (_e, url: string) => {
       if (/^https?:\/\//.test(url)) void shell.openExternal(url);
     });
+    ipcMain.handle('app:openKine', (_e, path: string) => this.openKine(typeof path === 'string' ? path : ''));
     ipcMain.handle('app:quit', () => this.quit());
     ipcMain.handle('capture:toggle', () => this.onToggleHotkey());
   }
 
+  /**
+   * Odkazy kine://…: "link" dokončí přihlášení přes prohlížeč,
+   * "open?tab=clips" / "clips" otevře klipy, "settings" nastavení -
+   * i z webu Kine běžícího v okně appky.
+   */
   async handleDeepLink(url: string): Promise<void> {
     try {
       const handled = await this.auth.handleDeepLink(url);
-      if (handled) this.openSettings('account');
+      if (handled) {
+        this.openSettings('account');
+        return;
+      }
+      const parsed = new URL(url);
+      const target = (parsed.hostname || parsed.pathname.replace(/^\/+/, '')).toLowerCase();
+      const tab = parsed.searchParams.get('tab') ?? (target === 'open' ? 'clips' : target);
+      if (['clips', 'settings', 'games', 'upload', 'account', 'about'].includes(tab)) this.openSettings(tab);
+      else if (target === 'kine') this.openKine(parsed.searchParams.get('path') ?? '');
     } catch (e) {
       log(`kine:// odkaz: ${(e as Error).message}`);
       dialog.showErrorBox('Kine', (e as Error).message);
@@ -652,6 +817,7 @@ class KineApp {
 
   quit(): void {
     log('konec');
+    this.helper?.stop();
     void this.capture.stop().finally(() => {
       this.toast.destroy();
       app.exit(0);
@@ -665,6 +831,7 @@ const kine = new KineApp();
 app.on('second-instance', (_e, argv) => {
   const link = argv.find((a) => a.startsWith('kine://'));
   if (link) void kine.handleDeepLink(link);
+  else if (kine.settings?.get().appMode === 'full' && kine.settings.get().onboarded) kine.openKine();
   else kine.openSettings();
 });
 
@@ -679,6 +846,7 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  kine.helper?.stop();
 });
 
 void app.whenReady().then(async () => {
@@ -687,7 +855,7 @@ void app.whenReady().then(async () => {
     await kine.start();
   } catch (e) {
     log(`start selhal: ${(e as Error).stack ?? (e as Error).message}`);
-    dialog.showErrorBox('Kine', `Appka se nespustila: ${(e as Error).message}`);
+    dialog.showErrorBox('Kine', `The app could not start: ${(e as Error).message}`);
     app.exit(1);
   }
 });

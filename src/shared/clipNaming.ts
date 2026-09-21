@@ -3,8 +3,8 @@
  *
  * Soubor: "Kine 2026-09-21 20-14-05 CS2.mp4" - řadí se podle času, nese
  * hru, a nemá v sobě nic, co by Windows nebo macOS odmítly.
- * Název na Kine: "CS2 · klip 21. 9. 20:14" - krátký, hráč si ho může
- * v okýnku po hře přepsat.
+ * Název na Kine: "CS2 · clip 21. 9. 20:14" - krátký, hráč si ho může
+ * v okýnku po hře přepsat. Slovo "clip" je v jazyce appky (i18n clipWord).
  */
 
 export function pad2(n: number): string {
@@ -19,7 +19,7 @@ export function safeFilePart(text: string, max = 40): string {
     .trim()
     .slice(0, max)
     .trim();
-  return cleaned || 'klip';
+  return cleaned || 'clip';
 }
 
 export function clipFileBase(at: Date, game: string | null): string {
@@ -27,9 +27,10 @@ export function clipFileBase(at: Date, game: string | null): string {
   return game ? `Kine ${stamp} ${safeFilePart(game)}` : `Kine ${stamp}`;
 }
 
-export function defaultClipTitle(at: Date, game: string | null, lang: 'cs' | 'en'): string {
+/** Výchozí název na Kine; `clipWord` je slovo "klip" v jazyce appky. */
+export function defaultClipTitle(at: Date, game: string | null, clipWord = 'clip'): string {
   const time = `${at.getDate()}. ${at.getMonth() + 1}. ${pad2(at.getHours())}:${pad2(at.getMinutes())}`;
-  const word = lang === 'cs' ? 'klip' : 'clip';
+  const word = clipWord || 'clip';
   return game ? `${game} · ${word} ${time}` : `${word[0].toUpperCase()}${word.slice(1)} ${time}`;
 }
 

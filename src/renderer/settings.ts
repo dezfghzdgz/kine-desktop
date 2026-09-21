@@ -1,40 +1,54 @@
 import type { KineBridge } from '../preload/preload';
-import type { Clip, DisplayInfo, ProcessInfo, Settings, Status } from '../shared/types';
-import { makeT, type Key } from '../shared/i18n';
-import { acceleratorFromKey, acceleratorLabel } from '../shared/accelerator';
+import type { Clip, DisplayInfo, GameSource, Lang, ProcessInfo, Settings, Status } from '../shared/types';
+import { LANGS } from '../shared/types';
+import { LANG_NAMES, makeT, type Key } from '../shared/i18n';
+import { HotkeyRecorder, formatHotkey, hotkeyLabel } from '../shared/hotkeys';
 import { suggestedMbps } from '../shared/settingsSchema';
 import { applyBrandColor, clipOptionsFor, maxClipSecondsFor } from '../shared/plan';
-import { clear, clipMeta, fileUrl, formatDuration, h } from './ui';
+import { clear, clipMeta, errorText, fileUrl, formatDate, formatDuration, h, inlinePlayer } from './ui';
 
 /**
- * Okno nastavení + průvodce při prvním spuštění + knihovna klipů.
+ * Hlavní okno: klipy (první záložka), nastavení, hry, nahrávání, účet,
+ * o appce + průvodce při prvním spuštění.
  *
  * Bez knihovny pro UI: stránka se po každé změně vykreslí znovu z dat
  * (settings, status, clips). Změny se ukládají hned, žádné "Uložit".
+ * Přehrávač klipu žije ve stejném okně - karta se roztáhne a hraje.
  */
 declare const window: Window & { kine: KineBridge };
 const kine = window.kine;
 const app = document.getElementById('app') as HTMLDivElement;
 
-type Tab = 'account' | 'clips' | 'games' | 'upload' | 'library' | 'about';
-const TABS: Tab[] = ['account', 'clips', 'games', 'upload', 'library', 'about'];
+type Tab = 'clips' | 'settings' | 'games' | 'upload' | 'account' | 'about';
+const TABS: Tab[] = ['clips', 'settings', 'games', 'upload', 'account', 'about'];
+const TAB_KEYS: Record<Tab, Key> = { clips: 'tabClips', settings: 'tabSettings', games: 'tabGames', upload: 'tabUpload', account: 'tabAccount', about: 'tabAbout' };
+
+type DateFilter = 'all' | 'today' | 'week' | 'month';
 
 let settings: Settings;
 let status: Status;
 let clips: Clip[] = [];
 let displays: DisplayInfo[] = [];
 let processes: ProcessInfo[] | null = null;
-let currentGame: { name: string; exe: string } | null = null;
+let currentGame: { name: string; exe: string; source: GameSource } | null = null;
+let gameNames: string[] = [];
 let tab: Tab = 'clips';
 let wizardStep: number | null = null;
 let authWaiting = false;
 let authError: string | null = null;
 let hotkeyRecording: 'clipHotkey' | 'toggleHotkey' | null = null;
 let hotkeyError: string | null = null;
+const recorder = new HotkeyRecorder();
 let updateResult: { status: string; version?: string } | null = null;
 let confirmDelete: string | null = null;
 let renaming: string | null = null;
+let editingGame: string | null = null;
 let addGameOpen = false;
+let namingGame = false;
+let playing: string | null = null;
+const players = new Map<string, HTMLElement>();
+const filters: { game: string; date: DateFilter; query: string } = { game: 'all', date: 'all', query: '' };
+let focusSearch = false;
 
 const t = (key: Key, vars?: Record<string, string | number>) => makeT(settings.lang)(key, vars);
 
@@ -46,9 +60,11 @@ async function init() {
   if (!settings.onboarded || wanted === 'wizard') wizardStep = 0;
   else if (wanted && TABS.includes(wanted as Tab)) tab = wanted as Tab;
   render();
+  void refreshGameNames();
 
   kine.onSettings((s) => {
     settings = s;
+    document.documentElement.lang = s.lang;
     render();
   });
   kine.onStatus((s) => {
@@ -60,7 +76,9 @@ async function init() {
   });
   kine.onClips((c) => {
     clips = c;
+    if (playing && !clips.some((x) => x.id === playing)) playing = null;
     render();
+    void refreshGameNames();
   });
   kine.onAuthWaiting((w) => {
     authWaiting = w;
@@ -71,9 +89,29 @@ async function init() {
       tab = target as Tab;
       wizardStep = null;
       render();
+    } else if (target === 'wizard') {
+      wizardStep = 0;
+      render();
     }
   });
   document.addEventListener('keydown', onKeyDown, true);
+  document.addEventListener('keyup', onKeyUp, true);
+  document.addEventListener('mousedown', onMouseDown, true);
+  document.addEventListener('mouseup', onMouseUp, true);
+  document.addEventListener('contextmenu', (e) => {
+    if (hotkeyRecording) e.preventDefault();
+  });
+  document.addEventListener('auxclick', (e) => {
+    if (hotkeyRecording) e.preventDefault();
+  });
+}
+
+async function refreshGameNames() {
+  try {
+    gameNames = await kine.gameNames();
+  } catch {
+    gameNames = [];
+  }
 }
 
 function update(patch: Partial<Settings>) {
@@ -89,27 +127,70 @@ function onKeyDown(e: KeyboardEvent) {
   e.preventDefault();
   e.stopPropagation();
   if (e.key === 'Escape') {
-    hotkeyRecording = null;
+    stopRecording();
+    return;
+  }
+  if (e.repeat) return;
+  recorder.keyDown(e.code);
+  render();
+}
+
+function onKeyUp(e: KeyboardEvent) {
+  if (!hotkeyRecording) return;
+  e.preventDefault();
+  e.stopPropagation();
+  finishIfDone(recorder.keyUp(e.code));
+}
+
+function onMouseDown(e: MouseEvent) {
+  if (!hotkeyRecording) return;
+  if (e.button === 0 || e.button === 2) return; // levé/pravé tlačítko ovládá okno, ne zkratku
+  e.preventDefault();
+  e.stopPropagation();
+  recorder.mouseDown(e.button);
+  render();
+}
+
+function onMouseUp(e: MouseEvent) {
+  if (!hotkeyRecording) return;
+  if (e.button === 0 || e.button === 2) return;
+  e.preventDefault();
+  e.stopPropagation();
+  finishIfDone(recorder.mouseUp(e.button));
+}
+
+function stopRecording() {
+  hotkeyRecording = null;
+  hotkeyError = null;
+  recorder.reset();
+  render();
+}
+
+function finishIfDone(done: ReturnType<HotkeyRecorder['keyUp']>) {
+  if (!done || !hotkeyRecording) {
     render();
     return;
   }
-  const acc = acceleratorFromKey(e);
-  if (!acc) return;
   const field = hotkeyRecording;
-  void kine.hotkeyAvailable(acc).then((ok) => {
-    if (!ok) {
-      hotkeyError = t('hotkeyInUse');
+  const text = formatHotkey(done);
+  void kine.hotkeyAvailable(text).then((result) => {
+    if (result !== 'ok') {
+      hotkeyError =
+        result === 'in-use' ? t('hotkeyInUse') : result === 'unsupported' ? t('hotkeyChordUnsupported') : result === 'helper-down' ? t('hotkeyHelperDown') : result;
+      recorder.reset();
       render();
       return;
     }
     hotkeyError = null;
     hotkeyRecording = null;
-    update({ [field]: acc } as Partial<Settings>);
+    update({ [field]: text } as Partial<Settings>);
   });
 }
 
 function hotkeyField(field: 'clipHotkey' | 'toggleHotkey', label: string, hint?: string) {
   const recording = hotkeyRecording === field;
+  const held = recording ? recorder.current() : null;
+  const heldText = held && held.mods.length + held.keys.length + held.mouse.length > 0 ? hotkeyLabel(formatHotkey(held)) : '';
   return h(
     'div',
     { class: 'field' },
@@ -124,13 +205,16 @@ function hotkeyField(field: 'clipHotkey' | 'toggleHotkey', label: string, hint?:
           tabindex: '0',
           role: 'button',
           onclick: () => {
+            if (hotkeyRecording === field) return;
             hotkeyRecording = field;
             hotkeyError = null;
+            recorder.reset();
             render();
           },
         },
-        recording ? t('hotkeyPress') : acceleratorLabel(settings[field])
+        recording ? (heldText ? t('hotkeyHold', { keys: heldText }) : t('hotkeyPress')) : hotkeyLabel(settings[field])
       ),
+      recording ? h('span', { class: 'faint' }, t('hotkeyEsc')) : null,
       hotkeyError && recording ? h('span', { class: 'error' }, hotkeyError) : null
     ),
     hint ? h('p', { class: 'hint' }, hint) : null
@@ -141,16 +225,30 @@ function hotkeyField(field: 'clipHotkey' | 'toggleHotkey', label: string, hint?:
 
 function render() {
   applyBrandColor(document.documentElement, settings.brandColor || null);
+  const main = app.querySelector('.main');
+  const scrollTop = main ? main.scrollTop : 0;
+  const active = document.activeElement as HTMLElement | null;
+  const searchHadFocus = focusSearch || (active?.classList.contains('clips-search') ?? false);
   clear(app);
   if (wizardStep !== null) {
     app.append(h('div', { class: 'main' }, renderWizard()));
     return;
   }
-  app.append(renderSide(), h('div', { class: 'main' }, h('div', { class: 'page' }, renderTab())));
+  const newMain = h('div', { class: 'main' }, h('div', { class: `page ${tab === 'clips' ? 'wide' : ''}` }, renderTab()));
+  app.append(renderSide(), newMain);
+  newMain.scrollTop = scrollTop;
+  if (searchHadFocus && tab === 'clips') {
+    const input = newMain.querySelector('.clips-search') as HTMLInputElement | null;
+    if (input) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+  }
+  focusSearch = false;
 }
 
-function hasPlus(): boolean {
-  return status.account?.plan === 'plus';
+function clipsPlus(): boolean {
+  return status.account?.clipsPlus === true;
 }
 
 function maxClip(): number {
@@ -158,7 +256,7 @@ function maxClip(): number {
 }
 
 function plusLink(label?: string) {
-  return h('button', { class: 'small quiet', onclick: () => void kine.openExternal(`${settings.siteUrl}/plus`) }, label ?? t('plusLearnMore'));
+  return h('button', { class: 'small quiet', onclick: () => void kine.openKine('/plus') }, label ?? t('plusLearnMore'));
 }
 
 function statusText(): { text: string; cls: string } {
@@ -167,7 +265,7 @@ function statusText(): { text: string; cls: string } {
   if (status.capture === 'on' || status.capture === 'starting') {
     return { text: status.game ? t('trayCapturing', { game: status.game }) : t('trayCapturingNoGame'), cls: 'on' };
   }
-  if (settings.detection === 'manual') return { text: t('trayIdleManual', { hotkey: acceleratorLabel(settings.toggleHotkey) }), cls: '' };
+  if (settings.detection === 'manual') return { text: t('trayIdleManual', { hotkey: hotkeyLabel(settings.toggleHotkey) }), cls: '' };
   if (settings.detection === 'always') return { text: t('trayIdleAlways'), cls: '' };
   return { text: t('trayIdle'), cls: '' };
 }
@@ -188,9 +286,11 @@ function renderSide() {
             render();
           },
         },
-        t(`tab${name[0].toUpperCase()}${name.slice(1)}` as Key)
+        t(TAB_KEYS[name]),
+        name === 'clips' && clips.length > 0 ? h('span', { class: 'count' }, String(clips.length)) : null
       )
     ),
+    settings.appMode === 'full' ? h('button', { class: 'tab', onclick: () => void kine.openKine() }, t('trayOpenKine')) : null,
     h(
       'div',
       { class: 'status' },
@@ -198,6 +298,7 @@ function renderSide() {
       status.uploadsPending > 0
         ? h('div', {}, status.uploadsPaused ? t('trayUploadsPaused', { count: status.uploadsPending }) : t('trayUploads', { count: status.uploadsPending }))
         : null,
+      ...status.hotkeyProblems.map((p) => h('div', { class: 'warn' }, p)),
       h('div', {}, status.account ? `@${status.account.username}` : t('trayNotLoggedIn'))
     )
   );
@@ -205,16 +306,16 @@ function renderSide() {
 
 function renderTab() {
   switch (tab) {
-    case 'account':
-      return renderAccount();
     case 'clips':
       return renderClips();
+    case 'settings':
+      return renderSettings();
     case 'games':
       return renderGames();
     case 'upload':
       return renderUpload();
-    case 'library':
-      return renderLibrary();
+    case 'account':
+      return renderAccount();
     case 'about':
       return renderAbout();
   }
@@ -222,14 +323,22 @@ function renderTab() {
 
 // ---- účet ---------------------------------------------------------------------------
 
+function planName(): string {
+  const a = status.account;
+  if (!a) return t('planFree');
+  const base = a.plan === 'kine' ? t('planKine') : a.plan === 'clips' ? t('planClips') : a.plan === 'all' || a.plan === 'plus' ? t('planAll') : t('planFree');
+  if (a.plan !== 'free' && a.planUntil) return t('planUntil', { plan: base, date: formatDate(a.planUntil, settings.lang) });
+  return base;
+}
+
 function renderAccount(inWizard = false) {
   const account = status.account;
   const container = h('div', { class: 'stack' });
   if (!inWizard) container.append(h('h1', {}, t('accountTitle')));
 
   if (account) {
-    const plus = account.plan === 'plus';
-    const until = account.planUntil ? new Date(account.planUntil).toLocaleDateString(settings.lang === 'cs' ? 'cs-CZ' : 'en-GB') : null;
+    const paid = account.plan !== 'free';
+    const hint = account.clipsPlus ? t('planClipsHint', { max: account.maxClipSeconds }) : account.kinePlus ? t('planKineHint') : t('planFreeHint', { max: account.maxClipSeconds });
     container.append(
       h(
         'div',
@@ -243,10 +352,10 @@ function renderAccount(inWizard = false) {
         h(
           'div',
           { class: 'spread' },
-          h('div', { class: 'row' }, plus ? h('span', { class: 'plan-pill' }, 'PLUS') : null, h('b', {}, plus ? (until ? t('planPlusUntil', { date: until }) : t('planPlus')) : t('planFree'))),
-          plusLink(plus ? 'Kine Plus' : undefined)
+          h('div', { class: 'row' }, paid ? h('span', { class: 'plan-pill' }, 'PLUS') : null, h('b', {}, planName())),
+          plusLink()
         ),
-        h('p', { class: 'hint', style: 'margin:0' }, plus ? t('planPlusHint', { max: account.maxClipSeconds }) : t('planFreeHint', { max: account.maxClipSeconds }))
+        h('p', { class: 'hint', style: 'margin:0' }, hint)
       )
     );
   } else {
@@ -265,7 +374,7 @@ function renderAccount(inWizard = false) {
           void kine
             .loginPassword(email.value, password.value)
             .catch((err: Error) => {
-              authError = t('accountLoginFailed', { message: cleanError(err) });
+              authError = t('accountLoginFailed', { message: errorText(err, t) });
             })
             .finally(() => render());
         },
@@ -296,7 +405,7 @@ function renderAccount(inWizard = false) {
                   onclick: () => {
                     authError = null;
                     void kine.loginBrowser().catch((err: Error) => {
-                      authError = t('accountLinkFailed', { message: cleanError(err) });
+                      authError = t('accountLinkFailed', { message: errorText(err, t) });
                       render();
                     });
                   },
@@ -324,15 +433,26 @@ function renderAccount(inWizard = false) {
   return container;
 }
 
-function cleanError(err: unknown): string {
-  const message = err instanceof Error ? err.message : String(err);
-  // Electron obaluje chyby z hlavního procesu: "Error invoking remote method '...': Error: text"
-  return message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+// ---- nastavení (zkratky, kvalita, režim) ------------------------------------------------
+
+function languageSelect(big = false) {
+  return h(
+    'select',
+    { style: big ? '' : 'width:auto', onchange: (e: Event) => update({ lang: (e.target as HTMLSelectElement).value as Lang }) },
+    ...LANGS.map((code) => h('option', { value: code, selected: settings.lang === code }, LANG_NAMES[code]))
+  );
 }
 
-// ---- klipy (zkratka, kvalita) ------------------------------------------------------------
+function modeRadios() {
+  return h(
+    'div',
+    { class: 'radio-group' },
+    radio('appMode', 'clipper', t('modeClipper'), t('modeClipperHint')),
+    radio('appMode', 'full', t('modeFull'), t('modeFullHint'))
+  );
+}
 
-function renderClips() {
+function renderSettings() {
   const limit = maxClip();
   const seconds = Math.min(settings.clipSeconds, limit);
   const secondsOptions = [...clipOptionsFor(status.account?.plan)].filter((n) => n <= limit) as number[];
@@ -343,12 +463,15 @@ function renderClips() {
   return h(
     'div',
     { class: 'stack' },
-    h('h1', {}, t('clipsTitle')),
+    h('h1', {}, t('settingsTitle')),
     h(
       'div',
       { class: 'panel stack' },
+      h('h2', {}, t('hotkeysTitle')),
       hotkeyField('clipHotkey', t('clipHotkey'), t('clipHotkeyHint')),
       hotkeyField('toggleHotkey', t('toggleHotkey')),
+      win && !status.chordsSupported ? h('p', { class: 'hint warn' }, t('hotkeyHelperDown')) : null,
+      !win ? h('p', { class: 'hint' }, t('hotkeyChordUnsupported')) : null,
       h(
         'div',
         { class: 'field' },
@@ -370,8 +493,8 @@ function renderClips() {
             onchange: (e: Event) => update({ clipSeconds: Math.min(limit, Number((e.target as HTMLInputElement).value)) }),
           })
         ),
-        h('p', { class: 'hint' }, t('clipSecondsHint') + ' ' + (hasPlus() ? t('clipSecondsPlusHint', { max: limit }) : t('clipSecondsFreeHint', { max: limit }))),
-        hasPlus() ? null : h('div', {}, plusLink())
+        h('p', { class: 'hint' }, t('clipSecondsHint') + ' ' + (clipsPlus() ? t('clipSecondsPlusHint', { max: limit }) : t('clipSecondsFreeHint', { max: limit }))),
+        clipsPlus() ? null : h('div', {}, plusLink())
       )
     ),
     h(
@@ -450,7 +573,7 @@ function renderClips() {
       'div',
       { class: 'panel stack' },
       h('h2', {}, t('audioTitle')),
-      checkbox('systemAudio', t('systemAudio'), win ? undefined : 'Windows only', !win),
+      checkbox('systemAudio', t('systemAudio'), win ? undefined : t('windowsOnly'), !win),
       checkbox('microphone', t('microphone'), t('microphoneHint'))
     ),
     h(
@@ -465,7 +588,9 @@ function renderClips() {
         h('button', { class: 'small', onclick: () => void kine.openClipsDir() }, t('clipsDirOpen'))
       ),
       checkbox('toast', t('toastSetting'), t('toastSettingHint'))
-    )
+    ),
+    h('div', { class: 'panel stack' }, h('h2', {}, t('modeTitle')), modeRadios()),
+    h('div', { class: 'panel' }, h('label', {}, t('language'), languageSelect()))
   );
 }
 
@@ -491,8 +616,9 @@ function radio<K extends keyof Settings>(field: K, value: Settings[K], label: st
 
 function renderGames() {
   const custom = Object.entries(settings.customGames);
-  const exeInput = h('input', { type: 'text', placeholder: 'hra.exe' }) as HTMLInputElement;
+  const exeInput = h('input', { type: 'text', placeholder: 'game.exe' }) as HTMLInputElement;
   const nameInput = h('input', { type: 'text' }) as HTMLInputElement;
+  const win = kine.platform === 'win32';
 
   const addForm = h(
     'div',
@@ -528,7 +654,8 @@ function renderGames() {
           },
         },
         t('addGameFromRunning')
-      )
+      ),
+      h('button', { class: 'small quiet', onclick: () => { addGameOpen = false; render(); } }, t('cancel'))
     ),
     processes
       ? h(
@@ -544,12 +671,44 @@ function renderGames() {
                   nameInput.focus();
                 },
               },
-              p.exe
+              p.exe,
+              p.hasWindow ? h('span', { class: 'faint', style: 'margin-left:8px' }, t('hasWindow')) : null
             )
           )
         )
       : null
   );
+
+  // Pojmenování právě běžící hry (poznané podle celé obrazovky nebo ze seznamu).
+  const nameCurrentInput = h('input', { type: 'text', value: currentGame?.name ?? '', style: 'width:auto;min-width:220px' }) as HTMLInputElement;
+  const nowRunning = currentGame
+    ? h(
+        'div',
+        { class: 'stack' },
+        h('span', { class: 'faint' }, currentGame.source === 'fullscreen' ? t('gameNowRunningFullscreen', { game: currentGame.name }) : t('gameNowRunning', { game: currentGame.name })),
+        currentGame.source !== 'steam' && !currentGame.exe.startsWith('steam:')
+          ? namingGame
+            ? h(
+                'div',
+                { class: 'row' },
+                nameCurrentInput,
+                h(
+                  'button',
+                  {
+                    class: 'small primary',
+                    onclick: () => {
+                      namingGame = false;
+                      void kine.addGame(currentGame!.exe, nameCurrentInput.value.trim() || currentGame!.name);
+                    },
+                  },
+                  t('save')
+                ),
+                h('button', { class: 'small quiet', onclick: () => { namingGame = false; render(); } }, t('cancel'))
+              )
+            : h('div', {}, h('button', { class: 'small', onclick: () => { namingGame = true; render(); } }, t('gameNameThis')))
+          : null
+      )
+    : h('span', { class: 'faint' }, t('gameNoneRunning'));
 
   return h(
     'div',
@@ -560,12 +719,19 @@ function renderGames() {
       { class: 'panel radio-group' },
       radio('detection', 'games', t('detectionGames'), t('detectionGamesHint')),
       radio('detection', 'always', t('detectionAlways'), t('detectionAlwaysHint')),
-      radio('detection', 'manual', t('detectionManual'), t('detectionManualHint', { hotkey: acceleratorLabel(settings.toggleHotkey) }))
+      radio('detection', 'manual', t('detectionManual'), t('detectionManualHint', { hotkey: hotkeyLabel(settings.toggleHotkey) }))
     ),
     h(
       'div',
       { class: 'panel stack' },
-      h('div', { class: 'spread' }, h('h2', { style: 'margin:0' }, t('customGamesTitle')), h('span', { class: 'faint' }, currentGame ? t('gameNowRunning', { game: currentGame.name }) : t('gameNoneRunning'))),
+      checkbox('detectFullscreen', t('detectFullscreen'), t('detectFullscreenHint'), !win),
+      win && !status.chordsSupported ? h('p', { class: 'hint warn' }, t('gamesHelperMissing')) : null
+    ),
+    h(
+      'div',
+      { class: 'panel stack' },
+      h('h2', { style: 'margin:0' }, t('customGamesTitle')),
+      nowRunning,
       h('p', { class: 'hint' }, t('customGamesHint')),
       custom.length === 0
         ? h('p', { class: 'faint' }, t('customGamesEmpty'))
@@ -585,9 +751,10 @@ function renderGames() {
 
 // ---- nahrávání ------------------------------------------------------------------------
 
-const VIDEO_LANGS: [string, string][] = [['cs', 'Čeština'], ['sk', 'Slovenčina'], ['en', 'English'], ['de', 'Deutsch'], ['pl', 'Polski'], ['es', 'Español'], ['fr', 'Français'], ['uk', 'Українська']];
+const VIDEO_LANGS: [string, string][] = [['en', 'English'], ['cs', 'Čeština'], ['sk', 'Slovenčina'], ['de', 'Deutsch'], ['pl', 'Polski'], ['es', 'Español'], ['fr', 'Français'], ['uk', 'Українська']];
 
 function renderUpload() {
+  const price = status.account?.prices.clips ?? status.account?.prices.all ?? null;
   return h(
     'div',
     { class: 'stack' },
@@ -596,21 +763,16 @@ function renderUpload() {
       'div',
       { class: 'panel radio-group' },
       radio('afterGame', 'review', t('afterGameReview')),
-      hasPlus()
+      clipsPlus()
         ? radio('afterGame', 'auto', t('afterGameAuto'), t('afterGameAutoHint'))
         : h(
             'label',
             { class: 'check locked' },
             h('input', { type: 'radio', name: 'afterGame', disabled: true }),
-            h(
-              'span',
-              {},
-              t('afterGameAutoLocked'),
-              h('span', { class: 'sub' }, status.account?.plusPriceLabel ? t('plusOnlyPrice', { price: status.account.plusPriceLabel }) : t('plusOnly'))
-            )
+            h('span', {}, t('afterGameAutoLocked'), h('span', { class: 'sub' }, price ? t('plusOnlyPrice', { price }) : t('plusOnly')))
           ),
       radio('afterGame', 'none', t('afterGameNone')),
-      hasPlus() ? null : h('div', { class: 'row' }, h('span', { class: 'plan-pill' }, 'PLUS'), plusLink())
+      clipsPlus() ? null : h('div', { class: 'row' }, h('span', { class: 'plan-pill' }, 'PLUS'), plusLink())
     ),
     h(
       'div',
@@ -646,7 +808,7 @@ function renderUpload() {
   );
 }
 
-// ---- knihovna ---------------------------------------------------------------------------
+// ---- klipy ---------------------------------------------------------------------------------
 
 function uploadState(clip: Clip) {
   const u = clip.upload;
@@ -658,18 +820,168 @@ function uploadState(clip: Clip) {
   return h('div', { class: 'state error' }, t('uploadError', { message: u.message }));
 }
 
-function renderLibrary() {
-  const list = clips;
-  const container = h('div', { class: 'stack' }, h('div', { class: 'spread' }, h('h1', {}, t('libraryTitle')), h('div', { class: 'row' }, h('button', { class: 'small', onclick: () => void kine.openClipsDir() }, t('clipsDirOpen')))));
-  if (list.length === 0) {
-    container.append(h('div', { class: 'empty' }, t('libraryEmpty', { hotkey: acceleratorLabel(settings.clipHotkey) })));
+function dateFrom(filter: DateFilter): number {
+  const now = new Date();
+  if (filter === 'today') return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  if (filter === 'week') return now.getTime() - 7 * 24 * 3600 * 1000;
+  if (filter === 'month') return now.getTime() - 30 * 24 * 3600 * 1000;
+  return 0;
+}
+
+function filteredClips(): Clip[] {
+  const since = dateFrom(filters.date);
+  const q = filters.query.trim().toLowerCase();
+  return clips.filter((c) => {
+    if (filters.game === 'none' && c.game) return false;
+    if (filters.game !== 'all' && filters.game !== 'none' && c.game !== filters.game) return false;
+    if (since && new Date(c.createdAt).getTime() < since) return false;
+    if (q && !`${c.title} ${c.game ?? ''}`.toLowerCase().includes(q)) return false;
+    return true;
+  });
+}
+
+function togglePlay(clip: Clip) {
+  if (playing === clip.id) {
+    playing = null;
+  } else {
+    playing = clip.id;
+    players.clear();
+  }
+  render();
+}
+
+function playerFor(clip: Clip): HTMLElement {
+  // Stejný prvek <video> přežije překreslení - jinak by se video po každé změně stavu rozjelo od začátku.
+  let el = players.get(clip.id);
+  if (!el) {
+    el = inlinePlayer(clip, t('playerClose'), () => {
+      playing = null;
+      players.clear();
+      render();
+    });
+    players.set(clip.id, el);
+  }
+  return el;
+}
+
+function gameChip(clip: Clip) {
+  if (editingGame === clip.id) {
+    const input = h('input', { type: 'text', class: 'title-edit', list: 'game-names', value: clip.game ?? '', placeholder: t('clipGamePrompt') }) as HTMLInputElement;
+    const commit = () => {
+      if (editingGame !== clip.id) return;
+      editingGame = null;
+      void kine.setClipGame(clip.id, input.value.trim() || null);
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') commit();
+      if (e.key === 'Escape') {
+        editingGame = null;
+        render();
+      }
+    });
+    input.addEventListener('blur', () => setTimeout(commit, 120));
+    setTimeout(() => input.focus(), 0);
+    return h(
+      'div',
+      { class: 'row', style: 'gap:6px' },
+      input,
+      h('button', { class: 'small quiet', onmousedown: (e: Event) => e.preventDefault(), onclick: () => { editingGame = null; void kine.setClipGame(clip.id, null); } }, t('clipGameNone'))
+    );
+  }
+  return h(
+    'button',
+    { class: 'chip', title: t('clipGameChange'), onclick: () => { editingGame = clip.id; render(); } },
+    '🎮 ',
+    clip.game ?? t('clipsNoGame'),
+    h('span', { class: 'faint' }, ' ▾')
+  );
+}
+
+function renderClips() {
+  const games = [...new Set(clips.map((c) => c.game).filter((g): g is string => !!g))].sort((a, b) => a.localeCompare(b));
+  const hasNoGame = clips.some((c) => !c.game);
+  const list = filteredClips();
+  const filtersActive = filters.game !== 'all' || filters.date !== 'all' || filters.query.trim() !== '';
+
+  const container = h(
+    'div',
+    { class: 'stack' },
+    h(
+      'div',
+      { class: 'spread' },
+      h('div', { class: 'row' }, h('h1', { style: 'margin:0' }, t('clipsTitle')), h('span', { class: 'faint' }, t('clipsCount', { count: list.length }))),
+      h('div', { class: 'row' }, h('button', { class: 'small', onclick: () => void kine.openClipsDir() }, t('clipsDirOpen')))
+    ),
+    h('datalist', { id: 'game-names' }, ...gameNames.map((name) => h('option', { value: name })))
+  );
+
+  if (clips.length === 0) {
+    container.append(h('div', { class: 'empty' }, t('clipsEmpty', { hotkey: hotkeyLabel(settings.clipHotkey) })));
     return container;
   }
+
+  container.append(
+    h(
+      'div',
+      { class: 'filters' },
+      h(
+        'label',
+        {},
+        t('clipsFilterGame'),
+        h(
+          'select',
+          { onchange: (e: Event) => { filters.game = (e.target as HTMLSelectElement).value; render(); } },
+          h('option', { value: 'all', selected: filters.game === 'all' }, t('clipsFilterAll')),
+          ...games.map((g) => h('option', { value: g, selected: filters.game === g }, g)),
+          hasNoGame ? h('option', { value: 'none', selected: filters.game === 'none' }, t('clipsNoGame')) : null
+        )
+      ),
+      h(
+        'label',
+        {},
+        t('clipsFilterDate'),
+        h(
+          'select',
+          { onchange: (e: Event) => { filters.date = (e.target as HTMLSelectElement).value as DateFilter; render(); } },
+          h('option', { value: 'all', selected: filters.date === 'all' }, t('dateAll')),
+          h('option', { value: 'today', selected: filters.date === 'today' }, t('dateToday')),
+          h('option', { value: 'week', selected: filters.date === 'week' }, t('dateWeek')),
+          h('option', { value: 'month', selected: filters.date === 'month' }, t('dateMonth'))
+        )
+      ),
+      h(
+        'label',
+        { class: 'grow' },
+        ' ',
+        h('input', {
+          type: 'text',
+          class: 'clips-search',
+          placeholder: t('clipsSearch'),
+          value: filters.query,
+          oninput: (e: Event) => {
+            filters.query = (e.target as HTMLInputElement).value;
+            focusSearch = true;
+            render();
+          },
+        })
+      ),
+      filtersActive
+        ? h('button', { class: 'small quiet', style: 'align-self:flex-end', onclick: () => { filters.game = 'all'; filters.date = 'all'; filters.query = ''; render(); } }, t('clipsClearFilters'))
+        : null
+    )
+  );
+
+  if (list.length === 0) {
+    container.append(h('div', { class: 'empty' }, t('clipsNoMatch')));
+    return container;
+  }
+
   const grid = h('div', { class: 'clips' });
   for (const clip of list) {
     const canUpload = !clip.upload || clip.upload.state === 'error';
+    const isPlaying = playing === clip.id;
     const actions = h('div', { class: 'actions' });
-    actions.append(h('button', { class: 'small', onclick: () => void kine.openClip(clip.id) }, t('libraryOpen')));
+    actions.append(h('button', { class: `small ${isPlaying ? 'quiet' : ''}`, onclick: () => togglePlay(clip) }, isPlaying ? t('playerClose') : '▶ ' + t('libraryOpen')));
     if (canUpload) {
       actions.append(
         h(
@@ -689,7 +1001,7 @@ function renderLibrary() {
     actions.append(
       h('button', { class: 'small quiet', onclick: () => { renaming = clip.id; render(); } }, t('libraryRename')),
       confirmDelete === clip.id
-        ? h('button', { class: 'small danger', onclick: () => { confirmDelete = null; void kine.deleteClip(clip.id); } }, t('libraryDeleteConfirm'))
+        ? h('button', { class: 'small danger', onclick: () => { confirmDelete = null; if (playing === clip.id) playing = null; void kine.deleteClip(clip.id); } }, t('libraryDeleteConfirm'))
         : h('button', { class: 'small quiet danger', onclick: () => { confirmDelete = clip.id; render(); setTimeout(() => { if (confirmDelete === clip.id) { confirmDelete = null; render(); } }, 4000); } }, t('libraryDelete'))
     );
 
@@ -719,14 +1031,34 @@ function renderLibrary() {
           })
         : h('div', { class: 'title', title: clip.title }, clip.title);
 
-    grid.append(
-      h(
-        'div',
-        { class: 'clip' },
-        h('div', { class: 'thumb', ondblclick: () => void kine.openClip(clip.id) }, clip.thumb ? h('img', { src: fileUrl(clip.thumb), alt: '' }) : null, h('span', { class: 'dur' }, formatDuration(clip.durationSeconds))),
-        h('div', { class: 'body' }, titleEl, h('div', { class: 'meta' }, [clip.game, clipMeta(clip, settings.lang)].filter(Boolean).join(' · ')), uploadState(clip), actions)
-      )
+    // Při přehrávání je název v liště přehrávače - v těle karty by byl dvakrát.
+    const body = h(
+      'div',
+      { class: 'body' },
+      isPlaying && renaming !== clip.id ? null : titleEl,
+      h('div', { class: 'row', style: 'gap:8px' }, gameChip(clip), h('span', { class: 'meta' }, clipMeta(clip, settings.lang))),
+      uploadState(clip),
+      actions
     );
+
+    if (isPlaying) {
+      grid.append(h('div', { class: 'clip playing' }, playerFor(clip), body));
+    } else {
+      grid.append(
+        h(
+          'div',
+          { class: 'clip' },
+          h(
+            'div',
+            { class: 'thumb', onclick: () => togglePlay(clip) },
+            clip.thumb ? h('img', { src: fileUrl(clip.thumb), alt: '' }) : null,
+            h('span', { class: 'play-badge' }, '▶'),
+            h('span', { class: 'dur' }, formatDuration(clip.durationSeconds))
+          ),
+          body
+        )
+      );
+    }
     if (renaming === clip.id) setTimeout(() => (titleEl as HTMLInputElement).focus?.(), 0);
   }
   container.append(grid);
@@ -764,7 +1096,7 @@ function renderAbout() {
           t('aboutCheckUpdate')
         ),
         h('button', { class: 'small quiet', onclick: () => void kine.openLogs() }, t('aboutLogs')),
-        h('button', { class: 'small quiet', onclick: () => void kine.openExternal(settings.siteUrl) }, t('trayOpenKine'))
+        h('button', { class: 'small quiet', onclick: () => void kine.openKine() }, t('trayOpenKine'))
       ),
       updateResult
         ? h(
@@ -780,71 +1112,65 @@ function renderAbout() {
           )
         : null
     ),
-    h(
-      'div',
-      { class: 'panel' },
-      h(
-        'label',
-        {},
-        'Jazyk / Language',
-        h(
-          'select',
-          { style: 'width:auto', onchange: (e: Event) => update({ lang: (e.target as HTMLSelectElement).value as Settings['lang'] }) },
-          h('option', { value: 'cs', selected: settings.lang === 'cs' }, 'Čeština'),
-          h('option', { value: 'en', selected: settings.lang === 'en' }, 'English')
-        )
-      )
-    ),
     h('div', { class: 'row' }, h('button', { class: 'quiet danger', onclick: () => void kine.quit() }, t('trayQuit')))
   );
 }
 
 // ---- průvodce ------------------------------------------------------------------------------
 
+const WIZARD_STEPS = 5;
+
 function renderWizard() {
   const step = wizardStep ?? 0;
-  const steps = h('div', { class: 'steps' }, ...[0, 1, 2, 3].map((i) => h('span', { class: i <= step ? 'done' : '' })));
+  const steps = h('div', { class: 'steps' }, ...Array.from({ length: WIZARD_STEPS }, (_, i) => h('span', { class: i <= step ? 'done' : '' })));
   const box = h('div', { class: 'wizard stack' }, steps);
+  const go = (n: number) => () => {
+    wizardStep = n;
+    render();
+  };
 
   if (step === 0) {
     box.append(
       h('div', { class: 'brand', style: 'padding:0 0 6px' }, h('span', { class: 'mark' }), 'Kine'),
       h('h1', {}, t('wizardWelcome')),
       h('p', { class: 'dim' }, t('wizardIntro', { seconds: settings.clipSeconds })),
+      h('h2', {}, t('wizardChooseLanguage')),
       h(
         'div',
-        { class: 'row' },
-        h(
-          'select',
-          { style: 'width:auto', onchange: (e: Event) => update({ lang: (e.target as HTMLSelectElement).value as Settings['lang'] }) },
-          h('option', { value: 'cs', selected: settings.lang === 'cs' }, 'Čeština'),
-          h('option', { value: 'en', selected: settings.lang === 'en' }, 'English')
-        ),
-        h('span', { class: 'grow' }),
-        h('button', { class: 'primary', onclick: () => { wizardStep = 1; render(); } }, t('next'))
-      )
+        { class: 'lang-grid' },
+        ...LANGS.map((code) =>
+          h('button', { class: `lang ${settings.lang === code ? 'active' : ''}`, onclick: () => update({ lang: code }) }, LANG_NAMES[code])
+        )
+      ),
+      h('div', { class: 'row' }, h('span', { class: 'grow' }), h('button', { class: 'primary', onclick: go(1) }, t('next')))
     );
   } else if (step === 1) {
+    box.append(
+      h('h1', {}, t('wizardStepMode')),
+      h('div', { class: 'panel' }, modeRadios()),
+      h('div', { class: 'spread' }, h('button', { class: 'quiet', onclick: go(0) }, t('back')), h('button', { class: 'primary', onclick: go(2) }, t('next')))
+    );
+  } else if (step === 2) {
     box.append(
       h('h1', {}, t('wizardStepAccount')),
       renderAccount(true),
       h(
         'div',
         { class: 'spread' },
-        h('button', { class: 'quiet', onclick: () => { wizardStep = 0; render(); } }, t('back')),
-        h('button', { class: status.account ? 'primary' : '', onclick: () => { wizardStep = 2; render(); } }, status.account ? t('next') : t('wizardSkipLogin'))
+        h('button', { class: 'quiet', onclick: go(1) }, t('back')),
+        h('button', { class: status.account ? 'primary' : '', onclick: go(3) }, status.account ? t('next') : t('wizardSkipLogin'))
       )
     );
-    if (status.account && step === 1) {
+    if (status.account) {
       // Po přihlášení se jde samo dál.
       setTimeout(() => {
-        if (wizardStep === 1 && status.account) {
-          wizardStep = 2;
+        if (wizardStep === 2 && status.account) {
+          wizardStep = 3;
           render();
         }
       }, 900);
     }
-  } else if (step === 2) {
+  } else if (step === 3) {
     box.append(
       h('h1', {}, t('wizardStepHotkey')),
       h(
@@ -865,19 +1191,25 @@ function renderWizard() {
       h(
         'div',
         { class: 'spread' },
-        h('button', { class: 'quiet', onclick: () => { wizardStep = 1; render(); } }, t('back')),
-        h('button', { class: 'primary', onclick: () => { wizardStep = 3; update({ onboarded: true }); } }, t('next'))
+        h('button', { class: 'quiet', onclick: go(2) }, t('back')),
+        h('button', { class: 'primary', onclick: () => { wizardStep = 4; update({ onboarded: true }); } }, t('next'))
       )
     );
   } else {
+    const full = settings.appMode === 'full';
     box.append(
       h('h1', {}, t('wizardDoneTitle')),
-      h('p', { class: 'dim' }, t('wizardDoneText', { hotkey: acceleratorLabel(settings.clipHotkey) })),
+      h('p', { class: 'dim' }, t(full ? 'wizardDoneTextFull' : 'wizardDoneText', { hotkey: hotkeyLabel(settings.clipHotkey) })),
       h(
         'div',
         { class: 'spread' },
-        h('button', { class: 'quiet', onclick: () => { wizardStep = null; tab = 'clips'; render(); } }, t('traySettings')),
-        h('button', { class: 'primary', onclick: () => window.close() }, t('wizardFinish'))
+        h('button', { class: 'quiet', onclick: () => { wizardStep = null; tab = 'clips'; render(); } }, t('tabClips')),
+        h(
+          'div',
+          { class: 'row' },
+          full ? h('button', { class: 'primary', onclick: () => { void kine.openKine(); window.close(); } }, t('wizardOpenKine')) : null,
+          h('button', { class: full ? '' : 'primary', onclick: () => window.close() }, t('wizardFinish'))
+        )
       )
     );
   }

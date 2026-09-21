@@ -4,7 +4,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ProcessInfo, Settings } from '../shared/types';
 import {
-  detectFromProcesses,
+  IGNORED_FOREGROUND,
+  chooseGame,
   isMinecraftCommandLine,
   needsConfirmation,
   parseAcfName,
@@ -15,6 +16,7 @@ import {
   parseTasklistCsv,
   type DetectedGame,
 } from './gamesParse';
+import type { WinHelper } from './winHelper';
 import { log } from './log';
 
 export type { DetectedGame } from './gamesParse';
@@ -32,7 +34,8 @@ function run(cmd: string, args: string[], timeout = 8000): Promise<string> {
 /**
  * Hlídá, jestli běží hra. Ptá se každé 4 sekundy - seznam procesů je
  * levný (desítky ms) a rychlejší reakce není potřeba: zásobník se
- * rozjede pár sekund po startu hry, hra sama nabíhá delší dobu.
+ * rozjede pár sekund po startu hry, hra sama nabíhá delší dobu. Když
+ * se změní okno v popředí (pomocník na Windows), podívá se hned.
  *
  * Běží vždycky, i když je zásobník na "pořád" nebo "ručně": podle něj se
  * pozastavuje nahrávání na Kine a pojmenovávají klipy.
@@ -44,13 +47,25 @@ export class GameWatcher {
   private steamNames = new Map<number, string>();
   private minecraftCheck: { at: number; result: boolean } | null = null;
   private busy = false;
+  private lastForegroundExe = '';
 
   constructor(
     private deps: {
       settings: () => Settings;
+      helper: WinHelper | null;
       onChange: (game: DetectedGame | null, previous: DetectedGame | null) => void;
     }
-  ) {}
+  ) {
+    deps.helper?.on({
+      foreground: (info) => {
+        // Přepnutí na jiný program = hned nová úvaha (jinak až za 4 s).
+        if (info.exe && info.exe !== this.lastForegroundExe) {
+          this.lastForegroundExe = info.exe;
+          void this.poll();
+        }
+      },
+    });
+  }
 
   start(): void {
     if (this.timer) return;
@@ -78,7 +93,7 @@ export class GameWatcher {
     try {
       const detected = await this.detect();
       const prev = this.currentGame;
-      const changed = (prev?.exe ?? null) !== (detected?.exe ?? null);
+      const changed = (prev?.exe ?? null) !== (detected?.exe ?? null) || (prev?.name ?? null) !== (detected?.name ?? null);
       this.currentGame = detected;
       if (changed) {
         log(detected ? `hra: ${detected.name} (${detected.exe}, ${detected.source})` : `hra skončila: ${prev?.name ?? '?'}`);
@@ -93,20 +108,27 @@ export class GameWatcher {
 
   private async detect(): Promise<DetectedGame | null> {
     const processes = await this.processNames();
-    const custom = this.deps.settings().customGames;
-
-    const fromList = detectFromProcesses(processes, custom);
-    if (fromList) return fromList;
-
+    const settings = this.deps.settings();
     const steam = await this.steamGame();
-    if (steam) return steam;
 
     // Minecraft Java: javaw.exe je Minecraft jen když to říká příkazová řádka.
+    let minecraft: DetectedGame | null = null;
     const weak = needsConfirmation(processes);
     if (weak.length > 0 && (await this.isMinecraftRunning())) {
-      return { name: 'Minecraft', exe: weak[0], source: 'known' };
+      minecraft = { name: 'Minecraft', exe: weak[0], source: 'known' };
     }
-    return null;
+
+    const helper = this.deps.helper;
+    return chooseGame({
+      processes,
+      custom: settings.customGames,
+      steam,
+      foreground: helper?.foreground() ?? null,
+      windowed: helper?.windowedProcesses() ?? new Set(),
+      current: this.currentGame,
+      fullscreenDetection: settings.detectFullscreen,
+      minecraft,
+    });
   }
 
   async processNames(): Promise<Set<string>> {
@@ -116,10 +138,13 @@ export class GameWatcher {
     return parsePsList(await run('ps', ['-eo', 'comm=']));
   }
 
-  /** Pro nastavení: běžící programy (bez systémových), abecedně. */
+  /** Pro nastavení: běžící programy (bez systémových), ty s oknem první, pak abecedně. */
   async listProcesses(): Promise<ProcessInfo[]> {
-    const names = [...(await this.processNames())].filter((n) => !SYSTEM_PROCESSES.has(n) && !n.startsWith('kine'));
-    return names.sort().map((exe) => ({ exe, name: exe.replace(/\.exe$/i, '') }));
+    const windowed = this.deps.helper?.windowedProcesses() ?? new Set<string>();
+    const names = [...(await this.processNames())].filter((n) => !IGNORED_FOREGROUND.has(n) && !n.startsWith('kine'));
+    return names
+      .map((exe) => ({ exe, name: exe.replace(/\.exe$/i, ''), hasWindow: windowed.has(exe) }))
+      .sort((a, b) => Number(b.hasWindow) - Number(a.hasWindow) || a.exe.localeCompare(b.exe));
   }
 
   private async steamGame(): Promise<DetectedGame | null> {
@@ -202,20 +227,3 @@ export class GameWatcher {
     return result;
   }
 }
-
-/** Co nemá smysl nabízet jako "hru" v nastavení. */
-const SYSTEM_PROCESSES = new Set([
-  'system', 'system idle process', 'registry', 'smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe', 'lsass.exe',
-  'svchost.exe', 'winlogon.exe', 'fontdrvhost.exe', 'dwm.exe', 'explorer.exe', 'sihost.exe', 'taskhostw.exe',
-  'runtimebroker.exe', 'searchhost.exe', 'startmenuexperiencehost.exe', 'shellexperiencehost.exe', 'ctfmon.exe',
-  'conhost.exe', 'dllhost.exe', 'spoolsv.exe', 'audiodg.exe', 'wudfhost.exe', 'memory compression', 'securityhealthservice.exe',
-  'securityhealthsystray.exe', 'msmpeng.exe', 'nissrv.exe', 'textinputhost.exe', 'applicationframehost.exe',
-  'systemsettings.exe', 'lockapp.exe', 'wmiprvse.exe', 'msedgewebview2.exe', 'widgets.exe', 'taskmgr.exe',
-  'tasklist.exe', 'reg.exe', 'powershell.exe', 'cmd.exe', 'onedrive.exe', 'steam.exe', 'steamwebhelper.exe',
-  'steamservice.exe', 'discord.exe', 'chrome.exe', 'msedge.exe', 'firefox.exe', 'opera.exe', 'brave.exe',
-  'spotify.exe', 'epicgameslauncher.exe', 'epicwebhelper.exe', 'riotclientservices.exe', 'riotclientux.exe',
-  'leagueclient.exe', 'leagueclientux.exe', 'battle.net.exe', 'agent.exe', 'ubisoftconnect.exe', 'upc.exe',
-  'eadesktop.exe', 'eabackgroundservice.exe', 'nvcontainer.exe', 'nvidia share.exe', 'nvdisplay.container.exe',
-  'radeonsoftware.exe', 'obs64.exe', 'medal.exe', 'overwolf.exe', 'wallpaper64.exe', 'ps', 'bash', 'sh', 'zsh',
-  'systemd', 'init', 'kthreadd', 'dbus-daemon', 'pulseaudio', 'pipewire', 'xorg', 'gnome-shell',
-]);

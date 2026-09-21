@@ -1,6 +1,11 @@
 # Balení instalátoru (electron-builder). Windows NSIS: jeden klik,
 # instalace pro uživatele (bez správce), zástupce na ploše, po skončení
 # se appka rovnou spustí. ffmpeg leží mimo archiv asar, aby šel spustit.
+#
+# Ve workflow (.github/workflows/release.yml) se z tohohle souboru dělá
+# electron-builder.generated.yml (scripts/publish-config.mjs): přidá
+# adresu pro aktualizace z našeho úložiště (Cloudflare R2) a podpis,
+# když jsou nastavené. Tady je základ, který funguje i bez nich.
 appId: cz.kine.desktop
 productName: Kine
 copyright: Kine
@@ -24,8 +29,9 @@ win:
       arch: [x64]
   icon: build/icon.png
   artifactName: Kine-Setup.${ext}
-  # Bez podpisu: Windows ukáže "neznámý vydavatel". Až bude certifikát
-  # (Azure Trusted Signing), doplní se sem signtoolOptions / azureSignOptions.
+  # Bez podpisu Windows ukáže "neznámý vydavatel" a SmartScreen varuje.
+  # Podpis (Azure Trusted Signing) přidává workflow přes
+  # scripts/publish-config.mjs, když jsou v GitHubu tajemství AZURE_*.
   verifyUpdateCodeSignature: false
 nsis:
   oneClick: true
@@ -37,8 +43,9 @@ nsis:
   deleteAppDataOnUninstall: false
   shortcutName: Kine
   artifactName: Kine-Setup.${ext}
-  installerLanguages: [cs_CZ, en_US]
-  language: 1029
+  # build/installer.nsh: zapíše název instalátoru do registru (režim appky).
+  installerLanguages: [en_US, cs_CZ, sk_SK, de_DE, pl_PL, es_ES, fr_FR, uk_UA]
+  language: 1033
 linux:
   target: [dir]
   category: AudioVideo

@@ -3,7 +3,6 @@ import { dirname, join } from 'node:path';
 import { app } from 'electron';
 import type { Settings } from '../shared/types';
 import { DEFAULT_SETTINGS, sanitizeSettings } from '../shared/settingsSchema';
-import { langFromLocale } from '../shared/i18n';
 import { log } from './log';
 
 /**
@@ -25,8 +24,9 @@ export class SettingsStore {
       const parsed = JSON.parse(readFileSync(this.file, 'utf8'));
       return sanitizeSettings(parsed);
     } catch {
-      // První spuštění (nebo rozbitý soubor): výchozí + jazyk podle systému.
-      return { ...DEFAULT_SETTINGS, lang: langFromLocale(app.getLocale()) };
+      // První spuštění (nebo rozbitý soubor): výchozí - anglicky, jazyk si
+      // hráč vybere hned na první stránce průvodce.
+      return { ...DEFAULT_SETTINGS };
     }
   }
 

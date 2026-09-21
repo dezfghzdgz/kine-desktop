@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { CaptureCommand, CaptureEvent, Clip, DisplayInfo, ProcessInfo, Settings, Status, Visibility } from '../shared/types';
+import type { CaptureCommand, CaptureEvent, Clip, DisplayInfo, GameSource, ProcessInfo, Settings, Status, Visibility } from '../shared/types';
 
 /**
  * Most mezi stránkami a hlavním procesem. Stránky nemají Node ani
@@ -27,6 +27,7 @@ const kine = {
   onClips: (cb: (clips: Clip[]) => void) => on<Clip[]>('clips', cb),
   deleteClip: (id: string): Promise<void> => ipcRenderer.invoke('clips:delete', id),
   renameClip: (id: string, title: string): Promise<Clip | null> => ipcRenderer.invoke('clips:rename', id, title),
+  setClipGame: (id: string, game: string | null): Promise<Clip | null> => ipcRenderer.invoke('clips:setGame', id, game),
   openClip: (id: string): Promise<string> => ipcRenderer.invoke('clips:open', id),
   revealClip: (id: string): Promise<void> => ipcRenderer.invoke('clips:reveal', id),
   uploadClips: (requests: UploadRequest[]): Promise<void> => ipcRenderer.invoke('clips:upload', requests),
@@ -44,12 +45,15 @@ const kine = {
   onAuthWaiting: (cb: (waiting: boolean) => void) => on<boolean>('auth:waiting', cb),
 
   listProcesses: (): Promise<ProcessInfo[]> => ipcRenderer.invoke('games:listProcesses'),
-  currentGame: (): Promise<{ name: string; exe: string } | null> => ipcRenderer.invoke('games:current'),
+  currentGame: (): Promise<{ name: string; exe: string; source: GameSource } | null> => ipcRenderer.invoke('games:current'),
+  /** Názvy her pro výběr u klipu: z klipů, z "mých her", ze seznamu známých. */
+  gameNames: (): Promise<string[]> => ipcRenderer.invoke('games:names'),
   addGame: (exe: string, name: string): Promise<void> => ipcRenderer.invoke('games:add', exe, name),
   removeGame: (exe: string): Promise<void> => ipcRenderer.invoke('games:remove', exe),
 
   listDisplays: (): Promise<DisplayInfo[]> => ipcRenderer.invoke('displays:list'),
-  hotkeyAvailable: (accelerator: string): Promise<boolean> => ipcRenderer.invoke('hotkey:available', accelerator),
+  /** 'ok', nebo důvod, proč zkratka nepůjde ('in-use' | 'unsupported' | 'helper-down' | 'invalid'). */
+  hotkeyAvailable: (hotkey: string): Promise<string> => ipcRenderer.invoke('hotkey:available', hotkey),
 
   reviewClips: (sessionId: string): Promise<Clip[]> => ipcRenderer.invoke('review:clips', sessionId),
   reviewDone: (requests: UploadRequest[]): Promise<void> => ipcRenderer.invoke('review:done', requests),
@@ -57,6 +61,8 @@ const kine = {
   checkUpdate: (): Promise<{ status: string; version?: string }> => ipcRenderer.invoke('app:checkUpdate'),
   openLogs: (): Promise<string> => ipcRenderer.invoke('app:openLogs'),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
+  /** Otevře Kine: v režimu "Kine + klipy" jako okno appky, jinak v prohlížeči. */
+  openKine: (path?: string): Promise<void> => ipcRenderer.invoke('app:openKine', path ?? ''),
   quit: (): Promise<void> => ipcRenderer.invoke('app:quit'),
 
   onToast: (cb: (t: { message: string; kind: string }) => void) => on<{ message: string; kind: string }>('toast:show', cb),

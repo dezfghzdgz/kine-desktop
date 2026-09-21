@@ -1,4 +1,5 @@
-import type { Settings } from './types';
+import { LANGS, type Settings } from './types';
+import { isHotkey } from './hotkeys';
 
 /**
  * Výchozí nastavení a jeho očištění po načtení ze souboru.
@@ -10,7 +11,8 @@ import type { Settings } from './types';
  */
 export const DEFAULT_SETTINGS: Settings = {
   version: 1,
-  lang: 'cs',
+  lang: 'en',
+  appMode: 'clipper',
   clipHotkey: 'F8',
   toggleHotkey: 'Ctrl+F9',
   clipSeconds: 30,
@@ -22,10 +24,11 @@ export const DEFAULT_SETTINGS: Settings = {
   microphone: false,
   displayId: '',
   detection: 'games',
+  detectFullscreen: true,
   customGames: {},
   afterGame: 'review',
   visibility: 'private',
-  videoLanguage: 'cs',
+  videoLanguage: 'en',
   startWithSystem: true,
   toast: true,
   clipsDir: '',
@@ -71,9 +74,10 @@ export function sanitizeSettings(input: unknown): Settings {
 
   return {
     version: 1,
-    lang: oneOf(raw.lang, ['cs', 'en'] as const, d.lang),
-    clipHotkey: isAccelerator(raw.clipHotkey) ? (raw.clipHotkey as string) : d.clipHotkey,
-    toggleHotkey: isAccelerator(raw.toggleHotkey) ? (raw.toggleHotkey as string) : d.toggleHotkey,
+    lang: oneOf(raw.lang, LANGS, d.lang),
+    appMode: oneOf(raw.appMode, ['clipper', 'full'] as const, d.appMode),
+    clipHotkey: isHotkey(raw.clipHotkey) ? (raw.clipHotkey as string) : d.clipHotkey,
+    toggleHotkey: isHotkey(raw.toggleHotkey) ? (raw.toggleHotkey as string) : d.toggleHotkey,
     clipSeconds: Number.isFinite(clipSeconds)
       ? Math.min(CLIP_SECONDS_MAX, Math.max(CLIP_SECONDS_MIN, Math.round(clipSeconds)))
       : d.clipSeconds,
@@ -85,6 +89,7 @@ export function sanitizeSettings(input: unknown): Settings {
     microphone: bool(raw.microphone, d.microphone),
     displayId: text(raw.displayId, d.displayId, 100),
     detection: oneOf(raw.detection, ['games', 'always', 'manual'] as const, d.detection),
+    detectFullscreen: bool(raw.detectFullscreen, d.detectFullscreen),
     customGames,
     afterGame: oneOf(raw.afterGame, ['review', 'auto', 'none'] as const, d.afterGame),
     visibility: oneOf(raw.visibility, ['public', 'private'] as const, d.visibility),
@@ -98,18 +103,8 @@ export function sanitizeSettings(input: unknown): Settings {
   };
 }
 
-/**
- * Je to platný Electron accelerator? Jedna klávesa, případně s modifikátory
- * (Ctrl, Alt, Shift, Super), např. "F8", "Ctrl+Shift+S", "Alt+Z".
- */
-export function isAccelerator(value: unknown): boolean {
-  if (typeof value !== 'string' || !value.trim()) return false;
-  const parts = value.split('+');
-  const key = parts[parts.length - 1];
-  const mods = parts.slice(0, -1);
-  if (!mods.every((m) => ['Ctrl', 'Alt', 'Shift', 'Super', 'CommandOrControl'].includes(m))) return false;
-  return /^(F([1-9]|1[0-9]|2[0-4])|[A-Z0-9]|Space|Insert|Delete|Home|End|PageUp|PageDown|Pause|ScrollLock|PrintScreen|numadd|numsub|nummult|numdiv|numdec|num[0-9]|[`~!@#$%^&*()\-=\[\]\\;',./])$/.test(key);
-}
+/** Kvůli starším částem kódu a testům: platná zkratka (viz hotkeys.ts). */
+export const isAccelerator = isHotkey;
 
 /**
  * Doporučený datový tok podle rozlišení a snímků. Řídí se tím, co dnes

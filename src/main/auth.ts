@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from '
 import { join } from 'node:path';
 import { app, safeStorage, shell } from 'electron';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import type { AccountInfo } from '../shared/plan';
+import { NO_PRICES, hasClipsPlus, hasKinePlus, normalizePlan, type AccountInfo } from '../shared/plan';
 import { log } from './log';
 
 /**
@@ -85,9 +85,9 @@ export class Auth {
     const cacheFile = join(this.dir, 'kine-config.json');
     try {
       const res = await fetch(`${site}/api/desktop/config`, { signal: AbortSignal.timeout(10000) });
-      if (!res.ok) throw new Error(`Kine odpověděla ${res.status}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as Partial<DesktopConfig>;
-      if (!data.supabaseUrl || !data.supabaseAnonKey) throw new Error('Kine nevrátila konfiguraci.');
+      if (!data.supabaseUrl || !data.supabaseAnonKey) throw new Error('no config');
       const config: DesktopConfig = { supabaseUrl: data.supabaseUrl, supabaseAnonKey: data.supabaseAnonKey, siteUrl: site };
       writeFileSync(cacheFile, JSON.stringify(config));
       return config;
@@ -97,7 +97,7 @@ export class Auth {
         const cached = JSON.parse(readFileSync(cacheFile, 'utf8')) as DesktopConfig;
         if (cached.siteUrl === site) return cached;
       }
-      throw e;
+      throw new Error(`no-config:${(e as Error).message}`);
     }
   }
 
@@ -162,16 +162,19 @@ export class Auth {
       return;
     }
     const previous = this.account;
+    const same = previous?.userId === user.id ? previous : null;
     const account: Account = {
       userId: user.id,
       username: user.email?.split('@')[0] ?? 'kine',
       email: user.email ?? null,
-      plan: previous?.userId === user.id ? previous.plan : 'free',
-      planUntil: previous?.userId === user.id ? previous.planUntil : null,
-      maxClipSeconds: previous?.userId === user.id ? previous.maxClipSeconds : 60,
+      plan: same?.plan ?? 'free',
+      planUntil: same?.planUntil ?? null,
+      clipsPlus: same?.clipsPlus ?? false,
+      kinePlus: same?.kinePlus ?? false,
+      maxClipSeconds: same?.maxClipSeconds ?? 60,
       plusAvailable: previous?.plusAvailable ?? false,
-      plusPriceLabel: previous?.plusPriceLabel ?? null,
-      brandColor: previous?.userId === user.id ? previous.brandColor : null,
+      prices: previous?.prices ?? NO_PRICES,
+      brandColor: same?.brandColor ?? null,
     };
 
     // Kdo jsem a co smím (plán Kine Plus, barva Kine) - z Kine, ne z
@@ -185,13 +188,20 @@ export class Auth {
           signal: AbortSignal.timeout(10000),
         });
         if (res.ok) {
-          const me = (await res.json()) as Partial<AccountInfo> & { id?: string };
+          const me = (await res.json()) as Partial<AccountInfo> & { id?: string; plusPriceLabel?: string | null };
           if (me.username) account.username = me.username;
-          account.plan = me.plan === 'plus' ? 'plus' : 'free';
+          account.plan = normalizePlan(me.plan);
           account.planUntil = me.planUntil ?? null;
-          account.maxClipSeconds = typeof me.maxClipSeconds === 'number' ? me.maxClipSeconds : account.plan === 'plus' ? 300 : 60;
+          account.clipsPlus = typeof me.clipsPlus === 'boolean' ? me.clipsPlus : hasClipsPlus(account.plan);
+          account.kinePlus = typeof me.kinePlus === 'boolean' ? me.kinePlus : hasKinePlus(account.plan);
+          account.maxClipSeconds = typeof me.maxClipSeconds === 'number' ? me.maxClipSeconds : account.clipsPlus ? 300 : 60;
           account.plusAvailable = Boolean(me.plusAvailable);
-          account.plusPriceLabel = me.plusPriceLabel ?? null;
+          const prices = (me.prices ?? {}) as Partial<AccountInfo['prices']>;
+          account.prices = {
+            kine: typeof prices.kine === 'string' ? prices.kine : null,
+            clips: typeof prices.clips === 'string' ? prices.clips : me.plusPriceLabel ?? null,
+            all: typeof prices.all === 'string' ? prices.all : null,
+          };
           account.brandColor = typeof me.brandColor === 'string' ? me.brandColor : null;
         } else {
           log(`/api/desktop/me odpověděla ${res.status}`);
@@ -268,7 +278,7 @@ export class Auth {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.closeLinkServer();
-        reject(new Error('Prohlížeč nic neposlal (10 minut).'));
+        reject(new Error('browser-timeout'));
       }, 10 * 60 * 1000);
       this.linkResolve = () => {
         clearTimeout(timer);
@@ -286,7 +296,7 @@ export class Auth {
 
   cancelBrowserLogin(): void {
     this.closeLinkServer();
-    this.linkReject?.(new Error('Zrušeno.'));
+    this.linkReject?.(new Error('cancelled'));
     this.linkResolve = null;
     this.linkReject = null;
   }
@@ -313,7 +323,7 @@ export class Auth {
   }
 
   private async finishLink(tokenHash: string, state: string | null): Promise<void> {
-    if (!this.linkState || state !== this.linkState) throw new Error('Neplatný stav připojení - zkus to znovu z appky.');
+    if (!this.linkState || state !== this.linkState) throw new Error('bad-state');
     const client = await this.getClient();
     const { error } = await client.auth.verifyOtp({ type: 'magiclink', token_hash: tokenHash });
     if (error) throw new Error(translateAuthError(error.message));
@@ -362,7 +372,7 @@ export class Auth {
     req.on('end', async () => {
       try {
         const data = JSON.parse(body) as { token_hash?: string; state?: string };
-        if (!data.token_hash) throw new Error('chybí token');
+        if (!data.token_hash) throw new Error('missing token');
         await this.finishLink(data.token_hash, data.state ?? null);
         res.writeHead(200, { ...cors, 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
@@ -375,10 +385,14 @@ export class Auth {
   }
 }
 
+/**
+ * Chyby přihlášení jako kódy - text v jazyce hráče dosadí okno
+ * (renderer/errors.ts: bad-credentials -> authErrBadCredentials…).
+ */
 function translateAuthError(message: string): string {
-  if (/invalid login credentials/i.test(message)) return 'Špatný e-mail nebo heslo.';
-  if (/email not confirmed/i.test(message)) return 'E-mail ještě není potvrzený.';
-  if (/rate limit/i.test(message)) return 'Moc pokusů za sebou, zkus to za chvíli.';
-  if (/expired|invalid/i.test(message)) return 'Odkaz už neplatí, zkus to znovu.';
+  if (/invalid login credentials/i.test(message)) return 'bad-credentials';
+  if (/email not confirmed/i.test(message)) return 'email-not-confirmed';
+  if (/rate limit/i.test(message)) return 'rate-limit';
+  if (/expired|invalid/i.test(message)) return 'link-expired';
   return message;
 }

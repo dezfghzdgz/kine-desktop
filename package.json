@@ -1,8 +1,8 @@
 {
   "name": "kine-desktop",
   "productName": "Kine",
-  "version": "0.1.0",
-  "description": "Kine do PC - klipy ze hry jednou klávesou, nahrání na Kine až po hře.",
+  "version": "0.2.0",
+  "description": "Kine for PC - game clips with one key, Kine as a desktop app; uploads only after the game.",
   "author": "Kine",
   "license": "MIT",
   "private": true,

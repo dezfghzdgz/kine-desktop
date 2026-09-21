@@ -1,13 +1,18 @@
 /**
  * Rozpoznání běžící hry - čistá část (bez spouštění procesů), s testem.
  *
- * Tři zdroje, od nejspolehlivějšího:
- *  1. Steam: v registru drží RunningAppID hry, která právě běží, a její
- *     název je v appmanifest_<id>.acf ve složce knihovny. Pokryje většinu
- *     her na PC bez jakéhokoli seznamu.
- *  2. Hry, které si hráč přidal sám (název .exe -> název hry).
- *  3. Seznam známých her mimo Steam (Riot, Epic, Battle.net, Minecraft,
+ * Zdroje, od nejspolehlivějšího:
+ *  1. Okno v popředí (pomocník na Windows, main/winHelper.ts): která hra
+ *     je opravdu před hráčem, když běží víc programů - CS2 v popředí
+ *     vyhraje nad Robloxem zapomenutým na pozadí.
+ *  2. Steam: v registru drží RunningAppID hry, která právě běží, a její
+ *     název je v appmanifest_<id>.acf ve složce knihovny.
+ *  3. Hry, které si hráč přidal sám (název .exe -> název hry).
+ *  4. Seznam známých her mimo Steam (Riot, Epic, Battle.net, Minecraft,
  *     Roblox, EA, Ubisoft...) podle názvu spustitelného souboru.
+ *  5. Neznámý program přes celou obrazovku bez rámečku v popředí - hry
+ *     tak běží skoro všechny; pojmenuje se podle programu a hráč ho může
+ *     v nastavení přejmenovat.
  *
  * Seznam procesů dává na Windows `tasklist /FO CSV /NH`.
  */
@@ -17,8 +22,125 @@ export type DetectedGame = {
   /** Spustitelný soubor (malými písmeny), nebo "steam:<appid>". */
   exe: string;
   /** Odkud to víme. */
-  source: 'steam' | 'custom' | 'known';
+  source: 'steam' | 'custom' | 'known' | 'fullscreen';
 };
+
+/** Co pomocník na Windows říká o okně v popředí (viz winHelper.ts). */
+export type ForegroundLike = { exe: string; title: string; fullscreen: boolean };
+
+export type ChooseInput = {
+  /** Běžící procesy (malými písmeny s .exe). */
+  processes: Set<string>;
+  custom: Record<string, string>;
+  /** Hra podle Steamu (RunningAppID), nebo null. */
+  steam: DetectedGame | null;
+  /** Okno v popředí, nebo null (pomocník neběží / není Windows). */
+  foreground: ForegroundLike | null;
+  /** Procesy s vlastním oknem (z pomocníka); prázdná množina = nevíme. */
+  windowed: Set<string>;
+  /** Hra z minulého kola - drží se, dokud její proces běží. */
+  current: DetectedGame | null;
+  /** Brát neznámý program přes celou obrazovku jako hru. */
+  fullscreenDetection: boolean;
+  /** Minecraft Java potvrzený příkazovou řádkou (javaw.exe), nebo null. */
+  minecraft: DetectedGame | null;
+};
+
+/**
+ * Vybere hru z toho, co běží. Pravidla:
+ *  1. hra, jejíž okno je v popředí, vyhrává (i nad Steamem - ten jen
+ *     doplní hezký název, když program neznáme);
+ *  2. neznámý program v popředí přes celou obrazovku bez rámečku = hra
+ *     (když je to zapnuté a není to prohlížeč, launcher, přehrávač…);
+ *  3. hra z minulého kola zůstává, dokud běží (alt-tab do Discordu ji
+ *     neukončí);
+ *  4. jinak první kandidát, přednostně takový, který má vlastní okno.
+ */
+export function chooseGame(input: ChooseInput): DetectedGame | null {
+  const candidates: DetectedGame[] = [];
+  for (const [exe, name] of Object.entries(input.custom)) {
+    if (input.processes.has(exe.toLowerCase())) candidates.push({ name, exe: exe.toLowerCase(), source: 'custom' });
+  }
+  for (const exe of input.processes) {
+    const known = KNOWN_GAMES[exe];
+    if (known && !WEAK_EXES.has(exe) && !candidates.some((c) => c.exe === exe)) candidates.push({ name: known, exe, source: 'known' });
+  }
+  if (input.minecraft) candidates.push(input.minecraft);
+  if (input.steam) candidates.push(input.steam);
+
+  const fg = input.foreground;
+  if (fg?.exe) {
+    const inFront = candidates.find((c) => c.exe === fg.exe);
+    if (inFront) return inFront;
+    if (fg.fullscreen && input.fullscreenDetection && !IGNORED_FOREGROUND.has(fg.exe) && !fg.exe.startsWith('kine')) {
+      // Steam ví, co běží, ale ne pod jakým programem - když je v popředí
+      // neznámý program přes celou obrazovku a Steam hlásí hru, je to ona.
+      if (input.steam && !candidates.some((c) => c.exe === fg.exe)) {
+        return { name: input.steam.name, exe: fg.exe, source: 'steam' };
+      }
+      return { name: input.custom[fg.exe] ?? prettyNameFromExe(fg.exe, fg.title), exe: fg.exe, source: 'fullscreen' };
+    }
+  }
+
+  if (input.current) {
+    const stillRunning = input.current.exe.startsWith('steam:') ? input.steam?.exe === input.current.exe : input.processes.has(input.current.exe);
+    if (stillRunning) {
+      const fresh = candidates.find((c) => c.exe === input.current!.exe);
+      return fresh ?? input.current;
+    }
+  }
+
+  if (candidates.length === 0) return null;
+  const withWindow = candidates.find((c) => input.windowed.has(c.exe));
+  return withWindow ?? candidates[0];
+}
+
+/**
+ * Název hry z názvu programu, když nic lepšího není:
+ * "fortniteclient-win64-shipping.exe" -> "Fortnite Client". Krátký
+ * titulek okna bez cest a pomlček je lepší ("Hollow Knight").
+ */
+export function prettyNameFromExe(exe: string, title = ''): string {
+  const cleanTitle = title.trim();
+  if (cleanTitle && cleanTitle.length <= 40 && !/[\\/|<>]/.test(cleanTitle) && !/\.exe$/i.test(cleanTitle) && !/\d+\.\d+\.\d+/.test(cleanTitle)) {
+    return cleanTitle;
+  }
+  let base = exe.replace(/\.exe$/i, '');
+  base = base.replace(/[-_]?(win64|win32|x64|x86|shipping|steam|dx11|dx12|launcher|client)(?=$|[-_])/gi, '');
+  base = base.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!base) base = exe;
+  return base
+    .split(' ')
+    .filter(Boolean)
+    .map((w) => (w.length <= 3 ? w.toUpperCase() : w[0].toUpperCase() + w.slice(1)))
+    .join(' ');
+}
+
+/**
+ * Programy, které nejsou hra, i když běží přes celou obrazovku:
+ * systém, prohlížeče, launchery, přehrávače, overlaye. Zároveň se
+ * nenabízí v nastavení jako "hra".
+ */
+export const IGNORED_FOREGROUND = new Set([
+  'system', 'system idle process', 'registry', 'smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe', 'lsass.exe',
+  'svchost.exe', 'winlogon.exe', 'fontdrvhost.exe', 'dwm.exe', 'explorer.exe', 'sihost.exe', 'taskhostw.exe',
+  'runtimebroker.exe', 'searchhost.exe', 'startmenuexperiencehost.exe', 'shellexperiencehost.exe', 'ctfmon.exe',
+  'conhost.exe', 'dllhost.exe', 'spoolsv.exe', 'audiodg.exe', 'wudfhost.exe', 'memory compression', 'securityhealthservice.exe',
+  'securityhealthsystray.exe', 'msmpeng.exe', 'nissrv.exe', 'textinputhost.exe', 'applicationframehost.exe',
+  'systemsettings.exe', 'lockapp.exe', 'wmiprvse.exe', 'msedgewebview2.exe', 'widgets.exe', 'taskmgr.exe',
+  'tasklist.exe', 'reg.exe', 'powershell.exe', 'pwsh.exe', 'cmd.exe', 'windowsterminal.exe', 'onedrive.exe',
+  'steam.exe', 'steamwebhelper.exe', 'steamservice.exe', 'discord.exe', 'chrome.exe', 'msedge.exe', 'firefox.exe',
+  'opera.exe', 'opera_gx.exe', 'brave.exe', 'vivaldi.exe', 'iexplore.exe', 'spotify.exe', 'epicgameslauncher.exe',
+  'epicwebhelper.exe', 'riotclientservices.exe', 'riotclientux.exe', 'leagueclient.exe', 'leagueclientux.exe',
+  'battle.net.exe', 'agent.exe', 'ubisoftconnect.exe', 'upc.exe', 'eadesktop.exe', 'eabackgroundservice.exe',
+  'galaxyclient.exe', 'nvcontainer.exe', 'nvidia share.exe', 'nvdisplay.container.exe', 'nvidia app.exe',
+  'radeonsoftware.exe', 'amdrsserv.exe', 'obs64.exe', 'obs32.exe', 'medal.exe', 'overwolf.exe', 'wallpaper64.exe',
+  'wallpaper32.exe', 'vlc.exe', 'mpc-hc64.exe', 'mpc-hc.exe', 'wmplayer.exe', 'potplayermini64.exe', 'mpv.exe',
+  'netflix.exe', 'video.ui.exe', 'photos.exe', 'microsoft.photos.exe', 'powerpnt.exe', 'winword.exe', 'excel.exe',
+  'acrobat.exe', 'code.exe', 'teams.exe', 'ms-teams.exe', 'zoom.exe', 'slack.exe', 'telegram.exe', 'whatsapp.exe',
+  'kine.exe', 'electron.exe', 'ffmpeg.exe', 'ps', 'bash', 'sh', 'zsh',
+  'systemd', 'init', 'kthreadd', 'dbus-daemon', 'pulseaudio', 'pipewire', 'xorg', 'gnome-shell',
+]);
 
 /** Řádky `tasklist /FO CSV /NH`: "Image Name","PID","Session Name","Session#","Mem Usage". */
 export function parseTasklistCsv(text: string): Set<string> {

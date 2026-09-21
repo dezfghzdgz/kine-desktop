@@ -5,7 +5,17 @@
  * testy a stránky v okně.
  */
 
-export type Lang = 'cs' | 'en';
+/** Jazyky appky - stejných osm jako web Kine. Výchozí je angličtina. */
+export type Lang = 'en' | 'cs' | 'sk' | 'de' | 'pl' | 'es' | 'fr' | 'uk';
+export const LANGS: readonly Lang[] = ['en', 'cs', 'sk', 'de', 'pl', 'es', 'fr', 'uk'];
+
+/**
+ * Jak se appka používá:
+ *  - clipper: jen klipovač v liště u hodin (Kine se otvírá v prohlížeči),
+ *  - full: k tomu okno s Kine jako aplikace (koukání na videa) - výběr
+ *    při stahování na webu a v průvodci.
+ */
+export type AppMode = 'clipper' | 'full';
 
 export type DetectionMode =
   /** Nahrávat do zásobníku jen když běží hra (výchozí). */
@@ -30,9 +40,13 @@ export type Visibility = 'public' | 'private';
 export type Settings = {
   version: 1;
   lang: Lang;
-  /** Klávesa pro "ulož klip", jako Electron accelerator, např. "F8" nebo "Ctrl+Shift+S". */
+  appMode: AppMode;
+  /**
+   * Zkratka "ulož klip" - klávesy spojené plusem, např. "F8", "Ctrl+Shift+S",
+   * "F8+F9" nebo "Mouse5" (viz shared/hotkeys.ts).
+   */
   clipHotkey: string;
-  /** Klávesa pro ruční zapnutí/vypnutí zásobníku. */
+  /** Zkratka pro ruční zapnutí/vypnutí zásobníku. */
   toggleHotkey: string;
   /** Kolik sekund zpět klip sahá. */
   clipSeconds: number;
@@ -47,6 +61,8 @@ export type Settings = {
   /** Prázdné = hlavní obrazovka. Jinak id obrazovky z Electronu. */
   displayId: string;
   detection: DetectionMode;
+  /** Program přes celou obrazovku bez rámečku brát jako hru, i když ho appka nezná. */
+  detectFullscreen: boolean;
   /** Hry přidané ručně: název spustitelného souboru (malými písmeny) -> název hry. */
   customGames: Record<string, string>;
   afterGame: AfterGame;
@@ -80,7 +96,7 @@ export type Clip = {
   /** Cesta k náhledu (jpg), když se povedl. */
   thumb: string | null;
   title: string;
-  /** Hra, při které klip vznikl (název), nebo null. */
+  /** Hra, při které klip vznikl (název), nebo null. Hráč ji může opravit. */
   game: string | null;
   createdAt: string;
   durationSeconds: number;
@@ -94,11 +110,27 @@ export type Clip = {
 
 export type CaptureState = 'off' | 'starting' | 'on' | 'error';
 
+/**
+ * Plán účtu na Kine (stejné hodnoty jako lib/plus.ts na webu):
+ *  free  - základ
+ *  kine  - Kine Plus (web: odznak, vyšší denní limit nahrávání…)
+ *  clips - Klipy Plus (appka: automatické nahrávání, klipy až 5 minut)
+ *  all   - obojí
+ *  plus  - starší hodnota, znamená "all"
+ */
+export type Plan = 'free' | 'kine' | 'clips' | 'all' | 'plus';
+
+export type PlanPrices = { kine: string | null; clips: string | null; all: string | null };
+
 export type Status = {
   capture: CaptureState;
   captureError: string | null;
   /** Právě běžící hra (název), nebo null. */
   game: string | null;
+  /** Odkud appka hru zná (pro nastavení: "poznáno podle celé obrazovky" jde pojmenovat). */
+  gameSource: GameSource | null;
+  /** Program hry (např. cs2.exe) - pro tlačítko "pojmenovat". */
+  gameExe: string | null;
   /** Kolik klipů čeká / nahrává se. */
   uploadsPending: number;
   /** Nahrávání stojí, protože se hraje. */
@@ -106,20 +138,30 @@ export type Status = {
   account: {
     username: string;
     email: string | null;
-    plan: 'free' | 'plus';
+    plan: Plan;
     planUntil: string | null;
+    /** Má Klipy Plus (automatické nahrávání, dlouhé klipy)? */
+    clipsPlus: boolean;
+    /** Má Kine Plus (web)? */
+    kinePlus: boolean;
     maxClipSeconds: number;
     plusAvailable: boolean;
-    plusPriceLabel: string | null;
+    prices: PlanPrices;
   } | null;
   /** Ruční pauza zásobníku (tray "Pozastavit"). */
   paused: boolean;
+  /** Zkratky, které nejde zaregistrovat (drží je jiný program / nejsou na tomhle systému možné). */
+  hotkeyProblems: string[];
+  /** Umí tenhle systém zkratky z více kláves a tlačítka myši? (pomocník na Windows) */
+  chordsSupported: boolean;
   version: string;
 };
 
+export type GameSource = 'steam' | 'custom' | 'known' | 'fullscreen';
+
 export type DisplayInfo = { id: string; label: string; width: number; height: number; primary: boolean };
 
-export type ProcessInfo = { exe: string; name: string };
+export type ProcessInfo = { exe: string; name: string; hasWindow: boolean };
 
 /** Příkazy pro skrytou stránku, která snímá obrazovku. */
 export type CaptureCommand =

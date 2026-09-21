@@ -3,16 +3,19 @@
 Program do Windows, který běží v liště u hodin: když hraješ, drží
 posledních N sekund obrazu (a zvuku). Zmáčkneš klávesu a uloží se klip.
 Po dohrání se klipy nabídnou k nahrání na Kine – **nikdy během hry**,
-aby online hra na slabší wifi nelagovala.
+aby online hra na slabší wifi nelagovala. Ve dvou režimech: **jen
+klipovač**, nebo **Kine + klipy** (Kine navíc jako aplikace na koukání
+videí – okno s webem Kine s trvalým přihlášením). Anglicky v základu,
+osm jazyků (stejné jako web).
 
-Samostatný projekt vedle webu Kine (repo `Kine`). Web potřebuje tři
-věci, které přišly v balíčku „kine-do-pc“: `/api/desktop/config`,
-`/api/desktop/link` a stránky `/connect` a `/download`.
+Samostatný projekt vedle webu Kine (repo `Kine`). Web potřebuje
+`/api/desktop/config`, `/api/desktop/link`, `/api/desktop/me` a stránky
+`/connect`, `/download`, `/plus` (balíčky „kine-do-pc“ a „kine-do-pc-plus“).
 
 ## Jak to funguje
 
 ```
-hra běží  ──►  GameWatcher (tasklist + Steam registr + seznam her)
+hra běží  ──►  GameWatcher (tasklist + okno v popředí + Steam + seznam her)
                     │
                     ▼
    skrytá stránka (Chromium getDisplayMedia + MediaRecorder, H.264)
@@ -35,10 +38,20 @@ hra běží  ──►  GameWatcher (tasklist + Steam registr + seznam her)
   malá.
 - **Nic se do hry nevkládá**, jen se snímá obrazovka – anticheaty nemají
   důvod protestovat.
-- **Rozpoznání hry:** Steam (registr `RunningAppID` + název z
-  `appmanifest_<id>.acf`), ~250 známých her mimo Steam podle názvu .exe
-  (`src/main/gamesParse.ts`), a hry přidané hráčem v nastavení.
+- **Rozpoznání hry** (`src/main/gamesParse.ts`, `chooseGame`): vyhrává
+  hra, jejíž **okno je v popředí** – to hlídá pomocník
+  (`src/main/winHelper.ts`, jeden dlouho běžící PowerShell s
+  `GetForegroundWindow`), takže CS2 před sebou vyhraje nad Robloxem
+  zapomenutým na pozadí. Dál Steam (registr `RunningAppID` + název z
+  `appmanifest_<id>.acf`), ~300 známých her podle názvu .exe, hry přidané
+  hráčem, a **neznámý program přes celou obrazovku bez rámečku** (tak běží
+  skoro každá hra; pojmenuje se podle programu, hráč ji může přejmenovat).
+  Alt-tab do Discordu hru neukončí – drží se, dokud její proces běží.
   Minecraft Java (`javaw.exe`) se potvrzuje podle příkazové řádky.
+- **Zkratky** (`src/shared/hotkeys.ts`, `src/main/hotkeys.ts`): jedna
+  klávesa s Ctrl/Alt/Shift jde přes systémovou zkratku Electronu; víc
+  kláves najednou („F8+F9“), tlačítka myši (Mouse4/5) a klávesy jako
+  Pause hlídá pomocník na Windows přes `GetAsyncKeyState`.
 - **Přihlášení:** přes prohlížeč (Kine `/connect` → jednorázový token →
   `http://127.0.0.1:<port>/link` nebo `kine://link?…`), nebo e-mail +
   heslo. Relace se ukládá zašifrovaná (`safeStorage`, na Windows DPAPI).
@@ -60,7 +73,8 @@ Užitečné proměnné prostředí:
 | `KINE_DEBUG=1` | protokol i na stdout (jinak jen `%APPDATA%\kine-desktop\logs\kine.log`) |
 | `KINE_USER_DATA=…` | jiná složka s nastavením (zkoušky) |
 | `KINE_FFMPEG=…` | vlastní ffmpeg místo přibaleného |
-| `KINE_TEST=1` | samočinná zkouška: zásobník → dva klipy → screenshoty oken → konec (`tests/e2e.sh`) |
+| `KINE_TEST=1` | samočinná zkouška: zásobník → dva klipy → přehrávač v okně → screenshoty → konec (`tests/e2e.sh`) |
+| `KINE_NO_HELPER=1` | nespouštět pomocníka pro Windows (hry jen podle seznamu a Steamu, jen jednoduché zkratky) |
 
 Adresu Kine jde v nastavení (Účet → Adresa Kine) přepnout třeba na
 `http://localhost:3000`.
@@ -68,56 +82,60 @@ Adresu Kine jde v nastavení (Účet → Adresa Kine) přepnout třeba na
 ## Vydání nové verze
 
 1. V `package.json` zvedni `version`.
-2. `git commit -am "v0.1.1" && git tag v0.1.1 && git push && git push --tags`
+2. Nahraj soubory do repa (git, nebo přes web GitHubu) a spusť workflow
+   **Vydání** (nebo pushni tag `v0.2.0`).
 3. GitHub Actions (`.github/workflows/release.yml`) na Windows sestaví
-   `Kine-Setup.exe` a přidá ho do Releases spolu s `latest.yml`, podle
-   kterého si nainstalované appky samy stáhnou aktualizaci.
+   `Kine-Setup.exe`, nahraje ho pod dvěma názvy (`Kine-Setup.exe` = Kine
+   + klipy, `Kine-Clipper-Setup.exe` = jen klipovač; jeden a ten samý
+   soubor, appka si podle názvu předvyplní režim – `build/installer.nsh`)
+   do **Cloudflare R2** (odsud stahují lidi z `kine…/download` a odsud si
+   nainstalované appky berou aktualizace podle `latest.yml`) a záložně do
+   GitHub Releases. `scripts/publish-config.mjs` k tomu z proměnných
+   prostředí sestaví `electron-builder.generated.yml` (adresa aktualizací,
+   podpis). Krok za krokem včetně R2 a podpisu: **JAK-VYDAT.md**.
 
-Instalátor se jmenuje pořád stejně (`Kine-Setup.exe`), protože GitHub má
-stálou adresu `releases/latest/download/Kine-Setup.exe` – na tu míří
-`kine…/download/windows`, takže lidi stahují rovnou z Kine. Vlastník/repo
-je v `electron-builder.yml` (`publish`) a na webu `NEXT_PUBLIC_DESKTOP_REPO`.
-Krok za krokem: **JAK-VYDAT.md**.
-
-**Podpis:** instalátor není podepsaný, Windows ukáže „Neznámý vydavatel“.
-Až bude certifikát (nejlevněji Azure Trusted Signing, ~10 $/měsíc), do
-`electron-builder.yml` → `win` přibude `azureSignOptions` a do workflow
-tajemství s přihlášením.
+**Podpis:** bez certifikátu Windows ukáže „Neznámý vydavatel“ a SmartScreen
+varuje. S Azure Trusted Signing (tajemství `AZURE_*` v GitHubu) workflow
+podepisuje sám.
 
 ## Struktura
 
 ```
 src/main/        hlavní proces (Electron, Node)
-  main.ts        tray, okna, zkratky, IPC, spojení všeho
+  main.ts        tray, okna (nastavení/klipy, okýnko po hře, okno Kine), IPC, režimy
   capture.ts     zásobník: skrytá stránka → ffmpeg segmenty → klip
   segments.ts    čistá logika výběru kousků (test)
-  games.ts       hlídání her (tasklist, Steam), gamesParse.ts čistá část (test)
+  games.ts       hlídání her (tasklist, Steam, popředí), gamesParse.ts čistá část (test)
+  winHelper.ts   pomocník pro Windows (PowerShell): okno v popředí, okna procesů, stav kláves
+  hotkeys.ts     zkratky: systémové (Electron) + složené přes pomocníka
   clips.ts       knihovna klipů (index.json ve složce s klipy)
   uploader.ts    fronta nahrávání, pauza při hře (test), tus.ts klient (test)
   auth.ts        přihlášení, lokální server pro /connect, kine:// odkazy
   kineApi.ts     volání Kine (create-upload-url, confirm)
   settings.ts    nastavení (userData/settings.json), shared/settingsSchema.ts (test)
   toast.ts       okénko „Klip uložen“ v rohu
-src/renderer/    stránky oken: settings (nastavení + průvodce + knihovna),
-                 review (okýnko po hře), toast, capture (skrytá snímací)
+src/renderer/    stránky oken: settings (klipy s přehrávačem a filtry, nastavení,
+                 průvodce), review (okýnko po hře), toast, capture (skrytá snímací)
 src/preload/     most window.kine / window.kineCapture
-src/shared/      typy, překlady (cs/en), názvy klipů, zkratky
+src/shared/      typy, překlady (i18n/: en cs sk de pl es fr uk), názvy klipů, zkratky, plány
 ```
 
-## Kine Plus (placená verze)
+## Předplatné
 
 Pravidla jsou v `src/shared/plan.ts` a na webu v `lib/plus.ts`; appka se
-ptá `/api/desktop/me`, kdo je a co smí. Zdarma: klipování bez omezení,
-klipy do 60 s, nahrání na Kine ručně (okýnko po hře, Knihovna) – se
-stejnými pravidly jako každé video. Plus: „nahrát všechny klipy
-automaticky“, klipy až 5 minut, odznak PLUS. Když Plus vyprší, appka se
-sama vrátí na ruční nahrávání. Barvu Kine, kterou má hráč u loga na webu,
-appka převezme z jeho účtu.
+ptá `/api/desktop/me`, kdo je a co smí. Tři varianty: **Kine Plus**
+(web: odznak, vyšší limit nahrávání), **Klipy Plus** (appka: „nahrát
+všechny klipy automaticky“, klipy až 5 minut) a **Kine Plus + Klipy**.
+Zdarma: klipování bez omezení, klipy do 60 s, nahrání na Kine ručně
+(okýnko po hře, záložka Klipy) – se stejnými pravidly jako každé video.
+Když Klipy Plus vyprší, appka se sama vrátí na ruční nahrávání. Barvu
+Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
 
 ## Co ještě není
 
 - macOS/Linux: appka se spustí a klipy dělá, ale bez zvuku systému
-  (Chromium ho umí jen na Windows) a bez rozpoznání her mimo Steam.
+  (Chromium ho umí jen na Windows), bez pomocníka (hry jen podle seznamu
+  a Steamu, jen jednoduché zkratky).
 - Klip je dlouhý N až N+2 s (kousky po 2 s, řez jen na klíčovém snímku).
 - Hry v režimu *exclusive fullscreen* okénko „Klip uložen“ neukážou –
   přijde zvukové pípnutí a systémové oznámení.

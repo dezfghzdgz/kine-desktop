@@ -70,12 +70,45 @@ export async function runTestDriver(kine: {
       await sleep(1500);
       await shot(kine.reviewWindow, 'review');
     }
-    for (const tab of ['account', 'clips', 'games', 'upload', 'library', 'about']) {
+    for (const tab of ['clips', 'settings', 'games', 'upload', 'account', 'about']) {
       kine.openSettings(tab);
       await sleep(900);
       await shot(kine.settingsWindow, `settings-${tab}`);
     }
-    result.ok = !!clip1 && !!clip2 && kine.capture.state === 'on';
+
+    // Přehrávač přímo v okně: klik na náhled prvního klipu roztáhne kartu
+    // a <video> se musí načíst (žádné nové okno).
+    kine.openSettings('clips');
+    await sleep(700);
+    const win = kine.settingsWindow;
+    if (win && !win.isDestroyed()) {
+      await win.webContents.executeJavaScript(`(() => { const t = document.querySelector('.clip .thumb'); if (t) t.click(); return !!t; })()`);
+      let videoOk = false;
+      for (let i = 0; i < 20 && !videoOk; i++) {
+        await sleep(300);
+        videoOk = await win.webContents.executeJavaScript(
+          `(() => { const v = document.querySelector('.clip.playing video'); return !!v && v.readyState >= 1 && v.videoWidth > 0; })()`
+        );
+      }
+      result.inlinePlayer = videoOk;
+      await shot(win, 'settings-clips-player');
+      // Filtr podle hry a hledání nerozbijí stránku.
+      const filterOk = await win.webContents.executeJavaScript(
+        `(() => { const s = document.querySelector('.filters select'); if (!s) return false; s.value = 'none'; s.dispatchEvent(new Event('change')); return document.querySelectorAll('.clips .clip').length > 0; })()`
+      );
+      result.filters = filterOk;
+    }
+    // Průvodce: výběr jazyka a režimu.
+    kine.openSettings('wizard');
+    await sleep(800);
+    await shot(kine.settingsWindow, 'wizard-language');
+    const wiz = kine.settingsWindow;
+    if (wiz && !wiz.isDestroyed()) {
+      await wiz.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.wizard button.primary')].pop(); if (b) b.click(); })()`);
+      await sleep(500);
+      await shot(wiz, 'wizard-mode');
+    }
+    result.ok = !!clip1 && !!clip2 && kine.capture.state === 'on' && result.inlinePlayer === true && result.filters === true;
   } catch (e) {
     result.error = (e as Error).stack ?? String(e);
   }

@@ -1,27 +1,10 @@
-# Sestavení instalátoru pro Windows a vydání na GitHub Releases.
-#
-# Jak vydat novou verzi:
-#   1. v package.json zvedni "version" (např. 0.1.1)
-#   2. git commit -am "v0.1.1" && git tag v0.1.1 && git push && git push --tags
-#   3. za pár minut je v Releases soubor Kine-Setup.exe
-#      (+ latest.yml, podle kterého si appka sama najde aktualizaci)
-#
-# Bez tagu to jde taky: záložka Actions -> Vydání -> Run workflow.
-# Workflow si tag v<version> udělá sám a vydání vytvoří podle
-# "version" v package.json.
-#
-# Web Kine na instalátor míří sám (kine…/download/windows ->
-#   https://github.com/<owner>/kine-desktop/releases/latest/download/Kine-Setup.exe)
 name: Vydání
-
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
-
 permissions:
   contents: write
-
 jobs:
   windows:
     runs-on: windows-latest
@@ -34,10 +17,6 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
-      # Při ručním spuštění (Run workflow) tag ještě neexistuje - a GitHub
-      # odmítne založit vydání bez tagu ("Published releases must have a
-      # valid tag"). Tak si ho workflow udělá samo podle "version"
-      # v package.json. Tag od GITHUB_TOKEN nespouští další běh.
       - name: Tag podle package.json
         if: github.ref_type != 'tag'
         shell: bash
@@ -51,14 +30,64 @@ jobs:
             git tag "$v"
             git push origin "$v"
           fi
-      - name: Instalátor + vydání
-        run: npx electron-builder --win --x64 --publish always
+      # Adresa pro aktualizace (Cloudflare R2) a podpis - jen když jsou nastavené
+      # (Settings -> Secrets and variables -> Actions). Bez nich se vydává jen na GitHub.
+      - name: Konfigurace vydání
+        shell: bash
+        run: node scripts/publish-config.mjs
+        env:
+          DESKTOP_DOWNLOAD_BASE: ${{ vars.DESKTOP_DOWNLOAD_BASE }}
+          AZURE_SIGN_ENDPOINT: ${{ vars.AZURE_SIGN_ENDPOINT }}
+          AZURE_SIGN_ACCOUNT: ${{ vars.AZURE_SIGN_ACCOUNT }}
+          AZURE_SIGN_PROFILE: ${{ vars.AZURE_SIGN_PROFILE }}
+          AZURE_SIGN_PUBLISHER: ${{ vars.AZURE_SIGN_PUBLISHER }}
+      - name: Instalátor + vydání na GitHub
+        run: npx electron-builder --win --x64 --publish always --config electron-builder.generated.yml
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Nahrát i do vydání, které už existuje déle než 2 hodiny
-          # (electron-builder by ho jinak přeskočil).
           EP_GH_IGNORE_TIME: "true"
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      # Druhý název téhož instalátoru: "jen klipovač" (appka podle názvu
+      # předvyplní režim - build/installer.nsh).
+      - name: Kopie pro „jen klipovač“
+        shell: bash
+        run: cp release/Kine-Setup.exe release/Kine-Clipper-Setup.exe
+      - name: Kopie do vydání na GitHubu
+        shell: bash
+        run: |
+          v="v$(node -p "require('./package.json').version")"
+          gh release upload "$v" release/Kine-Clipper-Setup.exe --clobber || echo "kopie do vydání se nepovedla (vydání se dělá znovu?)"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Naše úložiště: Cloudflare R2 (S3 API). Lidi stahují z Kine, ne z GitHubu,
+      # a odsud si nainstalované appky berou aktualizace (latest.yml).
+      - name: Nahrát do Cloudflare R2
+        if: ${{ vars.DESKTOP_DOWNLOAD_BASE != '' }}
+        shell: bash
+        run: |
+          set -e
+          if [ -z "$R2_ACCOUNT_ID" ] || [ -z "$R2_BUCKET" ]; then echo "chybí R2_ACCOUNT_ID / R2_BUCKET (secrets)"; exit 1; fi
+          export AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_DEFAULT_REGION=auto
+          # R2 neumí nové kontrolní součty AWS CLI v2.23+ - vypnout, jinak upload selže.
+          export AWS_REQUEST_CHECKSUM_CALCULATION=when_required AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
+          EP="https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com"
+          put() { aws s3 cp "$1" "s3://$R2_BUCKET/$2" --endpoint-url "$EP" --content-type "$3" --cache-control "$4"; }
+          put release/Kine-Setup.exe Kine-Setup.exe application/octet-stream "public, max-age=300"
+          put release/Kine-Clipper-Setup.exe Kine-Clipper-Setup.exe application/octet-stream "public, max-age=300"
+          put release/Kine-Setup.exe.blockmap Kine-Setup.exe.blockmap application/octet-stream "public, max-age=300"
+          put release/latest.yml latest.yml text/yaml "no-cache"
+          echo "nahráno: $DESKTOP_DOWNLOAD_BASE/Kine-Setup.exe"
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          DESKTOP_DOWNLOAD_BASE: ${{ vars.DESKTOP_DOWNLOAD_BASE }}
       - uses: actions/upload-artifact@v4
         with:
           name: Kine-Setup
-          path: release/*.exe
+          path: |
+            release/*.exe
+            release/latest.yml

@@ -7,7 +7,8 @@
 #      (+ latest.yml, podle kterého si appka sama najde aktualizaci)
 #
 # Bez tagu to jde taky: záložka Actions -> Vydání -> Run workflow.
-# Vydání se pak vytvoří podle "version" v package.json.
+# Workflow si tag v<version> udělá sám a vydání vytvoří podle
+# "version" v package.json.
 #
 # Web Kine na instalátor míří sám (kine…/download/windows ->
 #   https://github.com/<owner>/kine-desktop/releases/latest/download/Kine-Setup.exe)
@@ -33,6 +34,23 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+      # Při ručním spuštění (Run workflow) tag ještě neexistuje - a GitHub
+      # odmítne založit vydání bez tagu ("Published releases must have a
+      # valid tag"). Tak si ho workflow udělá samo podle "version"
+      # v package.json. Tag od GITHUB_TOKEN nespouští další běh.
+      - name: Tag podle package.json
+        if: github.ref_type != 'tag'
+        shell: bash
+        run: |
+          v="v$(node -p "require('./package.json').version")"
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          if git ls-remote --exit-code --tags origin "$v" >/dev/null 2>&1; then
+            echo "tag $v už existuje"
+          else
+            git tag "$v"
+            git push origin "$v"
+          fi
       - name: Instalátor + vydání
         run: npx electron-builder --win --x64 --publish always
         env:

@@ -2,7 +2,10 @@
 // renderer do jednoho souboru. Typy hlídá zvlášť tsc (npm run build).
 import { build } from 'esbuild';
 import { cpSync, mkdirSync, rmSync } from 'node:fs';
+import { uklid } from './uklid.mjs';
 
+// Nejdřív pryč se soubory ze starších verzí (viz uklid.mjs), pak sestavení.
+uklid();
 rmSync('dist', { recursive: true, force: true });
 mkdirSync('dist', { recursive: true });
 

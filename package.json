@@ -1,0 +1,30 @@
+{
+  "name": "kine-desktop",
+  "productName": "Kine",
+  "version": "0.1.0",
+  "description": "Kine do PC - klipy ze hry jednou klávesou, nahrání na Kine až po hře.",
+  "author": "Kine",
+  "license": "MIT",
+  "private": true,
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "node scripts/build.mjs && tsc --noEmit -p tsconfig.json",
+    "start": "npm run build && electron .",
+    "test": "node scripts/build.mjs && node --test tests/*.test.mjs",
+    "dist": "npm run build && electron-builder --win --x64",
+    "dist:linux": "npm run build && electron-builder --linux dir",
+    "e2e": "bash tests/e2e.sh"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "electron-updater": "^6.3.9",
+    "ffmpeg-static": "^5.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "electron": "^44.0.0",
+    "electron-builder": "^26.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,54 @@
+# Balení instalátoru (electron-builder). Windows NSIS: jeden klik,
+# instalace pro uživatele (bez správce), zástupce na ploše, po skončení
+# se appka rovnou spustí. ffmpeg leží mimo archiv asar, aby šel spustit.
+appId: cz.kine.desktop
+productName: Kine
+copyright: Kine
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - build/icon.png
+  - build/tray.png
+  - package.json
+  - "!**/*.map"
+asarUnpack:
+  - node_modules/ffmpeg-static/**
+protocols:
+  - name: Kine
+    schemes: [kine]
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build/icon.png
+  artifactName: Kine-Setup.${ext}
+  # Bez podpisu: Windows ukáže "neznámý vydavatel". Až bude certifikát
+  # (Azure Trusted Signing), doplní se sem signtoolOptions / azureSignOptions.
+  verifyUpdateCodeSignature: false
+nsis:
+  oneClick: true
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+  shortcutName: Kine
+  artifactName: Kine-Setup.${ext}
+  installerLanguages: [cs_CZ, en_US]
+  language: 1029
+linux:
+  target: [dir]
+  category: AudioVideo
+  icon: build/icon.png
+mac:
+  target: [dmg]
+  category: public.app-category.video
+  icon: build/icon.png
+publish:
+  provider: github
+  owner: dezfghzdgz
+  repo: kine-desktop
+  releaseType: release

@@ -1,0 +1,384 @@
+import { createServer, type Server } from 'node:http';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { app, safeStorage, shell } from 'electron';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import type { AccountInfo } from '../shared/plan';
+import { log } from './log';
+
+/**
+ * Přihlášení k Kine.
+ *
+ * Appka NEMÁ zadrátované klíče k databázi - stáhne si je z Kine
+ * (/api/desktop/config: adresa Supabase a veřejný "anon" klíč, ten samý,
+ * který má každý návštěvník webu v prohlížeči). Díky tomu jde appka
+ * přepnout na jinou instalaci Kine (vývoj na localhostu) bez nové verze.
+ *
+ * Dvě cesty k přihlášení:
+ *  1. Přes prohlížeč: appka otevře kine.../connect?port=…&state=…, hráč
+ *     tam (už přihlášený) klikne "Připojit počítač". Stránka si od Kine
+ *     vyžádá jednorázový přihlašovací token PRO TENHLE počítač a pošle ho
+ *     na http://127.0.0.1:<port>/link (nebo přes odkaz kine://link…).
+ *     Appka z něj udělá vlastní relaci - s vlastním obnovovacím tokenem,
+ *     takže se prohlížeč a appka navzájem neodhlašují.
+ *  2. E-mail + heslo přímo v appce (Kine používá jen e-mail a heslo).
+ *
+ * Relace se ukládá zašifrovaná systémem (safeStorage: na Windows DPAPI),
+ * takže si ji nepřečte jiný uživatel počítače.
+ */
+
+export type DesktopConfig = { supabaseUrl: string; supabaseAnonKey: string; siteUrl: string };
+
+export type Account = AccountInfo;
+
+type Listener = (account: Account | null) => void;
+
+export class Auth {
+  private client: SupabaseClient | null = null;
+  private clientFor: string | null = null;
+  private account: Account | null = null;
+  private listeners = new Set<Listener>();
+  private linkServer: Server | null = null;
+  private linkState: string | null = null;
+  private readonly dir: string;
+
+  constructor(private siteUrl: () => string) {
+    this.dir = app.getPath('userData');
+  }
+
+  onChange(l: Listener): () => void {
+    this.listeners.add(l);
+    return () => this.listeners.delete(l);
+  }
+
+  current(): Account | null {
+    return this.account;
+  }
+
+  /** Při startu: obnovit relaci z disku (když je). */
+  async init(): Promise<void> {
+    try {
+      const client = await this.getClient();
+      const { data } = await client.auth.getSession();
+      if (data.session) await this.loadAccount();
+    } catch (e) {
+      log(`obnova přihlášení: ${(e as Error).message}`);
+    }
+  }
+
+  /** Přístupový token pro volání Kine; supabase-js ho sám obnoví, když vypršel. */
+  async getToken(): Promise<string | null> {
+    try {
+      const client = await this.getClient();
+      const { data } = await client.auth.getSession();
+      return data.session?.access_token ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ---- konfigurace a klient ------------------------------------------------
+
+  private async fetchConfig(): Promise<DesktopConfig> {
+    const site = this.siteUrl();
+    const cacheFile = join(this.dir, 'kine-config.json');
+    try {
+      const res = await fetch(`${site}/api/desktop/config`, { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) throw new Error(`Kine odpověděla ${res.status}`);
+      const data = (await res.json()) as Partial<DesktopConfig>;
+      if (!data.supabaseUrl || !data.supabaseAnonKey) throw new Error('Kine nevrátila konfiguraci.');
+      const config: DesktopConfig = { supabaseUrl: data.supabaseUrl, supabaseAnonKey: data.supabaseAnonKey, siteUrl: site };
+      writeFileSync(cacheFile, JSON.stringify(config));
+      return config;
+    } catch (e) {
+      // Offline: vezme se poslední známá konfigurace pro tuhle adresu.
+      if (existsSync(cacheFile)) {
+        const cached = JSON.parse(readFileSync(cacheFile, 'utf8')) as DesktopConfig;
+        if (cached.siteUrl === site) return cached;
+      }
+      throw e;
+    }
+  }
+
+  private async getClient(): Promise<SupabaseClient> {
+    const site = this.siteUrl();
+    if (this.client && this.clientFor === site) return this.client;
+    const config = await this.fetchConfig();
+    this.client = createClient(config.supabaseUrl, config.supabaseAnonKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: false,
+        storage: this.storage(),
+        storageKey: 'kine-desktop-auth',
+      },
+    });
+    this.clientFor = site;
+    return this.client;
+  }
+
+  /** Úložiště relace: jeden šifrovaný soubor. */
+  private storage() {
+    const file = join(this.dir, 'auth.bin');
+    const encrypt = (text: string): Buffer =>
+      safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(text) : Buffer.from('plain:' + text, 'utf8');
+    const decrypt = (buf: Buffer): string => {
+      if (buf.subarray(0, 6).toString('utf8') === 'plain:') return buf.subarray(6).toString('utf8');
+      return safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(buf) : '';
+    };
+    const readAll = (): Record<string, string> => {
+      try {
+        return JSON.parse(decrypt(readFileSync(file))) as Record<string, string>;
+      } catch {
+        return {};
+      }
+    };
+    const writeAll = (data: Record<string, string>) => {
+      mkdirSync(this.dir, { recursive: true });
+      writeFileSync(file, encrypt(JSON.stringify(data)));
+    };
+    return {
+      getItem: (key: string) => readAll()[key] ?? null,
+      setItem: (key: string, value: string) => {
+        const data = readAll();
+        data[key] = value;
+        writeAll(data);
+      },
+      removeItem: (key: string) => {
+        const data = readAll();
+        delete data[key];
+        writeAll(data);
+      },
+    };
+  }
+
+  private async loadAccount(): Promise<void> {
+    const client = await this.getClient();
+    const { data } = await client.auth.getUser();
+    const user = data.user;
+    if (!user) {
+      this.setAccount(null);
+      return;
+    }
+    const previous = this.account;
+    const account: Account = {
+      userId: user.id,
+      username: user.email?.split('@')[0] ?? 'kine',
+      email: user.email ?? null,
+      plan: previous?.userId === user.id ? previous.plan : 'free',
+      planUntil: previous?.userId === user.id ? previous.planUntil : null,
+      maxClipSeconds: previous?.userId === user.id ? previous.maxClipSeconds : 60,
+      plusAvailable: previous?.plusAvailable ?? false,
+      plusPriceLabel: previous?.plusPriceLabel ?? null,
+      brandColor: previous?.userId === user.id ? previous.brandColor : null,
+    };
+
+    // Kdo jsem a co smím (plán Kine Plus, barva Kine) - z Kine, ne z
+    // databáze napřímo: pravidla jsou na jednom místě (lib/plus.ts).
+    try {
+      const { data: session } = await client.auth.getSession();
+      const token = session.session?.access_token;
+      if (token) {
+        const res = await fetch(`${this.siteUrl()}/api/desktop/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (res.ok) {
+          const me = (await res.json()) as Partial<AccountInfo> & { id?: string };
+          if (me.username) account.username = me.username;
+          account.plan = me.plan === 'plus' ? 'plus' : 'free';
+          account.planUntil = me.planUntil ?? null;
+          account.maxClipSeconds = typeof me.maxClipSeconds === 'number' ? me.maxClipSeconds : account.plan === 'plus' ? 300 : 60;
+          account.plusAvailable = Boolean(me.plusAvailable);
+          account.plusPriceLabel = me.plusPriceLabel ?? null;
+          account.brandColor = typeof me.brandColor === 'string' ? me.brandColor : null;
+        } else {
+          log(`/api/desktop/me odpověděla ${res.status}`);
+        }
+      }
+    } catch (e) {
+      log(`/api/desktop/me: ${(e as Error).message}`);
+    }
+    this.setAccount(account);
+  }
+
+  /** Znovu se zeptat na plán a barvu (po startu, po přihlášení, občas). */
+  async refresh(): Promise<void> {
+    if (!this.account) return;
+    try {
+      await this.loadAccount();
+    } catch (e) {
+      log(`obnova účtu: ${(e as Error).message}`);
+    }
+  }
+
+  private setAccount(account: Account | null): void {
+    this.account = account;
+    for (const l of this.listeners) l(account);
+  }
+
+  // ---- přihlášení ----------------------------------------------------------
+
+  async loginWithPassword(email: string, password: string): Promise<void> {
+    const client = await this.getClient();
+    const { error } = await client.auth.signInWithPassword({ email: email.trim(), password });
+    if (error) throw new Error(translateAuthError(error.message));
+    await this.loadAccount();
+  }
+
+  async logout(): Promise<void> {
+    try {
+      const client = await this.getClient();
+      await client.auth.signOut();
+    } catch {
+      // I když odhlášení na serveru neprojde, lokálně se relace zahodí.
+    }
+    try {
+      unlinkSync(join(this.dir, 'auth.bin'));
+    } catch {
+      // Soubor už není.
+    }
+    this.setAccount(null);
+  }
+
+  /**
+   * Přihlášení přes prohlížeč. Vrací, až přijde token (nebo po 10 minutách
+   * skončí chybou). Mezitím appka poslouchá na 127.0.0.1.
+   */
+  async loginViaBrowser(): Promise<void> {
+    this.closeLinkServer();
+    const state = randomBytes(16).toString('hex');
+    this.linkState = state;
+
+    const port = await new Promise<number>((resolve, reject) => {
+      const server = createServer((req, res) => this.handleLinkRequest(req, res));
+      server.on('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address();
+        resolve(typeof address === 'object' && address ? address.port : 0);
+      });
+      this.linkServer = server;
+    });
+
+    const url = `${this.siteUrl()}/connect?port=${port}&state=${state}`;
+    log(`přihlášení přes prohlížeč: ${url}`);
+    await shell.openExternal(url);
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.closeLinkServer();
+        reject(new Error('Prohlížeč nic neposlal (10 minut).'));
+      }, 10 * 60 * 1000);
+      this.linkResolve = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.linkReject = (e) => {
+        clearTimeout(timer);
+        reject(e);
+      };
+    });
+  }
+
+  private linkResolve: (() => void) | null = null;
+  private linkReject: ((e: Error) => void) | null = null;
+
+  cancelBrowserLogin(): void {
+    this.closeLinkServer();
+    this.linkReject?.(new Error('Zrušeno.'));
+    this.linkResolve = null;
+    this.linkReject = null;
+  }
+
+  private closeLinkServer(): void {
+    this.linkServer?.close();
+    this.linkServer = null;
+  }
+
+  /** Odkaz kine://link?th=…&state=… (když prohlížeč nemohl na 127.0.0.1). */
+  async handleDeepLink(url: string): Promise<boolean> {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return false;
+    }
+    if (parsed.protocol !== 'kine:' || (parsed.hostname !== 'link' && parsed.pathname.replace(/^\/+/, '') !== 'link')) return false;
+    const th = parsed.searchParams.get('th');
+    const state = parsed.searchParams.get('state');
+    if (!th) return false;
+    await this.finishLink(th, state);
+    return true;
+  }
+
+  private async finishLink(tokenHash: string, state: string | null): Promise<void> {
+    if (!this.linkState || state !== this.linkState) throw new Error('Neplatný stav připojení - zkus to znovu z appky.');
+    const client = await this.getClient();
+    const { error } = await client.auth.verifyOtp({ type: 'magiclink', token_hash: tokenHash });
+    if (error) throw new Error(translateAuthError(error.message));
+    this.linkState = null;
+    await this.loadAccount();
+    this.closeLinkServer();
+    this.linkResolve?.();
+    this.linkResolve = null;
+    this.linkReject = null;
+  }
+
+  private handleLinkRequest(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse): void {
+    const origin = req.headers.origin ?? '';
+    const allowed = origin === this.siteUrl();
+    const cors: Record<string, string> = allowed
+      ? {
+          'Access-Control-Allow-Origin': origin,
+          'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type',
+          'Access-Control-Allow-Private-Network': 'true',
+          'Access-Control-Max-Age': '600',
+          Vary: 'Origin',
+        }
+      : {};
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(allowed ? 204 : 403, cors);
+      res.end();
+      return;
+    }
+    if (req.method === 'GET' && req.url?.startsWith('/ping')) {
+      res.writeHead(200, { ...cors, 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ app: 'kine-desktop', version: app.getVersion() }));
+      return;
+    }
+    if (req.method !== 'POST' || !req.url?.startsWith('/link') || !allowed) {
+      res.writeHead(404, cors);
+      res.end();
+      return;
+    }
+    let body = '';
+    req.on('data', (d) => {
+      body += d.toString();
+      if (body.length > 10000) req.destroy();
+    });
+    req.on('end', async () => {
+      try {
+        const data = JSON.parse(body) as { token_hash?: string; state?: string };
+        if (!data.token_hash) throw new Error('chybí token');
+        await this.finishLink(data.token_hash, data.state ?? null);
+        res.writeHead(200, { ...cors, 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        log(`připojení přes prohlížeč selhalo: ${(e as Error).message}`);
+        res.writeHead(400, { ...cors, 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: (e as Error).message }));
+      }
+    });
+  }
+}
+
+function translateAuthError(message: string): string {
+  if (/invalid login credentials/i.test(message)) return 'Špatný e-mail nebo heslo.';
+  if (/email not confirmed/i.test(message)) return 'E-mail ještě není potvrzený.';
+  if (/rate limit/i.test(message)) return 'Moc pokusů za sebou, zkus to za chvíli.';
+  if (/expired|invalid/i.test(message)) return 'Odkaz už neplatí, zkus to znovu.';
+  return message;
+}

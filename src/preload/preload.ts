@@ -1,0 +1,78 @@
+import { contextBridge, ipcRenderer } from 'electron';
+import type { CaptureCommand, CaptureEvent, Clip, DisplayInfo, ProcessInfo, Settings, Status, Visibility } from '../shared/types';
+
+/**
+ * Most mezi stránkami a hlavním procesem. Stránky nemají Node ani
+ * electron - jen tohle úzké rozhraní (window.kine, window.kineCapture).
+ */
+
+type UploadRequest = { clipId: string; visibility: Visibility; title?: string };
+
+const on = <T>(channel: string, cb: (payload: T) => void) => {
+  const listener = (_e: unknown, payload: T) => cb(payload);
+  ipcRenderer.on(channel, listener);
+  return () => ipcRenderer.removeListener(channel, listener);
+};
+
+const kine = {
+  platform: process.platform,
+  getSettings: (): Promise<Settings> => ipcRenderer.invoke('settings:get'),
+  updateSettings: (patch: Partial<Settings>): Promise<Settings> => ipcRenderer.invoke('settings:update', patch),
+  onSettings: (cb: (s: Settings) => void) => on<Settings>('settings', cb),
+  getStatus: (): Promise<Status> => ipcRenderer.invoke('status:get'),
+  onStatus: (cb: (s: Status) => void) => on<Status>('status', cb),
+  onNavigate: (cb: (target: string) => void) => on<string>('navigate', cb),
+
+  listClips: (): Promise<Clip[]> => ipcRenderer.invoke('clips:list'),
+  onClips: (cb: (clips: Clip[]) => void) => on<Clip[]>('clips', cb),
+  deleteClip: (id: string): Promise<void> => ipcRenderer.invoke('clips:delete', id),
+  renameClip: (id: string, title: string): Promise<Clip | null> => ipcRenderer.invoke('clips:rename', id, title),
+  openClip: (id: string): Promise<string> => ipcRenderer.invoke('clips:open', id),
+  revealClip: (id: string): Promise<void> => ipcRenderer.invoke('clips:reveal', id),
+  uploadClips: (requests: UploadRequest[]): Promise<void> => ipcRenderer.invoke('clips:upload', requests),
+  openOnKine: (id: string): Promise<void> => ipcRenderer.invoke('clips:openOnKine', id),
+  openClipsDir: (): Promise<string> => ipcRenderer.invoke('clips:openDir'),
+  pickClipsDir: (): Promise<string | null> => ipcRenderer.invoke('clips:pickDir'),
+  clipNow: (): Promise<Clip | null> => ipcRenderer.invoke('clips:clipNow'),
+  toggleCapture: (): Promise<void> => ipcRenderer.invoke('capture:toggle'),
+
+  loginBrowser: (): Promise<void> => ipcRenderer.invoke('auth:loginBrowser'),
+  cancelBrowserLogin: (): Promise<void> => ipcRenderer.invoke('auth:cancelBrowser'),
+  loginPassword: (email: string, password: string): Promise<void> => ipcRenderer.invoke('auth:loginPassword', email, password),
+  logout: (): Promise<void> => ipcRenderer.invoke('auth:logout'),
+  refreshAccount: (): Promise<void> => ipcRenderer.invoke('auth:refresh'),
+  onAuthWaiting: (cb: (waiting: boolean) => void) => on<boolean>('auth:waiting', cb),
+
+  listProcesses: (): Promise<ProcessInfo[]> => ipcRenderer.invoke('games:listProcesses'),
+  currentGame: (): Promise<{ name: string; exe: string } | null> => ipcRenderer.invoke('games:current'),
+  addGame: (exe: string, name: string): Promise<void> => ipcRenderer.invoke('games:add', exe, name),
+  removeGame: (exe: string): Promise<void> => ipcRenderer.invoke('games:remove', exe),
+
+  listDisplays: (): Promise<DisplayInfo[]> => ipcRenderer.invoke('displays:list'),
+  hotkeyAvailable: (accelerator: string): Promise<boolean> => ipcRenderer.invoke('hotkey:available', accelerator),
+
+  reviewClips: (sessionId: string): Promise<Clip[]> => ipcRenderer.invoke('review:clips', sessionId),
+  reviewDone: (requests: UploadRequest[]): Promise<void> => ipcRenderer.invoke('review:done', requests),
+
+  checkUpdate: (): Promise<{ status: string; version?: string }> => ipcRenderer.invoke('app:checkUpdate'),
+  openLogs: (): Promise<string> => ipcRenderer.invoke('app:openLogs'),
+  openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
+  quit: (): Promise<void> => ipcRenderer.invoke('app:quit'),
+
+  onToast: (cb: (t: { message: string; kind: string }) => void) => on<{ message: string; kind: string }>('toast:show', cb),
+};
+
+const kineCapture = {
+  platform: process.platform,
+  onCommand: (cb: (c: CaptureCommand) => void) => on<CaptureCommand>('capture:command', cb),
+  chunk: (generation: number, data: ArrayBuffer) => ipcRenderer.send('capture:chunk', generation, data),
+  event: (event: CaptureEvent) => ipcRenderer.send('capture:event', event),
+  sources: (): Promise<{ id: string; name: string; display_id: string }[]> => ipcRenderer.invoke('capture:sources'),
+  getSettings: (): Promise<Settings> => ipcRenderer.invoke('settings:get'),
+};
+
+contextBridge.exposeInMainWorld('kine', kine);
+contextBridge.exposeInMainWorld('kineCapture', kineCapture);
+
+export type KineBridge = typeof kine;
+export type KineCaptureBridge = typeof kineCapture;

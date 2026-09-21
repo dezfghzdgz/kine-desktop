@@ -83,3 +83,18 @@ export function expired(segments: Segment[], nowWall: number, keepSeconds: numbe
 export function concatList(files: string[]): string {
   return files.map((f) => `file '${f.replace(/'/g, `'\\''`)}'`).join('\n') + '\n';
 }
+
+/**
+ * Od kterého kousku (indexu) mají všechny stejné rozměry jako ten
+ * poslední. Neznámé rozměry (null) se berou jako "sedí". Pro klip se
+ * použije jen tenhle souvislý konec - prohlížeč neumí přehrát soubor,
+ * kde se uprostřed změní velikost obrazu.
+ */
+export function sameResolutionTailStart(sizes: (string | null)[]): number {
+  if (sizes.length === 0) return 0;
+  const last = sizes[sizes.length - 1];
+  if (!last) return 0;
+  let start = sizes.length - 1;
+  while (start > 0 && (sizes[start - 1] === null || sizes[start - 1] === last)) start -= 1;
+  return start;
+}

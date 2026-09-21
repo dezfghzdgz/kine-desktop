@@ -78,11 +78,17 @@ function render() {
       h('div', { class: 'actions' }, h('button', { class: 'small quiet', onclick: () => togglePlay(clip) }, isPlaying ? t('playerClose') : '▶ ' + t('libraryOpen')))
     );
     if (isPlaying) {
-      player ??= inlinePlayer(clip, t('playerClose'), () => {
-        playing = null;
-        player = null;
-        render();
-      });
+      player ??= inlinePlayer(
+        clip,
+        { close: t('playerClose'), error: (m) => t('playerError', { message: m }), openExternal: t('playerOpenExternal') },
+        () => {
+          playing = null;
+          player = null;
+          render();
+        },
+        () => void kine.openClip(clip.id),
+        (m) => void kine.log(m)
+      );
       grid.append(h('div', { class: `clip playing ${isSelected ? 'selected' : ''}` }, h('div', { class: 'player-wrap' }, player, check), body));
     } else {
       const thumb = h(

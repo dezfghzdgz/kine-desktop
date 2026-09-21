@@ -47,14 +47,20 @@ export type ChooseInput = {
 };
 
 /**
- * Vybere hru z toho, co běží. Pravidla:
+ * Vybere hru z toho, co běží. Pravidla (s pomocníkem, tj. když víme, co
+ * je v popředí):
  *  1. hra, jejíž okno je v popředí, vyhrává (i nad Steamem - ten jen
  *     doplní hezký název, když program neznáme);
  *  2. neznámý program v popředí přes celou obrazovku bez rámečku = hra
  *     (když je to zapnuté a není to prohlížeč, launcher, přehrávač…);
+ *     neznámý program v popředí, zatímco Steam hlásí běžící hru = ta hra;
  *  3. hra z minulého kola zůstává, dokud běží (alt-tab do Discordu ji
  *     neukončí);
- *  4. jinak první kandidát, přednostně takový, který má vlastní okno.
+ *  4. jinak NIC - hra, která běží někde na pozadí a hráč ji nemá před
+ *     sebou (zapomenutý Roblox), se nehraje. Po zavření CS2 tak appka
+ *     správně čeká na další hru, místo aby "hrála Roblox".
+ * Bez pomocníka (Linux/macOS, nebo když spadl) se bere první kandidát,
+ * přednostně takový, který má vlastní okno.
  */
 export function chooseGame(input: ChooseInput): DetectedGame | null {
   const candidates: DetectedGame[] = [];
@@ -72,13 +78,15 @@ export function chooseGame(input: ChooseInput): DetectedGame | null {
   if (fg?.exe) {
     const inFront = candidates.find((c) => c.exe === fg.exe);
     if (inFront) return inFront;
-    if (fg.fullscreen && input.fullscreenDetection && !IGNORED_FOREGROUND.has(fg.exe) && !fg.exe.startsWith('kine')) {
-      // Steam ví, co běží, ale ne pod jakým programem - když je v popředí
-      // neznámý program přes celou obrazovku a Steam hlásí hru, je to ona.
-      if (input.steam && !candidates.some((c) => c.exe === fg.exe)) {
+    if (!IGNORED_FOREGROUND.has(fg.exe) && !fg.exe.startsWith('kine')) {
+      if (input.steam) {
+        // Steam ví, co běží, ale ne pod jakým programem - když je v popředí
+        // neznámý program a Steam hlásí hru, je to ona (okno i celá obrazovka).
         return { name: input.steam.name, exe: fg.exe, source: 'steam' };
       }
-      return { name: input.custom[fg.exe] ?? prettyNameFromExe(fg.exe, fg.title), exe: fg.exe, source: 'fullscreen' };
+      if (fg.fullscreen && input.fullscreenDetection) {
+        return { name: input.custom[fg.exe] ?? prettyNameFromExe(fg.exe, fg.title), exe: fg.exe, source: 'fullscreen' };
+      }
     }
   }
 
@@ -89,6 +97,9 @@ export function chooseGame(input: ChooseInput): DetectedGame | null {
       return fresh ?? input.current;
     }
   }
+
+  // S pomocníkem víme, že žádná hra není před hráčem - nehádat.
+  if (fg) return null;
 
   if (candidates.length === 0) return null;
   const withWindow = candidates.find((c) => input.windowed.has(c.exe));

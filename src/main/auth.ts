@@ -213,6 +213,26 @@ export class Auth {
     this.setAccount(account);
   }
 
+  /**
+   * Barva Kine zvolená v appce (5x klik na logo) -> na účet hráče, ať ji
+   * má stejnou i web. Stejná cesta jako z prohlížeče (profiles.brand_color,
+   * vlastní řádek). Bez přihlášení se nic neposílá.
+   */
+  async setBrandColor(color: string | null): Promise<void> {
+    if (!this.account) return;
+    try {
+      const client = await this.getClient();
+      const { error } = await client.from('profiles').update({ brand_color: color }).eq('id', this.account.userId);
+      if (error) {
+        log(`barva na účet: ${error.message}`);
+        return;
+      }
+      this.account = { ...this.account, brandColor: color };
+    } catch (e) {
+      log(`barva na účet: ${(e as Error).message}`);
+    }
+  }
+
   /** Znovu se zeptat na plán a barvu (po startu, po přihlášení, občas). */
   async refresh(): Promise<void> {
     if (!this.account) return;

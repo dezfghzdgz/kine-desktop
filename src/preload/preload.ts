@@ -61,8 +61,18 @@ const kine = {
   checkUpdate: (): Promise<{ status: string; version?: string }> => ipcRenderer.invoke('app:checkUpdate'),
   openLogs: (): Promise<string> => ipcRenderer.invoke('app:openLogs'),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
-  /** Otevře Kine: v režimu "Kine + klipy" jako okno appky, jinak v prohlížeči. */
+  /** Otevře Kine: v režimu "Kine + klipy" jako záložku hlavního okna, jinak v prohlížeči. */
   openKine: (path?: string): Promise<void> => ipcRenderer.invoke('app:openKine', path ?? ''),
+  /** Web Kine v okně: kde má ležet (obdélník obsahu), schovat, obnovit. */
+  kineViewShow: (bounds: { x: number; y: number; width: number; height: number }): Promise<void> => ipcRenderer.invoke('kineView:show', bounds),
+  kineViewHide: (): Promise<void> => ipcRenderer.invoke('kineView:hide'),
+  kineViewReload: (): Promise<void> => ipcRenderer.invoke('kineView:reload'),
+  onKineViewFailed: (cb: (description: string) => void) => on<string>('kineView:failed', cb),
+  onKineViewRetry: (cb: () => void) => on<null>('kineView:retry', cb),
+  /** Barva Kine (5x klik na logo); null = výchozí. Uloží se i na účet, když je hráč přihlášený. */
+  setBrandColor: (color: string | null): Promise<void> => ipcRenderer.invoke('brand:set', color),
+  /** Zápis do protokolu appky (chyby přehrávače apod.). */
+  log: (message: string): Promise<void> => ipcRenderer.invoke('app:log', message),
   quit: (): Promise<void> => ipcRenderer.invoke('app:quit'),
 
   onToast: (cb: (t: { message: string; kind: string }) => void) => on<{ message: string; kind: string }>('toast:show', cb),

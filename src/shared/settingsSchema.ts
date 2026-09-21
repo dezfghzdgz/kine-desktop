@@ -10,9 +10,10 @@ import { isHotkey } from './hotkeys';
  * k rozumným hodnotám.
  */
 export const DEFAULT_SETTINGS: Settings = {
-  version: 1,
+  version: 2,
   lang: 'en',
   appMode: 'clipper',
+  appModeChosen: false,
   clipHotkey: 'F8',
   toggleHotkey: 'Ctrl+F9',
   clipSeconds: 30,
@@ -21,7 +22,8 @@ export const DEFAULT_SETTINGS: Settings = {
   codec: 'auto',
   videoMbps: 8,
   systemAudio: true,
-  microphone: false,
+  // Mikrofon od začátku - hráč nemá co nastavovat, klip má i jeho hlas.
+  microphone: true,
   displayId: '',
   detection: 'games',
   detectFullscreen: true,
@@ -72,10 +74,15 @@ export function sanitizeSettings(input: unknown): Settings {
   let siteUrl = text(raw.siteUrl, d.siteUrl).trim().replace(/\/+$/, '');
   if (!/^https?:\/\/[^\s/]+$/i.test(siteUrl)) siteUrl = d.siteUrl;
 
+  // Nastavení ze starší verze (před 0.3): mikrofon se jednou zapne (dřív
+  // byl vypnutý a hráč to musel hledat) a režim se znovu odvodí z instalátoru.
+  const upgrade = raw.version !== 2;
+
   return {
-    version: 1,
+    version: 2,
     lang: oneOf(raw.lang, LANGS, d.lang),
     appMode: oneOf(raw.appMode, ['clipper', 'full'] as const, d.appMode),
+    appModeChosen: upgrade ? false : bool(raw.appModeChosen, d.appModeChosen),
     clipHotkey: isHotkey(raw.clipHotkey) ? (raw.clipHotkey as string) : d.clipHotkey,
     toggleHotkey: isHotkey(raw.toggleHotkey) ? (raw.toggleHotkey as string) : d.toggleHotkey,
     clipSeconds: Number.isFinite(clipSeconds)
@@ -86,7 +93,7 @@ export function sanitizeSettings(input: unknown): Settings {
     codec: oneOf(raw.codec, ['auto', 'h264', 'vp9', 'vp8'] as const, d.codec),
     videoMbps: Number.isFinite(videoMbps) ? Math.min(50, Math.max(1, videoMbps)) : d.videoMbps,
     systemAudio: bool(raw.systemAudio, d.systemAudio),
-    microphone: bool(raw.microphone, d.microphone),
+    microphone: upgrade ? true : bool(raw.microphone, d.microphone),
     displayId: text(raw.displayId, d.displayId, 100),
     detection: oneOf(raw.detection, ['games', 'always', 'manual'] as const, d.detection),
     detectFullscreen: bool(raw.detectFullscreen, d.detectFullscreen),

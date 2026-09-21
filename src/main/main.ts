@@ -5,6 +5,7 @@ import {
   BrowserWindow,
   Menu,
   Tray,
+  WebContentsView,
   app,
   desktopCapturer,
   dialog,
@@ -17,6 +18,7 @@ import {
   shell,
 } from 'electron';
 import type { CaptureEvent, Clip, DisplayInfo, Settings, Status, Visibility } from '../shared/types';
+import { hexToRgbTriplet } from '../shared/plan';
 import { makeT, type Key } from '../shared/i18n';
 import { hotkeyLabel } from '../shared/hotkeys';
 import { defaultClipTitle } from '../shared/clipNaming';
@@ -46,7 +48,9 @@ import { HotkeyManager, type HotkeyId, type HotkeyReason } from './hotkeys';
  * nebo nahrají samy (uploader.ts) - ale nikdy během hraní.
  *
  * Dva režimy: "jen klipovač" (okno s klipy a nastavením) a "Kine +
- * klipy" (navíc okno s webem Kine jako aplikace).
+ * klipy" (v tom samém okně je první záložka "Kine" - web Kine vložený
+ * jako WebContentsView, s trvalým přihlášením; klipy a nastavení jsou
+ * hned vedle).
  */
 
 const PRELOAD = join(__dirname, '..', 'preload', 'preload.js');
@@ -78,12 +82,20 @@ class KineApp {
   tray: Tray | null = null;
   settingsWindow: BrowserWindow | null = null;
   reviewWindow: BrowserWindow | null = null;
-  kineWindow: BrowserWindow | null = null;
+  /** Web Kine vložený do hlavního okna (režim "Kine + klipy"). */
+  kineView: WebContentsView | null = null;
+  kineViewShown = false;
+  /** Stránka chce web vidět (záložka Kine) - i když se zrovna nenačetl. */
+  kineViewWanted = false;
+  /** Web se nenačetl (bez internetu) - pod ním zůstane náš text s tlačítkem Obnovit. */
+  kineViewFailed = false;
+  pendingKinePath: string | null = null;
   /** Aktuální "hraní": všechny klipy z něj se po hře nabídnou naráz. */
   sessionId = randomUUID();
   paused = false;
   browserLoginWaiting = false;
   clipChain: Promise<unknown> = Promise.resolve();
+  warnedOnce = new Set<string>();
 
   t(key: Key, vars?: Record<string, string | number>): string {
     return makeT(this.settings.get().lang)(key, vars);
@@ -113,7 +125,9 @@ class KineApp {
     log(`start Kine ${app.getVersion()} (${process.platform}, electron ${process.versions.electron})`);
 
     this.settings = new SettingsStore();
-    if (!this.settings.get().onboarded) await this.presetModeFromInstaller();
+    // Režim podle názvu instalátoru - při prvním spuštění i po aktualizaci
+    // ze starší verze, kde se ještě nevybíral.
+    if (!this.settings.get().onboarded || !this.settings.get().appModeChosen) await this.presetModeFromInstaller();
     this.library = new ClipLibrary(this.settings.clipsDir());
     this.library.load();
 
@@ -134,6 +148,12 @@ class KineApp {
       onState: (state, error) => {
         if (state === 'error' && error) void this.toast.show(this.t('toastCaptureError', { message: error }), 'error', { notification: true });
         this.pushStatus();
+      },
+      onWarning: (kind, message) => {
+        // Jednou za běh appky - ne při každém startu zásobníku.
+        if (this.warnedOnce.has(kind)) return;
+        this.warnedOnce.add(kind);
+        void this.toast.show(this.t('toastMicUnavailable', { message: message.replace(/^\w*Error:\s*/, '') }), 'warn', { notification: true });
       },
     });
 
@@ -169,9 +189,10 @@ class KineApp {
     });
     this.library.onChange(() => this.pushClips());
     this.auth.onChange((account) => {
-      // Barva Kine z účtu -> appka se přebarví stejně jako web hráče.
-      const color = account?.brandColor && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(account.brandColor) ? account.brandColor : '';
-      if (color !== this.settings.get().brandColor) this.settings.update({ brandColor: color });
+      // Barva Kine z účtu -> appka se přebarví stejně jako web hráče. Bez
+      // účtu (nebo bez barvy na účtu) zůstává barva zvolená v appce.
+      const color = account?.brandColor && hexToRgbTriplet(account.brandColor) ? account.brandColor : null;
+      if (color && color !== this.settings.get().brandColor) this.settings.update({ brandColor: color });
       this.pushStatus();
       this.rebuildTray();
     });
@@ -204,10 +225,7 @@ class KineApp {
     const hidden = process.argv.includes('--hidden');
     const s = this.settings.get();
     if (!s.onboarded) this.openSettings('wizard');
-    else if (!hidden) {
-      if (s.appMode === 'full') this.openKine();
-      else this.openSettings();
-    }
+    else if (!hidden) this.openSettings(s.appMode === 'full' ? 'kine' : 'clips');
 
     // Odkaz kine://…, kterým appku někdo spustil (Windows předává v argv).
     for (const arg of process.argv) if (arg.startsWith('kine://')) void this.handleDeepLink(arg);
@@ -231,7 +249,7 @@ class KineApp {
     const name = m[1].trim();
     const mode: Settings['appMode'] = /clip|klip/i.test(name) ? 'clipper' : 'full';
     log(`instalátor: ${name} -> režim ${mode}`);
-    if (mode !== this.settings.get().appMode) this.settings.update({ appMode: mode });
+    this.settings.update({ appMode: mode, appModeChosen: true });
   }
 
   // ---- hry ---------------------------------------------------------------------
@@ -293,7 +311,7 @@ class KineApp {
       }
       const game = this.games.current();
       try {
-        const result = await this.capture.makeClip(this.effectiveClipSeconds(), this.settings.clipsDir(), game?.name ?? null);
+        const result = await this.capture.makeClip(this.effectiveClipSeconds(), this.settings.clipsDir(), game?.name ?? null, join(app.getPath('userData'), 'thumbs'));
         const clip: Clip = {
           id: randomUUID(),
           file: result.file,
@@ -360,7 +378,8 @@ class KineApp {
       else if (s.detection === 'manual') void this.capture.stop();
     }
     if (s.detectFullscreen !== prev.detectFullscreen) void this.games.refresh();
-    if (s.appMode !== prev.appMode && s.appMode === 'clipper' && this.kineWindow && !this.kineWindow.isDestroyed()) this.kineWindow.close();
+    if (s.appMode !== prev.appMode && s.appMode === 'clipper') this.destroyKineView();
+    if (s.siteUrl !== prev.siteUrl) this.destroyKineView();
     this.rebuildTray();
     this.pushStatus();
     this.broadcast('settings', s);
@@ -419,9 +438,10 @@ class KineApp {
       },
       { useSystemPicker: false }
     );
-    // Mikrofon pro skrytou snímací stránku (a nic jiného).
+    // Mikrofon pro skrytou snímací stránku, celá obrazovka pro přehrávač klipů
+    // (tlačítko ⛶ v přehrávači jinak nic neudělá), oznámení.
     session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => {
-      cb(permission === 'media' || permission === 'display-capture' || permission === 'notifications');
+      cb(['media', 'display-capture', 'notifications', 'fullscreen', 'pointerLock'].includes(permission));
     });
   }
 
@@ -433,7 +453,7 @@ class KineApp {
     else icon = icon.resize({ width: process.platform === 'darwin' ? 18 : 16, height: process.platform === 'darwin' ? 18 : 16 });
     if (process.platform === 'darwin') icon.setTemplateImage(true);
     this.tray = new Tray(icon);
-    const open = () => (this.settings.get().appMode === 'full' && this.settings.get().onboarded ? this.openKine() : this.openSettings());
+    const open = () => this.openSettings(this.settings.get().appMode === 'full' && this.settings.get().onboarded ? 'kine' : undefined);
     this.tray.on('click', open);
     this.tray.on('double-click', open);
     this.rebuildTray();
@@ -496,11 +516,14 @@ class KineApp {
       this.settingsWindow.focus();
       return;
     }
+    // V režimu "Kine + klipy" je v okně i web - potřebuje víc místa, ať se
+    // nepřepne do rozložení pro telefon.
+    const full = this.settings.get().appMode === 'full';
     const win = new BrowserWindow({
-      width: 960,
-      height: 680,
-      minWidth: 760,
-      minHeight: 540,
+      width: full ? 1320 : 960,
+      height: full ? 840 : 680,
+      minWidth: full ? 1000 : 760,
+      minHeight: full ? 620 : 540,
       title: 'Kine',
       backgroundColor: '#050506',
       autoHideMenuBar: true,
@@ -512,6 +535,7 @@ class KineApp {
     void win.loadFile(join(RENDERER_DIR, 'settings.html'), { query: tab ? { tab } : {} });
     win.on('closed', () => {
       this.settingsWindow = null;
+      this.destroyKineView();
     });
     win.webContents.setWindowOpenHandler(({ url }) => {
       if (/^https?:/.test(url)) void shell.openExternal(url);
@@ -556,8 +580,8 @@ class KineApp {
   }
 
   /**
-   * Otevře Kine. V režimu "Kine + klipy" jako vlastní okno appky (web
-   * Kine s trvalým přihlášením), jinak v prohlížeči.
+   * Otevře Kine. V režimu "Kine + klipy" jako záložku hlavního okna (web
+   * Kine vložený do okna, s trvalým přihlášením), jinak v prohlížeči.
    */
   openKine(path = ''): void {
     const s = this.settings.get();
@@ -566,32 +590,26 @@ class KineApp {
       void shell.openExternal(url);
       return;
     }
-    if (this.kineWindow && !this.kineWindow.isDestroyed()) {
-      if (path) void this.kineWindow.loadURL(url);
-      this.kineWindow.show();
-      this.kineWindow.focus();
-      return;
+    if (this.kineView && !this.kineView.webContents.isDestroyed()) {
+      if (path) void this.kineView.webContents.loadURL(url);
+    } else if (path) {
+      this.pendingKinePath = path;
     }
+    this.openSettings('kine');
+  }
+
+  /** Web Kine vložený do hlavního okna; vznikne, až ho stránka poprvé ukáže. */
+  private ensureKineView(win: BrowserWindow): WebContentsView {
+    if (this.kineView && !this.kineView.webContents.isDestroyed()) return this.kineView;
     const partition = 'persist:kine-web';
-    // Web Kine v okně: žádný preload (mluví s appkou jen přes odkazy kine://),
-    // a jen oprávnění, která web opravdu potřebuje.
+    // Žádný preload (web mluví s appkou jen přes odkazy kine://) a jen
+    // oprávnění, která web opravdu potřebuje.
     session.fromPartition(partition).setPermissionRequestHandler((_wc, permission, cb) => {
       cb(['fullscreen', 'notifications', 'clipboard-sanitized-write', 'pointerLock', 'media'].includes(permission));
     });
-    const win = new BrowserWindow({
-      width: 1280,
-      height: 820,
-      minWidth: 900,
-      minHeight: 600,
-      title: 'Kine',
-      backgroundColor: '#050506',
-      autoHideMenuBar: true,
-      icon: ICON_PNG,
-      webPreferences: { partition, contextIsolation: true, sandbox: true },
-    });
-    win.setMenuBarVisibility(false);
-    // Web pozná, že běží v appce (Sidebar ukáže "Klipy v PC").
-    win.webContents.setUserAgent(`${win.webContents.getUserAgent()} KineDesktop/${app.getVersion()}`);
+    const view = new WebContentsView({ webPreferences: { partition, contextIsolation: true, sandbox: true } });
+    // Web pozná, že běží v appce (Sidebar ukáže "Klipy v PC", /download řekne, že appku už máš).
+    view.webContents.setUserAgent(`${view.webContents.getUserAgent()} KineDesktop/${app.getVersion()}`);
     const external = (target: string) => {
       if (target.startsWith('kine://')) {
         void this.handleDeepLink(target);
@@ -603,18 +621,92 @@ class KineApp {
       }
       return false;
     };
-    win.webContents.setWindowOpenHandler(({ url: target }) => {
-      if (!external(target) && this.isKineUrl(target)) void win.loadURL(target);
+    view.webContents.setWindowOpenHandler(({ url: target }) => {
+      if (!external(target) && this.isKineUrl(target)) void view.webContents.loadURL(target);
       return { action: 'deny' };
     });
-    win.webContents.on('will-navigate', (e, target) => {
+    view.webContents.on('will-navigate', (e, target) => {
       if (external(target)) e.preventDefault();
     });
-    win.on('closed', () => {
-      this.kineWindow = null;
+    view.webContents.on('did-fail-load', (_e, code, description, url, isMainFrame) => {
+      if (!isMainFrame || code === -3) return;
+      log(`Kine v okně: ${description} (${code}) ${url}`);
+      // Místo chybové stránky Chromia zůstane náš text s tlačítkem Obnovit.
+      this.kineViewFailed = true;
+      view.setVisible(false);
+      this.kineViewShown = false;
+      this.broadcast('kineView:failed', description);
     });
-    this.kineWindow = win;
-    void win.loadURL(url);
+    view.webContents.on('did-finish-load', () => {
+      this.kineViewFailed = false;
+      if (this.kineViewWanted && !this.kineViewShown) {
+        view.setVisible(true);
+        this.kineViewShown = true;
+      }
+    });
+    win.contentView.addChildView(view);
+    view.setVisible(false);
+    const path = this.pendingKinePath ?? '';
+    this.pendingKinePath = null;
+    const s = this.settings.get();
+    void view.webContents.loadURL(s.siteUrl + (path ? (path.startsWith('/') ? path : `/${path}`) : ''));
+    this.kineView = view;
+    return view;
+  }
+
+  /** Stránka řekne, kde má web ležet (obdélník obsahu v okně, v DIP). */
+  showKineView(bounds: { x: number; y: number; width: number; height: number }): void {
+    const win = this.settingsWindow;
+    if (!win || win.isDestroyed()) return;
+    if (this.settings.get().appMode !== 'full') return;
+    const view = this.ensureKineView(win);
+    const clean = {
+      x: Math.max(0, Math.round(bounds.x)),
+      y: Math.max(0, Math.round(bounds.y)),
+      width: Math.max(1, Math.round(bounds.width)),
+      height: Math.max(1, Math.round(bounds.height)),
+    };
+    view.setBounds(clean);
+    this.kineViewWanted = true;
+    if (!this.kineViewShown && !this.kineViewFailed) {
+      view.setVisible(true);
+      this.kineViewShown = true;
+    }
+  }
+
+  hideKineView(): void {
+    this.kineViewWanted = false;
+    if (this.kineView && !this.kineView.webContents.isDestroyed() && this.kineViewShown) this.kineView.setVisible(false);
+    this.kineViewShown = false;
+  }
+
+  reloadKineView(): void {
+    const view = this.kineView;
+    if (!view || view.webContents.isDestroyed()) {
+      // Ještě nevznikl (nebo padl) - vznikne, až se stránka znovu ohlásí.
+      if (this.settingsWindow) this.settingsWindow.webContents.send('kineView:retry', null);
+      return;
+    }
+    this.kineViewFailed = false;
+    view.webContents.reload();
+  }
+
+  private destroyKineView(): void {
+    const view = this.kineView;
+    this.kineView = null;
+    this.kineViewShown = false;
+    this.kineViewFailed = false;
+    if (!view) return;
+    try {
+      if (this.settingsWindow && !this.settingsWindow.isDestroyed()) this.settingsWindow.contentView.removeChildView(view);
+    } catch {
+      // okno už je pryč
+    }
+    try {
+      if (!view.webContents.isDestroyed()) view.webContents.close();
+    } catch {
+      // už zavřené
+    }
   }
 
   private broadcast(channel: string, payload: unknown): void {
@@ -707,10 +799,7 @@ class KineApp {
     });
     ipcMain.handle('clips:openOnKine', (_e, id: string) => {
       const clip = this.library.get(id);
-      if (clip?.upload?.state === 'done') {
-        if (this.settings.get().appMode === 'full') this.openKine(clip.upload.url.replace(this.settings.get().siteUrl, ''));
-        else void shell.openExternal(clip.upload.url);
-      }
+      if (clip?.upload?.state === 'done') this.openKine(clip.upload.url.replace(this.settings.get().siteUrl, '') || '/');
     });
     ipcMain.handle('clips:openDir', () => shell.openPath(this.settings.clipsDir()));
     ipcMain.handle('clips:pickDir', async () => {
@@ -788,6 +877,20 @@ class KineApp {
       if (/^https?:\/\//.test(url)) void shell.openExternal(url);
     });
     ipcMain.handle('app:openKine', (_e, path: string) => this.openKine(typeof path === 'string' ? path : ''));
+    ipcMain.handle('kineView:show', (_e, bounds: { x: number; y: number; width: number; height: number }) => {
+      if (bounds && typeof bounds.width === 'number') this.showKineView(bounds);
+    });
+    ipcMain.handle('kineView:hide', () => this.hideKineView());
+    ipcMain.handle('kineView:reload', () => this.reloadKineView());
+    // Barva Kine (5x klik na logo): uloží se v appce a - když je hráč
+    // přihlášený - i na jeho účet, ať ji má stejnou na webu.
+    ipcMain.handle('brand:set', async (_e, color: string | null) => {
+      const clean = typeof color === 'string' && hexToRgbTriplet(color) ? color.trim() : '';
+      this.settings.update({ brandColor: clean });
+      await this.auth.setBrandColor(clean || null);
+    });
+    // Stránky nemají přístup k protokolu - chyby přehrávače a podobně sem.
+    ipcMain.handle('app:log', (_e, message: string) => log(`[okno] ${String(message).slice(0, 500)}`));
     ipcMain.handle('app:quit', () => this.quit());
     ipcMain.handle('capture:toggle', () => this.onToggleHotkey());
   }
@@ -831,8 +934,7 @@ const kine = new KineApp();
 app.on('second-instance', (_e, argv) => {
   const link = argv.find((a) => a.startsWith('kine://'));
   if (link) void kine.handleDeepLink(link);
-  else if (kine.settings?.get().appMode === 'full' && kine.settings.get().onboarded) kine.openKine();
-  else kine.openSettings();
+  else kine.openSettings(kine.settings?.get().appMode === 'full' && kine.settings.get().onboarded ? 'kine' : undefined);
 });
 
 app.on('open-url', (e, url) => {

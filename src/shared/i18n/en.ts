@@ -246,6 +246,16 @@ export const en = {
   clipSecondsFreeHint: 'In the basic version clips are up to {max} s. Longer clips (up to 5 minutes) come with Clips Plus.',
   clipSecondsPlusHint: 'With Clips Plus up to {max} s.',
   captureErrorHint: 'Screen recording did not start. Check the display and codec in settings; if that does not help, send the log to kinesupport@gmail.com.',
+  tabKine: 'Kine',
+  kineViewHint: 'Kine opens right here. Your clips are one tab over.',
+  kineReload: 'Reload',
+  brandColorTitle: 'Kine color',
+  brandColorHint: 'Click the Kine logo five times to pick the app color. Signed in, the color follows your account - the site gets it too.',
+  brandColorReset: 'Default color',
+  brandColorCustom: 'Custom color…',
+  playerError: 'The built-in player could not play this clip ({message}).',
+  playerOpenExternal: 'Open in the system player',
+  toastMicUnavailable: 'Microphone is not available - clips will be recorded without it ({message}).',
 } as const;
 
 export type Key = keyof typeof en;

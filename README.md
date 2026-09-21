@@ -1,12 +1,14 @@
 # Kine do PC
 
 Program do Windows, který běží v liště u hodin: když hraješ, drží
-posledních N sekund obrazu (a zvuku). Zmáčkneš klávesu a uloží se klip.
-Po dohrání se klipy nabídnou k nahrání na Kine – **nikdy během hry**,
-aby online hra na slabší wifi nelagovala. Ve dvou režimech: **jen
-klipovač**, nebo **Kine + klipy** (Kine navíc jako aplikace na koukání
-videí – okno s webem Kine s trvalým přihlášením). Anglicky v základu,
-osm jazyků (stejné jako web).
+posledních N sekund obrazu (a zvuku, včetně mikrofonu). Zmáčkneš klávesu
+a uloží se klip. Po dohrání se klipy nabídnou k nahrání na Kine – **nikdy
+během hry**, aby online hra na slabší wifi nelagovala. Ve dvou režimech:
+**jen klipovač**, nebo **Kine + klipy** – v tom je první záložka hlavního
+okna samotné Kine (web vložený do okna, `WebContentsView`, s trvalým
+přihlášením) a klipy s nastavením hned vedle. Anglicky v základu, osm
+jazyků (stejné jako web). Pětkrát klik na logo = barva appky (jako na
+webu, ukládá se i na účet).
 
 Samostatný projekt vedle webu Kine (repo `Kine`). Web potřebuje
 `/api/desktop/config`, `/api/desktop/link`, `/api/desktop/me` a stránky
@@ -47,7 +49,10 @@ hra běží  ──►  GameWatcher (tasklist + okno v popředí + Steam + sezna
   hráčem, a **neznámý program přes celou obrazovku bez rámečku** (tak běží
   skoro každá hra; pojmenuje se podle programu, hráč ji může přejmenovat).
   Alt-tab do Discordu hru neukončí – drží se, dokud její proces běží.
-  Minecraft Java (`javaw.exe`) se potvrzuje podle příkazové řádky.
+  Hra, která jen běží někde na pozadí a hráč ji nemá před sebou
+  (zapomenutý Roblox), se nehraje – po zavření CS2 appka čeká na další
+  hru, místo aby „hrála Roblox“. Minecraft Java (`javaw.exe`) se
+  potvrzuje podle příkazové řádky.
 - **Zkratky** (`src/shared/hotkeys.ts`, `src/main/hotkeys.ts`): jedna
   klávesa s Ctrl/Alt/Shift jde přes systémovou zkratku Electronu; víc
   kláves najednou („F8+F9“), tlačítka myši (Mouse4/5) a klávesy jako
@@ -137,5 +142,9 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   (Chromium ho umí jen na Windows), bez pomocníka (hry jen podle seznamu
   a Steamu, jen jednoduché zkratky).
 - Klip je dlouhý N až N+2 s (kousky po 2 s, řez jen na klíčovém snímku).
+  Když hra mezitím přepnula rozlišení, klip začíná až od místa, kde má
+  obraz stejné rozměry (jinak by ho prohlížeč nepřehrál).
+- Náhledy klipů (první snímek videa) leží v `%APPDATA%\kine-desktop\thumbs`,
+  ve složce s klipy jsou jen videa.
 - Hry v režimu *exclusive fullscreen* okénko „Klip uložen“ neukážou –
   přijde zvukové pípnutí a systémové oznámení.

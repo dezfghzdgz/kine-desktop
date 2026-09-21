@@ -8,20 +8,25 @@ import { applyBrandColor, clipOptionsFor, maxClipSecondsFor } from '../shared/pl
 import { clear, clipMeta, errorText, fileUrl, formatDate, formatDuration, h, inlinePlayer } from './ui';
 
 /**
- * Hlavní okno: klipy (první záložka), nastavení, hry, nahrávání, účet,
- * o appce + průvodce při prvním spuštění.
+ * Hlavní okno: v režimu "Kine + klipy" první záložka Kine (web Kine
+ * vložený do okna - hlavní proces ho položí přes plochu, kterou mu tahle
+ * stránka nahlásí), pak klipy, nastavení, hry, nahrávání, účet, o appce
+ * + průvodce při prvním spuštění.
  *
  * Bez knihovny pro UI: stránka se po každé změně vykreslí znovu z dat
  * (settings, status, clips). Změny se ukládají hned, žádné "Uložit".
  * Přehrávač klipu žije ve stejném okně - karta se roztáhne a hraje.
+ * Pětkrát klik na logo Kine = výběr barvy appky (jako na webu).
  */
 declare const window: Window & { kine: KineBridge };
 const kine = window.kine;
 const app = document.getElementById('app') as HTMLDivElement;
 
-type Tab = 'clips' | 'settings' | 'games' | 'upload' | 'account' | 'about';
-const TABS: Tab[] = ['clips', 'settings', 'games', 'upload', 'account', 'about'];
-const TAB_KEYS: Record<Tab, Key> = { clips: 'tabClips', settings: 'tabSettings', games: 'tabGames', upload: 'tabUpload', account: 'tabAccount', about: 'tabAbout' };
+type Tab = 'kine' | 'clips' | 'settings' | 'games' | 'upload' | 'account' | 'about';
+const TABS: Tab[] = ['kine', 'clips', 'settings', 'games', 'upload', 'account', 'about'];
+const TAB_KEYS: Record<Tab, Key> = { kine: 'tabKine', clips: 'tabClips', settings: 'tabSettings', games: 'tabGames', upload: 'tabUpload', account: 'tabAccount', about: 'tabAbout' };
+/** Barvy jako na webu (components/BrandLogo.tsx). */
+const PRESET_COLORS = ['#00c9a7', '#4f8ef7', '#f7484f', '#f7b84f', '#a34ff7', '#f74fd6', '#4ff77c', '#ffffff'];
 
 type DateFilter = 'all' | 'today' | 'week' | 'month';
 
@@ -49,6 +54,12 @@ let playing: string | null = null;
 const players = new Map<string, HTMLElement>();
 const filters: { game: string; date: DateFilter; query: string } = { game: 'all', date: 'all', query: '' };
 let focusSearch = false;
+let colorPickerOpen = false;
+let brandClicks = 0;
+let brandClickTimer: ReturnType<typeof setTimeout> | null = null;
+let kineShown = false;
+let kineFailed: string | null = null;
+let renderQueued = false;
 
 const t = (key: Key, vars?: Record<string, string | number>) => makeT(settings.lang)(key, vars);
 
@@ -58,39 +69,64 @@ async function init() {
   currentGame = await kine.currentGame();
   const wanted = params.get('tab');
   if (!settings.onboarded || wanted === 'wizard') wizardStep = 0;
-  else if (wanted && TABS.includes(wanted as Tab)) tab = wanted as Tab;
+  else if (wanted && visibleTabs().includes(wanted as Tab)) tab = wanted as Tab;
+  else if (settings.appMode === 'full') tab = 'kine';
+  document.documentElement.lang = settings.lang;
   render();
   void refreshGameNames();
 
   kine.onSettings((s) => {
     settings = s;
     document.documentElement.lang = s.lang;
-    render();
+    if (!visibleTabs().includes(tab)) tab = 'clips';
+    scheduleRender();
   });
   kine.onStatus((s) => {
     status = s;
     void kine.currentGame().then((g) => {
       currentGame = g;
-      render();
+      scheduleRender();
     });
   });
   kine.onClips((c) => {
     clips = c;
     if (playing && !clips.some((x) => x.id === playing)) playing = null;
-    render();
+    scheduleRender();
     void refreshGameNames();
   });
   kine.onAuthWaiting((w) => {
     authWaiting = w;
-    render();
+    scheduleRender();
   });
   kine.onNavigate((target) => {
-    if (TABS.includes(target as Tab)) {
+    if (visibleTabs().includes(target as Tab)) {
       tab = target as Tab;
       wizardStep = null;
       render();
     } else if (target === 'wizard') {
       wizardStep = 0;
+      render();
+    } else if (TABS.includes(target as Tab)) {
+      // "kine" v režimu jen klipovač - aspoň klipy.
+      tab = 'clips';
+      wizardStep = null;
+      render();
+    }
+  });
+  window.addEventListener('resize', () => syncKineView());
+  kine.onKineViewFailed((description) => {
+    kineFailed = description;
+    kineShown = false;
+    scheduleRender();
+  });
+  kine.onKineViewRetry(() => {
+    kineFailed = null;
+    kineShown = false;
+    syncKineView();
+  });
+  document.addEventListener('mousedown', (e) => {
+    if (colorPickerOpen && !(e.target as HTMLElement).closest('.brand-wrap')) {
+      colorPickerOpen = false;
       render();
     }
   });
@@ -118,6 +154,88 @@ function update(patch: Partial<Settings>) {
   settings = { ...settings, ...patch };
   render();
   void kine.updateSettings(patch);
+}
+
+/** Záložky podle režimu: web Kine jen v režimu "Kine + klipy". */
+function visibleTabs(): Tab[] {
+  return settings.appMode === 'full' ? TABS : TABS.filter((x) => x !== 'kine');
+}
+
+/**
+ * Změny zvenku (stav, klipy, nahrávání) se kreslí nejdřív v dalším snímku
+ * a najednou - při nahrávání chodí po kusech a překreslovat celé okno
+ * s běžícím přehrávačem při každém by trhalo.
+ */
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
+    render();
+  });
+}
+
+/**
+ * Web Kine v okně: hlavní proces ho položí přesně přes plochu obsahu.
+ * Volá se po každém vykreslení a při změně velikosti okna; mimo záložku
+ * Kine (nebo v průvodci) se schová.
+ */
+function syncKineView() {
+  const host = app.querySelector('.kine-host') as HTMLElement | null;
+  if (host && tab === 'kine' && wizardStep === null && settings.appMode === 'full') {
+    const r = host.getBoundingClientRect();
+    kineShown = true;
+    void kine.kineViewShow({ x: r.left, y: r.top, width: r.width, height: r.height });
+  } else if (kineShown) {
+    kineShown = false;
+    void kine.kineViewHide();
+  }
+}
+
+// ---- barva Kine (5x klik na logo) ------------------------------------------------
+
+function onBrandClick() {
+  brandClicks += 1;
+  if (brandClickTimer) clearTimeout(brandClickTimer);
+  brandClickTimer = setTimeout(() => {
+    brandClicks = 0;
+  }, 1500);
+  if (brandClicks >= 5) {
+    brandClicks = 0;
+    colorPickerOpen = true;
+    render();
+  }
+}
+
+function pickColor(color: string | null) {
+  colorPickerOpen = false;
+  settings = { ...settings, brandColor: color ?? '' };
+  render();
+  void kine.setBrandColor(color);
+}
+
+function colorPicker() {
+  const custom = h('input', {
+    type: 'color',
+    class: 'color-input',
+    value: settings.brandColor || '#00c9a7',
+    title: t('brandColorCustom'),
+    onchange: (e: Event) => pickColor((e.target as HTMLInputElement).value),
+  });
+  return h(
+    'div',
+    { class: 'color-picker' },
+    h('p', { class: 'faint', style: 'margin:0 0 8px' }, t('brandColorTitle')),
+    h(
+      'div',
+      { class: 'swatches' },
+      ...PRESET_COLORS.map((c) =>
+        h('button', { class: `swatch ${settings.brandColor.toLowerCase() === c ? 'active' : ''}`, style: `background:${c}`, title: c, onclick: () => pickColor(c) })
+      ),
+      h('label', { class: 'swatch custom', title: t('brandColorCustom') }, '+', custom)
+    ),
+    h('button', { class: 'small quiet', style: 'margin-top:10px', onclick: () => pickColor(null) }, t('brandColorReset'))
+  );
 }
 
 // ---- zkratky ---------------------------------------------------------------------
@@ -232,11 +350,16 @@ function render() {
   clear(app);
   if (wizardStep !== null) {
     app.append(h('div', { class: 'main' }, renderWizard()));
+    syncKineView();
     return;
   }
-  const newMain = h('div', { class: 'main' }, h('div', { class: `page ${tab === 'clips' ? 'wide' : ''}` }, renderTab()));
+  const newMain =
+    tab === 'kine'
+      ? h('div', { class: 'main kine' }, renderKineTab())
+      : h('div', { class: 'main' }, h('div', { class: `page ${tab === 'clips' ? 'wide' : ''}` }, renderTab()));
   app.append(renderSide(), newMain);
   newMain.scrollTop = scrollTop;
+  syncKineView();
   if (searchHadFocus && tab === 'clips') {
     const input = newMain.querySelector('.clips-search') as HTMLInputElement | null;
     if (input) {
@@ -275,8 +398,13 @@ function renderSide() {
   return h(
     'nav',
     { class: 'side' },
-    h('div', { class: 'brand' }, h('span', { class: 'mark' }), 'Kine'),
-    ...TABS.map((name) =>
+    h(
+      'div',
+      { class: 'brand-wrap' },
+      h('div', { class: 'brand', role: 'button', tabindex: '0', title: t('brandColorHint'), onclick: onBrandClick }, h('span', { class: 'mark' }), 'Kine'),
+      colorPickerOpen ? colorPicker() : null
+    ),
+    ...visibleTabs().map((name) =>
       h(
         'button',
         {
@@ -290,7 +418,6 @@ function renderSide() {
         name === 'clips' && clips.length > 0 ? h('span', { class: 'count' }, String(clips.length)) : null
       )
     ),
-    settings.appMode === 'full' ? h('button', { class: 'tab', onclick: () => void kine.openKine() }, t('trayOpenKine')) : null,
     h(
       'div',
       { class: 'status' },
@@ -304,8 +431,25 @@ function renderSide() {
   );
 }
 
+/** Záložka Kine: prázdná plocha, přes kterou hlavní proces položí web (syncKineView). */
+function renderKineTab() {
+  return h(
+    'div',
+    { class: 'kine-host' },
+    h(
+      'div',
+      { class: 'kine-fallback' },
+      h('p', { class: 'dim' }, t('kineViewHint')),
+      kineFailed ? h('p', { class: 'error' }, kineFailed) : null,
+      h('button', { class: 'small quiet', onclick: () => { kineFailed = null; void kine.kineViewReload(); } }, t('kineReload'))
+    )
+  );
+}
+
 function renderTab() {
   switch (tab) {
+    case 'kine':
+      return renderKineTab();
     case 'clips':
       return renderClips();
     case 'settings':
@@ -590,7 +734,7 @@ function renderSettings() {
       checkbox('toast', t('toastSetting'), t('toastSettingHint'))
     ),
     h('div', { class: 'panel stack' }, h('h2', {}, t('modeTitle')), modeRadios()),
-    h('div', { class: 'panel' }, h('label', {}, t('language'), languageSelect()))
+    h('div', { class: 'panel stack' }, h('label', {}, t('language'), languageSelect()), h('p', { class: 'hint' }, t('brandColorHint')))
   );
 }
 
@@ -854,11 +998,17 @@ function playerFor(clip: Clip): HTMLElement {
   // Stejný prvek <video> přežije překreslení - jinak by se video po každé změně stavu rozjelo od začátku.
   let el = players.get(clip.id);
   if (!el) {
-    el = inlinePlayer(clip, t('playerClose'), () => {
-      playing = null;
-      players.clear();
-      render();
-    });
+    el = inlinePlayer(
+      clip,
+      { close: t('playerClose'), error: (m) => t('playerError', { message: m }), openExternal: t('playerOpenExternal') },
+      () => {
+        playing = null;
+        players.clear();
+        render();
+      },
+      () => void kine.openClip(clip.id),
+      (m) => void kine.log(m)
+    );
     players.set(clip.id, el);
   }
   return el;
@@ -1148,7 +1298,12 @@ function renderWizard() {
     box.append(
       h('h1', {}, t('wizardStepMode')),
       h('div', { class: 'panel' }, modeRadios()),
-      h('div', { class: 'spread' }, h('button', { class: 'quiet', onclick: go(0) }, t('back')), h('button', { class: 'primary', onclick: go(2) }, t('next')))
+      h(
+        'div',
+        { class: 'spread' },
+        h('button', { class: 'quiet', onclick: go(0) }, t('back')),
+        h('button', { class: 'primary', onclick: () => { wizardStep = 2; update({ appModeChosen: true }); } }, t('next'))
+      )
     );
   } else if (step === 2) {
     box.append(
@@ -1207,7 +1362,7 @@ function renderWizard() {
         h(
           'div',
           { class: 'row' },
-          full ? h('button', { class: 'primary', onclick: () => { void kine.openKine(); window.close(); } }, t('wizardOpenKine')) : null,
+          full ? h('button', { class: 'primary', onclick: () => { wizardStep = null; tab = 'kine'; render(); } }, t('wizardOpenKine')) : null,
           h('button', { class: full ? '' : 'primary', onclick: () => window.close() }, t('wizardFinish'))
         )
       )

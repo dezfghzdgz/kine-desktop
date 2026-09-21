@@ -47,7 +47,7 @@ export async function runTestDriver(kine: {
     }
     const clipSeconds = Number(process.env.KINE_TEST_CLIP_SECONDS ?? 6);
     const waitMs = Number(process.env.KINE_TEST_WAIT_MS ?? 9000);
-    kine.settings.update({ detection: 'always', clipSeconds, onboarded: true, toast: true, afterGame: 'review' });
+    kine.settings.update({ detection: 'always', clipSeconds, onboarded: true, toast: true, afterGame: 'review', appMode: 'full', appModeChosen: true });
 
     await sleep(500);
     await kine.capture.start();
@@ -98,6 +98,28 @@ export async function runTestDriver(kine: {
       );
       result.filters = filterOk;
     }
+    // Záložka Kine (web vložený do okna): stránka nahlásí plochu, hlavní
+    // proces položí WebContentsView; po přepnutí na klipy se schová.
+    kine.openSettings('kine');
+    await sleep(1500);
+    await shot(kine.settingsWindow, 'settings-kine');
+    result.kineViewShown = (kine as any).kineViewShown === true && !!(kine as any).kineView;
+    kine.openSettings('clips');
+    await sleep(600);
+    result.kineViewHidden = (kine as any).kineViewShown === false;
+
+    // Barva Kine: 5x klik na logo otevře výběr, barva ze vzorníku se propíše do CSS.
+    const colorWin = kine.settingsWindow;
+    if (colorWin && !colorWin.isDestroyed()) {
+      await colorWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.brand'); for (let i = 0; i < 5; i++) b.click(); return true; })()`);
+      await sleep(300);
+      result.colorPicker = await colorWin.webContents.executeJavaScript(`!!document.querySelector('.color-picker')`);
+      await shot(colorWin, 'settings-color');
+      await colorWin.webContents.executeJavaScript(`(() => { const s = document.querySelectorAll('.color-picker .swatch')[4]; if (s) s.click(); return true; })()`);
+      await sleep(400);
+      result.brandColor = kine.settings.get().brandColor;
+    }
+
     // Průvodce: výběr jazyka a režimu.
     kine.openSettings('wizard');
     await sleep(800);
@@ -108,7 +130,7 @@ export async function runTestDriver(kine: {
       await sleep(500);
       await shot(wiz, 'wizard-mode');
     }
-    result.ok = !!clip1 && !!clip2 && kine.capture.state === 'on' && result.inlinePlayer === true && result.filters === true;
+    result.ok = !!clip1 && !!clip2 && kine.capture.state === 'on' && result.inlinePlayer === true && result.filters === true && result.kineViewShown === true && result.kineViewHidden === true && result.colorPicker === true && result.brandColor === '#a34ff7';
   } catch (e) {
     result.error = (e as Error).stack ?? String(e);
   }

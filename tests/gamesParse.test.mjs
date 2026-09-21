@@ -61,9 +61,18 @@ test('výběr hry: okno v popředí vyhrává (CS2 před Robloxem na pozadí)', 
   assert.equal(chooseGame({ ...base, processes, current, foreground: { exe: 'discord.exe', title: 'Discord', fullscreen: false } }).exe, 'cs2.exe');
   // přepnutí do Robloxu v popředí -> Roblox
   assert.equal(chooseGame({ ...base, processes, current, foreground: { exe: 'robloxplayerbeta.exe', title: 'Roblox', fullscreen: true } }).name, 'Roblox');
-  // CS2 zavřené -> Roblox (jediný kandidát)
+});
+
+test('výběr hry: po zavření CS2 se Roblox na pozadí NEhraje (čeká se na další hru)', () => {
+  const current = { name: 'Counter-Strike 2', exe: 'cs2.exe', source: 'known' };
   const withoutCs = new Set(['explorer.exe', 'robloxplayerbeta.exe', 'discord.exe']);
-  assert.equal(chooseGame({ ...base, processes: withoutCs, current, foreground: { exe: 'discord.exe', title: '', fullscreen: false } }).name, 'Roblox');
+  // s pomocníkem: v popředí je plocha / Discord -> nic
+  assert.equal(chooseGame({ ...base, processes: withoutCs, current, foreground: { exe: 'explorer.exe', title: '', fullscreen: false } }), null);
+  assert.equal(chooseGame({ ...base, processes: withoutCs, current, foreground: { exe: 'discord.exe', title: '', fullscreen: false } }), null);
+  // hráč klikne do Robloxu -> teď se hraje Roblox
+  assert.equal(chooseGame({ ...base, processes: withoutCs, current: null, foreground: { exe: 'robloxplayerbeta.exe', title: 'Roblox', fullscreen: false } }).name, 'Roblox');
+  // bez pomocníka (Linux) zůstává staré chování: Roblox jako jediný kandidát
+  assert.equal(chooseGame({ ...base, processes: withoutCs, current }).name, 'Roblox');
   // nic neběží
   assert.equal(chooseGame({ ...base, processes: new Set(['explorer.exe']) }), null);
 });
@@ -77,14 +86,17 @@ test('výběr hry: neznámý program přes celou obrazovku je hra, prohlížeč 
   assert.equal(chooseGame({ ...base, processes, foreground: { exe: 'superhra.exe', title: 'SuperHra', fullscreen: false } }), null, 'v okně bez rámečku přes celou obrazovku ne');
   // vlastní název má přednost před titulkem
   assert.equal(chooseGame({ ...base, processes, custom: { 'superhra.exe': 'Moje super hra' }, foreground: { exe: 'superhra.exe', title: 'SuperHra', fullscreen: true } }).name, 'Moje super hra');
-  // Steam ví název, program neznáme
+  // Steam ví název, program neznáme - v celé obrazovce i v okně
   const steam = { name: 'Hollow Knight: Silksong', exe: 'steam:1030300', source: 'steam' };
   assert.deepEqual(chooseGame({ ...base, processes, steam, foreground: { exe: 'superhra.exe', title: '', fullscreen: true } }), { name: 'Hollow Knight: Silksong', exe: 'superhra.exe', source: 'steam' });
+  assert.deepEqual(chooseGame({ ...base, processes, steam, foreground: { exe: 'superhra.exe', title: '', fullscreen: false } }), { name: 'Hollow Knight: Silksong', exe: 'superhra.exe', source: 'steam' });
+  // Steam hlásí hru, ale v popředí je prohlížeč -> nic (hra ještě nabíhá / je na pozadí)
+  assert.equal(chooseGame({ ...base, processes, steam, foreground: { exe: 'chrome.exe', title: '', fullscreen: false } }), null);
   // Steam bez popředí (Linux/pomocník neběží)
   assert.equal(chooseGame({ ...base, processes: new Set(['explorer.exe']), steam }).exe, 'steam:1030300');
 });
 
-test('výběr hry: víc kandidátů bez popředí -> ten s oknem', () => {
+test('výběr hry: víc kandidátů bez pomocníka -> ten s oknem', () => {
   const processes = new Set(['robloxplayerbeta.exe', 'cs2.exe']);
   assert.equal(chooseGame({ ...base, processes, windowed: new Set(['cs2.exe']) }).exe, 'cs2.exe');
 });

@@ -6,7 +6,7 @@ import type { CaptureCommand, CaptureEvent, CaptureState, Settings } from '../sh
 import { clipFileBase } from '../shared/clipNaming';
 import { log } from './log';
 import { probe, runFfmpeg, spawnFfmpeg } from './ffmpeg';
-import { concatList, expired, parseSegmentCsv, selectForClip, toSegment, totalSeconds, type Segment } from './segments';
+import { concatList, expired, parseSegmentCsv, sameResolutionTailStart, selectForClip, toSegment, totalSeconds, type Segment } from './segments';
 
 /**
  * Zásobník posledních sekund obrazu.
@@ -76,6 +76,7 @@ export class CaptureManager {
       preload: string;
       rendererDir: string;
       onState: (state: CaptureState, error: string | null) => void;
+      onWarning?: (kind: 'microphone', message: string) => void;
     }
   ) {
     this.bufferDir = join(app.getPath('temp'), 'kine-buffer');
@@ -293,6 +294,11 @@ export class CaptureManager {
       if (gen) void this.endGeneration(gen).then(() => this.waiters.get(`stopped:${gen.id}`)?.resolve());
       return;
     }
+    if (event.type === 'warning') {
+      log(`snímací stránka upozorňuje (gen ${event.generation}): ${event.kind}: ${event.message}`);
+      this.deps.onWarning?.(event.kind, event.message);
+      return;
+    }
     if (event.type === 'error') {
       log(`snímací stránka hlásí chybu (gen ${event.generation}): ${event.message}`);
       const w = gen ? this.waiters.get(`started:${gen.id}`) : null;
@@ -378,9 +384,10 @@ export class CaptureManager {
 
   /**
    * Uloží posledních `seconds` sekund do složky `outDir`. Zastaví běžící
-   * generaci (přesný konec), rozjede novou a slepí segmenty.
+   * generaci (přesný konec), rozjede novou a slepí segmenty. Náhled (první
+   * snímek videa) jde do `thumbDir` - ve složce s klipy tak leží jen videa.
    */
-  async makeClip(seconds: number, outDir: string, game: string | null): Promise<ClipResult> {
+  async makeClip(seconds: number, outDir: string, game: string | null, thumbDir = outDir): Promise<ClipResult> {
     if (this._state !== 'on') throw new Error('not-capturing');
     const live = this.live;
     if (!live) throw new Error('not-capturing');
@@ -399,7 +406,12 @@ export class CaptureManager {
       this.send({ type: 'restart', generation: next.id });
       await stopped;
 
-      const chosen = selectForClip(this.allSegments(), endWall, seconds);
+      let chosen = selectForClip(this.allSegments(), endWall, seconds);
+      if (chosen.length === 0 || totalSeconds(chosen) < 1) throw new Error('too-early');
+      // Když hra mezitím přepnula rozlišení (celá obrazovka 4:3, načítání),
+      // kousky mají různé rozměry a slepený soubor prohlížeč nepřehraje -
+      // ukáže černo s 0:00. Vezme se jen souvislý konec se stejnými rozměry.
+      chosen = await sameResolutionTail(chosen);
       const have = totalSeconds(chosen);
       if (chosen.length === 0 || have < 1) throw new Error('too-early');
 
@@ -411,16 +423,20 @@ export class CaptureManager {
       const listFile = join(live.dir, 'concat.txt');
       writeFileSync(listFile, concatList(chosen.map((s) => s.file)));
 
-      const args = ['-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', listFile];
+      // -avoid_negative_ts: slepené kousky mohou začínat záporným časem -
+      // prohlížeč (přehrávač v appce) pak video nepustí a ukáže černo s 0:00.
+      const args = ['-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', listFile, '-avoid_negative_ts', 'make_zero'];
       if (isH264) args.push('-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart');
       else args.push('-c', 'copy');
       args.push(file);
       await runFfmpeg(args);
 
+      // Náhled = první snímek videa (to samé, co ukáže přehrávač), mimo složku s klipy.
       let thumb: string | null = null;
       try {
-        thumb = file.replace(/\.(mp4|webm)$/, '.jpg');
-        await runFfmpeg(['-loglevel', 'error', '-ss', String(Math.min(1, have / 2)), '-i', file, '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '4', thumb], 30000);
+        mkdirSync(thumbDir, { recursive: true });
+        thumb = uniquePath(thumbDir, base, '.jpg');
+        await runFfmpeg(['-loglevel', 'error', '-i', file, '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '4', thumb], 30000);
       } catch {
         thumb = null;
       }
@@ -441,6 +457,27 @@ export class CaptureManager {
       this.building -= 1;
     }
   }
+}
+
+/**
+ * Souvislý konec seznamu kousků se stejnými rozměry obrazu jako ten
+ * poslední. Rozměry se čtou z hlavičky (probe), po několika naráz; když
+ * se u některého nepovede zjistit, bere se, že sedí.
+ */
+async function sameResolutionTail(segments: Segment[]): Promise<Segment[]> {
+  if (segments.length < 2) return segments;
+  const sizes: (string | null)[] = new Array(segments.length).fill(null);
+  const limit = 6;
+  for (let i = 0; i < segments.length; i += limit) {
+    const batch = segments.slice(i, i + limit);
+    const results = await Promise.all(batch.map((seg) => probe(seg.file).catch(() => ({ width: null, height: null, durationSeconds: null }))));
+    results.forEach((r, j) => {
+      sizes[i + j] = r.width && r.height ? `${r.width}x${r.height}` : null;
+    });
+  }
+  const start = sameResolutionTailStart(sizes);
+  if (start > 0) log(`kousky s jinými rozměry (${[...new Set(sizes.slice(0, start).filter(Boolean))].join(', ')} -> ${sizes[sizes.length - 1]}): ${start} vynecháno`);
+  return segments.slice(start);
 }
 
 function uniquePath(dir: string, base: string, ext: string): string {

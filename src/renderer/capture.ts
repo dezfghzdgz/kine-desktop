@@ -94,7 +94,8 @@ async function getStream(settings: Settings): Promise<MediaStream> {
     const mixed = new MediaStream([...display.getVideoTracks(), ...destination.stream.getAudioTracks()]);
     return mixed;
   } catch (e) {
-    report({ type: 'error', generation, message: `mikrofon: ${String(e)}` });
+    // Bez mikrofonu se nahrává dál - hráč jen dostane upozornění, ne "chybu".
+    report({ type: 'warning', generation, kind: 'microphone', message: String(e) });
     return display;
   }
 }

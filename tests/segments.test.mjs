@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSegmentCsv, toSegment, selectForClip, totalSeconds, expired, concatList } from '../dist/esm/segments.js';
+import { parseSegmentCsv, toSegment, selectForClip, totalSeconds, expired, concatList , sameResolutionTailStart } from '../dist/esm/segments.js';
 
 const join = (a, b) => `${a}/${b}`;
 
@@ -40,4 +40,12 @@ test('staré kousky se poznají podle konce', () => {
 
 test('seznam pro concat escapuje apostrof', () => {
   assert.equal(concatList(["/a/b'c.mkv"]), "file '/a/b'\\''c.mkv'\n");
+});
+
+test('klip jen ze souvislého konce se stejnými rozměry', () => {
+  assert.equal(sameResolutionTailStart(['1920x1080', '1920x1080', '1920x1080']), 0);
+  assert.equal(sameResolutionTailStart(['1920x1080', '1280x960', '1280x960']), 1, 'hra přepnula na 4:3 - starší kousky pryč');
+  assert.equal(sameResolutionTailStart(['1280x960', null, '1280x960']), 0, 'neznámé rozměry sedí');
+  assert.equal(sameResolutionTailStart(['1920x1080', '1280x960', null]), 0, 'poslední neznámý - nic se nezahazuje');
+  assert.equal(sameResolutionTailStart([]), 0);
 });

@@ -72,22 +72,53 @@ export function errorText(err: unknown, t: (key: Key, vars?: Record<string, stri
 /**
  * Přehrávač klipu přímo ve stránce (místo otvírání externího programu):
  * video přes celou šířku, pod ním název a tlačítko zavřít. Escape zavře.
+ * Když Chromium soubor nepřehraje (rozbité časy, kodek), místo černa se
+ * ukáže důvod a tlačítko na přehrávač systému; chyba jde do protokolu.
  */
-export function inlinePlayer(clip: Clip, closeLabel: string, onClose: () => void): HTMLElement {
+export function inlinePlayer(
+  clip: Clip,
+  labels: { close: string; error: (message: string) => string; openExternal: string },
+  onClose: () => void,
+  onOpenExternal: () => void,
+  onLog?: (message: string) => void
+): HTMLElement {
   const video = h('video', { class: 'player-video', src: fileUrl(clip.file), controls: true, autoplay: true, preload: 'auto' }) as HTMLVideoElement;
+  const stage = h('div', { class: 'player-stage' }, video);
   const box = h(
     'div',
     { class: 'player' },
-    video,
+    stage,
     h(
       'div',
       { class: 'player-bar' },
       h('div', { class: 'title', title: clip.title }, clip.title),
-      h('button', { class: 'small quiet', onclick: onClose }, closeLabel)
+      h('button', { class: 'small quiet', onclick: onClose }, labels.close)
     )
   );
+  const MEDIA_ERRORS: Record<number, string> = { 1: 'aborted', 2: 'network', 3: 'decode', 4: 'unsupported' };
+  const fail = (why: string) => {
+    onLog?.(`přehrávač: ${why} - ${clip.file}`);
+    clear(stage);
+    stage.append(
+      h(
+        'div',
+        { class: 'player-error' },
+        h('p', {}, labels.error(why)),
+        h('button', { class: 'small', onclick: onOpenExternal }, labels.openExternal)
+      )
+    );
+  };
+  video.addEventListener('error', () => {
+    const err = video.error;
+    fail(err ? `${MEDIA_ERRORS[err.code] ?? err.code}${err.message ? ': ' + err.message : ''}` : 'error');
+  });
+  // Soubor se otevřel, ale nic se nerozjelo (žádná metadata do 8 s) - taky chyba.
+  const guard = setTimeout(() => {
+    if (video.readyState === 0 && video.isConnected) fail('no-metadata');
+  }, 8000);
+  video.addEventListener('loadedmetadata', () => clearTimeout(guard));
   const onKey = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') {
+    if (e.key === 'Escape' && !document.fullscreenElement) {
       e.stopPropagation();
       onClose();
     }
@@ -97,6 +128,7 @@ export function inlinePlayer(clip: Clip, closeLabel: string, onClose: () => void
   const observer = new MutationObserver(() => {
     if (!box.isConnected) {
       document.removeEventListener('keydown', onKey, true);
+      clearTimeout(guard);
       observer.disconnect();
       try {
         video.pause();

@@ -38,9 +38,12 @@ export type Codec = 'auto' | 'h264' | 'vp9' | 'vp8';
 export type Visibility = 'public' | 'private';
 
 export type Settings = {
-  version: 1;
+  /** 2 = od verze 0.3 (mikrofon zapnutý v základu, volba režimu zvlášť). */
+  version: 2;
   lang: Lang;
   appMode: AppMode;
+  /** Hráč (nebo instalátor) režim vybral; dokud ne, appka ho zkusí odvodit z názvu instalátoru. */
+  appModeChosen: boolean;
   /**
    * Zkratka "ulož klip" - klávesy spojené plusem, např. "F8", "Ctrl+Shift+S",
    * "F8+F9" nebo "Mouse5" (viz shared/hotkeys.ts).
@@ -172,4 +175,6 @@ export type CaptureCommand =
 export type CaptureEvent =
   | { type: 'started'; generation: number; at: number; mimeType: string; audio: boolean }
   | { type: 'stopped'; generation: number; at: number }
-  | { type: 'error'; generation: number; message: string };
+  | { type: 'error'; generation: number; message: string }
+  /** Něco nejde, ale nahrává se dál (třeba mikrofon není). */
+  | { type: 'warning'; generation: number; kind: 'microphone'; message: string };

@@ -1,0 +1,46 @@
+# Sestavení instalátoru pro Windows a vydání na GitHub Releases.
+#
+# Jak vydat novou verzi:
+#   1. v package.json zvedni "version" (např. 0.1.1)
+#   2. git commit -am "v0.1.1" && git tag v0.1.1 && git push && git push --tags
+#   3. za pár minut je v Releases soubor Kine-Setup.exe
+#      (+ latest.yml, podle kterého si appka sama najde aktualizaci)
+#
+# Bez tagu to jde taky: záložka Actions -> Vydání -> Run workflow.
+# Vydání se pak vytvoří podle "version" v package.json.
+#
+# Web Kine na instalátor míří sám (kine…/download/windows ->
+#   https://github.com/<owner>/kine-desktop/releases/latest/download/Kine-Setup.exe)
+name: Vydání
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - name: Instalátor + vydání
+        run: npx electron-builder --win --x64 --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Nahrát i do vydání, které už existuje déle než 2 hodiny
+          # (electron-builder by ho jinak přeskočil).
+          EP_GH_IGNORE_TIME: "true"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kine-Setup
+          path: release/*.exe

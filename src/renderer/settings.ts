@@ -5,7 +5,7 @@ import { LANG_NAMES, makeT, type Key } from '../shared/i18n';
 import { HotkeyRecorder, formatHotkey, hotkeyLabel } from '../shared/hotkeys';
 import { isDiscordWebhook, suggestedMbps } from '../shared/settingsSchema';
 import { applyBrandColor, clipOptionsFor, maxClipSecondsFor } from '../shared/plan';
-import { clear, clipMeta, errorText, fileUrl, formatDate, formatDuration, h } from './ui';
+import { clear, clipMeta, errorText, fileUrl, formatBytes, formatDate, formatDuration, h } from './ui';
 import { closePlayer, openPlayer, openPlayerId, type PlayerHandle } from './player';
 
 /**
@@ -59,8 +59,19 @@ let discordInvalid = false;
 /** Krátká zpětná vazba u tlačítek karty: "Odkaz zkopírován", "Posláno na Discord". */
 let shareNote: { id: string; text: string; kind: 'ok' | 'error' } | null = null;
 let shareNoteTimer: ReturnType<typeof setTimeout> | null = null;
-const filters: { game: string; date: DateFilter; query: string } = { game: 'all', date: 'all', query: '' };
+const filters: { game: string; date: DateFilter; query: string; favorites: boolean } = { game: 'all', date: 'all', query: '', favorites: false };
 let focusSearch = false;
+/** Výběr více klipů (zaškrtávátka na kartách) - sestřih, nahrání, smazání naráz. */
+const selected = new Set<string>();
+let merging: { percent: number } | null = null;
+let mergeNote: { text: string; kind: 'ok' | 'error' } | null = null;
+let mergeNoteTimer: ReturnType<typeof setTimeout> | null = null;
+let confirmBulkDelete = false;
+let bulkDeleteTimer: ReturnType<typeof setTimeout> | null = null;
+/** Náhled klipu při najetí myší na kartu - vždy nejvýš jeden. */
+let preview: { host: HTMLElement; video: HTMLVideoElement } | null = null;
+/** Čtení ovladače (Gamepad API) během záznamu zkratky. */
+let padTimer: ReturnType<typeof setInterval> | null = null;
 let colorPickerOpen = false;
 let brandClicks = 0;
 let brandClickTimer: ReturnType<typeof setTimeout> | null = null;
@@ -100,6 +111,9 @@ async function init() {
     clips = c;
     // Přehrávač je mimo mřížku - jen mu říct, co se s klipem stalo (název, smazání).
     player?.sync(clips);
+    // Výběr jen z klipů, které ještě jsou.
+    const ids = new Set(clips.map((x) => x.id));
+    for (const id of [...selected]) if (!ids.has(id)) selected.delete(id);
     scheduleRender();
     void refreshGameNames();
   });
@@ -329,6 +343,7 @@ function stopRecording() {
   hotkeyRecording = null;
   hotkeyError = null;
   recorder.reset();
+  stopPadPoll();
   render();
 }
 
@@ -349,14 +364,53 @@ function finishIfDone(done: ReturnType<HotkeyRecorder['keyUp']>) {
     }
     hotkeyError = null;
     hotkeyRecording = null;
+    stopPadPoll();
     update({ [field]: text } as Partial<Settings>);
   });
+}
+
+/**
+ * Ovladač při záznamu zkratky: Gamepad API (standardní rozložení) se čte
+ * dokola; stisknutá tlačítka jdou do záznamu jako "PadA", "PadRB"…, hotovo
+ * je po puštění všeho. Stránka musí mít fokus - ten má, hráč do pole klikl.
+ */
+function startPadPoll() {
+  if (padTimer || typeof navigator.getGamepads !== 'function') return;
+  padTimer = setInterval(() => {
+    if (!hotkeyRecording) {
+      stopPadPoll();
+      return;
+    }
+    let pads: (Gamepad | null)[] = [];
+    try {
+      pads = navigator.getGamepads();
+    } catch {
+      return;
+    }
+    const pressed: number[] = [];
+    for (const pad of pads) {
+      if (!pad) continue;
+      pad.buttons.forEach((b, i) => {
+        if (b.pressed || b.value > 0.5) pressed.push(i);
+      });
+    }
+    if (pressed.length === 0 && !recorder.current().pad.length) return;
+    const before = formatHotkey(recorder.current());
+    const done = recorder.padState(pressed);
+    if (done) finishIfDone(done);
+    else if (formatHotkey(recorder.current()) !== before) render();
+  }, 50);
+}
+
+function stopPadPoll() {
+  if (padTimer) clearInterval(padTimer);
+  padTimer = null;
 }
 
 function hotkeyField(field: 'clipHotkey' | 'toggleHotkey', label: string, hint?: string) {
   const recording = hotkeyRecording === field;
   const held = recording ? recorder.current() : null;
-  const heldText = held && held.mods.length + held.keys.length + held.mouse.length > 0 ? hotkeyLabel(formatHotkey(held)) : '';
+  const heldText = held && held.mods.length + held.keys.length + held.mouse.length + held.pad.length > 0 ? hotkeyLabel(formatHotkey(held)) : '';
   return h(
     'div',
     { class: 'field' },
@@ -375,6 +429,7 @@ function hotkeyField(field: 'clipHotkey' | 'toggleHotkey', label: string, hint?:
             hotkeyRecording = field;
             hotkeyError = null;
             recorder.reset();
+            startPadPoll();
             render();
           },
         },
@@ -395,6 +450,8 @@ function render() {
   const scrollTop = main ? main.scrollTop : 0;
   const active = document.activeElement as HTMLElement | null;
   const searchHadFocus = focusSearch || (active?.classList.contains('clips-search') ?? false);
+  // Karta s náhledem se právě zahodí - video pustit z ruky, ať nehraje v odpojeném prvku.
+  stopPreview();
   clear(app);
   if (wizardStep !== null) {
     app.append(h('div', { class: 'main' }, renderWizard()));
@@ -449,8 +506,62 @@ function statusText(): { text: string; cls: string } {
   return { text: t('trayIdle'), cls: '' };
 }
 
+/** Ikony položek postranního panelu (čáry, currentColor) - ať se v seznamu dá rychle zorientovat. */
+const TAB_ICONS: Record<Tab, string> = {
+  kine: '<rect x="3" y="4" width="18" height="14" rx="3"/><path d="M10 8.3v5.4l4.8-2.7z" fill="currentColor" stroke="none"/>',
+  clips: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7.5 4v16M16.5 4v16M3 9h4.5M3 15h4.5M16.5 9H21M16.5 15H21"/>',
+  settings: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>',
+  games: '<path d="M7 8h10a4.5 4.5 0 0 1 4.5 4.5V15a2.6 2.6 0 0 1-4.7 1.5L15.4 14.5H8.6L7.2 16.5A2.6 2.6 0 0 1 2.5 15v-2.5A4.5 4.5 0 0 1 7 8z"/><path d="M8 10.5v3M6.5 12h3"/><circle cx="15.5" cy="11.2" r=".9" fill="currentColor" stroke="none"/><circle cx="17.5" cy="13" r=".9" fill="currentColor" stroke="none"/>',
+  upload: '<path d="M12 15V5M8 9l4-4 4 4"/><path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15"/>',
+  account: '<circle cx="12" cy="8" r="4"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/>',
+  about: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.8h.01"/>',
+};
+
+function tabIcon(name: Tab): Element {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = `<svg class="tab-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TAB_ICONS[name]}</svg>`;
+  return tpl.content.firstElementChild!;
+}
+
+function tabButton(name: Tab) {
+  return h(
+    'button',
+    {
+      class: `tab ${tab === name ? 'active' : ''}`,
+      'data-tab': name,
+      onclick: () => {
+        tab = name;
+        render();
+      },
+    },
+    tabIcon(name),
+    h('span', { class: 'tab-label' }, t(TAB_KEYS[name])),
+    name === 'clips' && clips.length > 0 ? h('span', { class: 'count' }, String(clips.length)) : null
+  );
+}
+
+/**
+ * Postranní panel: nahoře, co hráč používá (Kine, Klipy), pod hlavičkou
+ * Nastavení zbytek; dole karta se stavem nahrávání, tlačítky "Uložit klip"
+ * a "Pozastavit" a účtem.
+ */
 function renderSide() {
   const st = statusText();
+  const tabs = visibleTabs();
+  const top = tabs.filter((x) => x === 'kine' || x === 'clips');
+  const rest = tabs.filter((x) => x !== 'kine' && x !== 'clips');
+  const capturing = status.capture === 'on';
+  const manual = settings.detection === 'manual';
+  const account = status.account;
+  const goAccount = () => {
+    tab = 'account';
+    render();
+  };
+
+  const pauseBtn = manual
+    ? h('button', { class: 'small quiet side-pause', onclick: () => void kine.toggleCapture() }, capturing || status.capture === 'starting' ? t('sideBufferOff') : t('sideBufferOn'))
+    : h('button', { class: 'small quiet side-pause', onclick: () => void kine.togglePause() }, status.paused ? '▶ ' + t('sideResume') : '❚❚ ' + t('sidePause'));
+
   return h(
     'nav',
     { class: 'side' },
@@ -460,29 +571,39 @@ function renderSide() {
       h('div', { class: 'brand', role: 'button', tabindex: '0', title: t('brandColorHint'), onclick: onBrandClick }, brandMark(), 'Kine', brandTag()),
       colorPickerOpen ? colorPicker() : null
     ),
-    ...visibleTabs().map((name) =>
-      h(
-        'button',
-        {
-          class: `tab ${tab === name ? 'active' : ''}`,
-          onclick: () => {
-            tab = name;
-            render();
-          },
-        },
-        t(TAB_KEYS[name]),
-        name === 'clips' && clips.length > 0 ? h('span', { class: 'count' }, String(clips.length)) : null
-      )
+    h(
+      'div',
+      { class: 'side-nav' },
+      ...top.map(tabButton),
+      h('div', { class: 'side-section' }, t('sideSettings')),
+      ...rest.map(tabButton)
     ),
     h(
       'div',
-      { class: 'status' },
-      h('div', {}, h('span', { class: `dot ${st.cls}` }), h('b', {}, st.text)),
-      status.uploadsPending > 0
-        ? h('div', {}, status.uploadsPaused ? t('trayUploadsPaused', { count: status.uploadsPending }) : t('trayUploads', { count: status.uploadsPending }))
+      { class: 'side-status' },
+      h('div', { class: 'side-state' }, h('span', { class: `dot ${st.cls}` }), h('b', {}, st.text)),
+      !status.paused && status.capture !== 'error'
+        ? h('div', { class: 'side-sub' }, t('sideBufferInfo', { seconds: Math.min(settings.clipSeconds, maxClip()), hotkey: hotkeyLabel(settings.clipHotkey) }))
         : null,
-      ...status.hotkeyProblems.map((p) => h('div', { class: 'warn' }, p)),
-      h('div', {}, status.account ? `@${status.account.username}` : t('trayNotLoggedIn'))
+      status.uploadsPending > 0
+        ? h('div', { class: 'side-sub' }, status.uploadsPaused ? t('trayUploadsPaused', { count: status.uploadsPending }) : t('trayUploads', { count: status.uploadsPending }))
+        : null,
+      ...status.hotkeyProblems.map((p) => h('div', { class: 'side-sub warn' }, '⚠ ' + p)),
+      h(
+        'div',
+        { class: 'side-actions' },
+        h('button', { class: 'small primary side-clip', disabled: !capturing, title: hotkeyLabel(settings.clipHotkey), onclick: () => void kine.clipNow() }, '● ' + t('sideSaveClip')),
+        pauseBtn
+      ),
+      account
+        ? h(
+            'button',
+            { class: 'side-account', onclick: goAccount, title: t('tabAccount') },
+            h('span', { class: 'avatar' }, account.username.slice(0, 1).toUpperCase()),
+            h('span', { class: 'who' }, `@${account.username}`),
+            account.plan !== 'free' ? h('span', { class: 'plan-pill' }, 'PLUS') : null
+          )
+        : h('button', { class: 'side-account', onclick: goAccount }, h('span', { class: 'avatar guest' }, '?'), h('span', { class: 'who dim' }, t('sideSignIn')))
     )
   );
 }
@@ -712,6 +833,7 @@ function renderSettings() {
       h('h2', {}, t('hotkeysTitle')),
       hotkeyField('clipHotkey', t('clipHotkey'), t('clipHotkeyHint')),
       hotkeyField('toggleHotkey', t('toggleHotkey')),
+      win ? h('p', { class: 'hint' }, '🎮 ' + t('hotkeyPadHint')) : null,
       win && !status.chordsSupported ? h('p', { class: 'hint warn' }, t('hotkeyHelperDown')) : null,
       !win ? h('p', { class: 'hint' }, t('hotkeyChordUnsupported')) : null,
       h(
@@ -847,7 +969,14 @@ function renderSettings() {
       checkbox('toast', t('toastSetting'), t('toastSettingHint'))
     ),
     variantPanel(),
-    h('div', { class: 'panel stack' }, h('label', {}, t('language'), languageSelect()), h('p', { class: 'hint' }, t('brandColorHint')))
+    h(
+      'div',
+      { class: 'panel stack' },
+      h('h2', {}, t('generalTitle')),
+      h('label', {}, t('language'), languageSelect()),
+      checkbox('startWithSystem', t('startWithSystem')),
+      h('p', { class: 'hint', style: 'margin:0' }, t('brandColorHint'))
+    )
   );
 }
 
@@ -1082,8 +1211,7 @@ function renderUpload() {
       )
     ),
     h('div', { class: 'panel' }, h('h2', {}, t('onlyWhenNotPlayingTitle')), h('p', { class: 'dim', style: 'margin:0' }, t('onlyWhenNotPlayingHint'))),
-    discordPanel(),
-    h('div', { class: 'panel' }, checkbox('startWithSystem', t('startWithSystem')))
+    discordPanel()
   );
 }
 
@@ -1149,6 +1277,7 @@ function filteredClips(): Clip[] {
   const since = dateFrom(filters.date);
   const q = filters.query.trim().toLowerCase();
   return clips.filter((c) => {
+    if (filters.favorites && !c.favorite) return false;
     if (filters.game === 'none' && c.game) return false;
     if (filters.game !== 'all' && filters.game !== 'none' && c.game !== filters.game) return false;
     if (since && new Date(c.createdAt).getTime() < since) return false;
@@ -1167,8 +1296,19 @@ function showShareNote(id: string, text: string, kind: 'ok' | 'error') {
   render();
 }
 
+function showMergeNote(text: string, kind: 'ok' | 'error') {
+  mergeNote = { text, kind };
+  if (mergeNoteTimer) clearTimeout(mergeNoteTimer);
+  mergeNoteTimer = setTimeout(() => {
+    mergeNote = null;
+    render();
+  }, kind === 'ok' ? 6000 : 10000);
+  render();
+}
+
 /** Přehrávač jako vrstva přes okno (player.ts); mřížka pod ním zůstává, jak je. */
 function showClip(clip: Clip, edit = false) {
+  stopPreview();
   player = openPlayer({
     clip,
     t,
@@ -1181,8 +1321,165 @@ function showClip(clip: Clip, edit = false) {
     edit: {
       run: (c, request) => kine.trimClip(c.id, request),
       onProgress: (cb) => kine.onTrimProgress(cb),
+      gif: (c, range) => kine.makeGif(c.id, range),
+      reveal: (file) => void kine.revealFile(file),
     },
   });
+}
+
+// ---- náhled při najetí myší ------------------------------------------------------------
+
+/**
+ * Najetí myší na kartu klip tiše přehrává (jako na webu) - hráč nemusí
+ * každý klip otvírat, aby věděl, který to je. Vždy nejvýš jeden náhled;
+ * po odjetí se video hned pustí z ruky.
+ */
+function startPreview(host: HTMLElement, clip: Clip) {
+  if (preview?.host === host) return;
+  stopPreview();
+  const video = h('video', { class: 'preview', muted: true, loop: true, playsinline: true, preload: 'auto' }) as HTMLVideoElement;
+  video.muted = true;
+  video.src = fileUrl(clip.file);
+  video.addEventListener('error', () => {
+    if (preview?.video === video) stopPreview();
+  });
+  video.addEventListener('playing', () => host.classList.add('previewing'));
+  host.append(video);
+  preview = { host, video };
+  void video.play().catch(() => undefined);
+}
+
+function stopPreview() {
+  if (!preview) return;
+  const { host, video } = preview;
+  preview = null;
+  host.classList.remove('previewing');
+  try {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+  } catch {
+    // už pryč
+  }
+  video.remove();
+}
+
+// ---- výběr více klipů -----------------------------------------------------------------------
+
+function toggleSelected(id: string, on: boolean) {
+  if (on) selected.add(id);
+  else selected.delete(id);
+  confirmBulkDelete = false;
+  render();
+}
+
+function clearSelection() {
+  selected.clear();
+  confirmBulkDelete = false;
+  render();
+}
+
+async function mergeSelectedClips() {
+  if (merging || selected.size < 2) return;
+  merging = { percent: 0 };
+  render();
+  const unsubscribe = kine.onTrimProgress((p) => {
+    if (merging && p.id === 'merge') {
+      merging.percent = p.percent;
+      const bar = app.querySelector('.selection-bar .progress > span') as HTMLElement | null;
+      const text = app.querySelector('.selection-bar .merge-text');
+      if (bar) bar.style.width = `${p.percent}%`;
+      if (text) text.textContent = t('mergeWorking', { percent: p.percent });
+    }
+  });
+  try {
+    const clip = await kine.mergeClips([...selected]);
+    selected.clear();
+    merging = null;
+    showMergeNote(t('mergeDone', { title: clip.title }), 'ok');
+  } catch (e) {
+    merging = null;
+    void kine.log(`sestřih: ${(e as Error).message}`);
+    showMergeNote(t('mergeFailed', { message: errorText(e, t) }), 'error');
+  } finally {
+    unsubscribe();
+  }
+}
+
+/** Lišta nad mřížkou, když je něco vybrané: počet a délka, sestřih, nahrání, smazání. */
+function selectionBar(shown: Clip[]) {
+  const picked = clips.filter((c) => selected.has(c.id));
+  if (picked.length === 0 && !mergeNote) return null;
+  const total = picked.reduce((sum, c) => sum + c.durationSeconds, 0);
+  const uploadable = picked.filter((c) => !c.upload || c.upload.state === 'error');
+  const allShownSelected = shown.every((c) => selected.has(c.id));
+  const bar = h('div', { class: 'selection-bar' });
+  if (picked.length > 0) {
+    bar.append(
+      h('b', { class: 'sel-count' }, t('selectionCount', { count: picked.length, duration: formatDuration(total) })),
+      merging
+        ? h('div', { class: 'row', style: 'gap:8px' }, h('div', { class: 'progress trim-progress' }, h('span', { style: `width:${merging.percent}%` })), h('span', { class: 'faint merge-text' }, t('mergeWorking', { percent: merging.percent })))
+        : h(
+            'div',
+            { class: 'row', style: 'gap:6px' },
+            h('button', { class: 'small primary sel-merge', disabled: picked.length < 2, onclick: () => void mergeSelectedClips() }, '🎬 ' + t('selectionMerge')),
+            uploadable.length > 0
+              ? h(
+                  'button',
+                  {
+                    class: 'small',
+                    disabled: !status.account,
+                    title: status.account ? '' : t('uploadNeedsLogin'),
+                    onclick: () => {
+                      void kine.uploadClips(uploadable.map((c) => ({ clipId: c.id, visibility: settings.visibility })));
+                      clearSelection();
+                    },
+                  },
+                  t('selectionUpload')
+                )
+              : null,
+            confirmBulkDelete
+              ? h(
+                  'button',
+                  {
+                    class: 'small danger',
+                    onclick: () => {
+                      confirmBulkDelete = false;
+                      for (const c of picked) {
+                        if (openPlayerId() === c.id) closePlayer();
+                        void kine.deleteClip(c.id);
+                      }
+                      selected.clear();
+                      render();
+                    },
+                  },
+                  t('selectionDeleteConfirm', { count: picked.length })
+                )
+              : h(
+                  'button',
+                  {
+                    class: 'small quiet danger',
+                    onclick: () => {
+                      confirmBulkDelete = true;
+                      render();
+                      if (bulkDeleteTimer) clearTimeout(bulkDeleteTimer);
+                      bulkDeleteTimer = setTimeout(() => {
+                        confirmBulkDelete = false;
+                        render();
+                      }, 4000);
+                    },
+                  },
+                  t('selectionDelete')
+                ),
+            !allShownSelected
+              ? h('button', { class: 'small quiet', onclick: () => { for (const c of shown) selected.add(c.id); render(); } }, t('selectionAll'))
+              : null,
+            h('button', { class: 'small quiet', onclick: clearSelection }, t('selectionClear'))
+          )
+    );
+  }
+  if (mergeNote) bar.append(h('div', { class: `state ${mergeNote.kind === 'ok' ? 'done' : 'error'}`, style: 'flex-basis:100%' }, mergeNote.text));
+  return bar;
 }
 
 function gameChip(clip: Clip) {
@@ -1222,7 +1519,8 @@ function renderClips() {
   const games = [...new Set(clips.map((c) => c.game).filter((g): g is string => !!g))].sort((a, b) => a.localeCompare(b));
   const hasNoGame = clips.some((c) => !c.game);
   const list = filteredClips();
-  const filtersActive = filters.game !== 'all' || filters.date !== 'all' || filters.query.trim() !== '';
+  const filtersActive = filters.game !== 'all' || filters.date !== 'all' || filters.query.trim() !== '' || filters.favorites;
+  const favoritesCount = clips.filter((c) => c.favorite).length;
 
   const container = h(
     'div',
@@ -1240,6 +1538,19 @@ function renderClips() {
     container.append(h('div', { class: 'empty' }, t('clipsEmpty', { hotkey: hotkeyLabel(settings.clipHotkey) })));
     return container;
   }
+  const favoritesBtn = h(
+    'button',
+    {
+      class: `small quiet fav-filter ${filters.favorites ? 'active' : ''}`,
+      style: 'align-self:flex-end',
+      onclick: () => {
+        filters.favorites = !filters.favorites;
+        render();
+      },
+    },
+    (filters.favorites ? '★ ' : '☆ ') + t('clipsFilterFavorites'),
+    favoritesCount > 0 ? h('span', { class: 'count' }, String(favoritesCount)) : null
+  );
 
   container.append(
     h(
@@ -1286,20 +1597,26 @@ function renderClips() {
           },
         })
       ),
+      favoritesBtn,
       filtersActive
-        ? h('button', { class: 'small quiet', style: 'align-self:flex-end', onclick: () => { filters.game = 'all'; filters.date = 'all'; filters.query = ''; render(); } }, t('clipsClearFilters'))
+        ? h('button', { class: 'small quiet', style: 'align-self:flex-end', onclick: () => { filters.game = 'all'; filters.date = 'all'; filters.query = ''; filters.favorites = false; render(); } }, t('clipsClearFilters'))
         : null
     )
   );
+
+  const bar = selectionBar(list);
+  if (bar) container.append(bar);
+  else container.append(h('p', { class: 'hint sel-hint', style: 'margin:0' }, t('selectionHint')));
 
   if (list.length === 0) {
     container.append(h('div', { class: 'empty' }, t('clipsNoMatch')));
     return container;
   }
 
-  const grid = h('div', { class: 'clips' });
+  const grid = h('div', { class: `clips ${selected.size > 0 ? 'selecting' : ''}` });
   for (const clip of list) {
     const canUpload = !clip.upload || clip.upload.state === 'error';
+    const isSelected = selected.has(clip.id);
     const actions = h('div', { class: 'actions' });
     actions.append(h('button', { class: 'small', onclick: () => showClip(clip) }, '▶ ' + t('libraryOpen')));
     actions.append(h('button', { class: 'small quiet', onclick: () => showClip(clip, true) }, '✂ ' + t('libraryEdit')));
@@ -1395,20 +1712,41 @@ function renderClips() {
       shareNote?.id === clip.id ? h('div', { class: `state ${shareNote.kind === 'ok' ? 'done' : 'error'}` }, shareNote.text) : null
     );
 
-    grid.append(
-      h(
-        'div',
-        { class: 'clip' },
-        h(
-          'div',
-          { class: 'thumb', onclick: () => showClip(clip) },
-          clip.thumb ? h('img', { src: fileUrl(clip.thumb), alt: '' }) : null,
-          h('span', { class: 'play-badge' }, '▶'),
-          h('span', { class: 'dur' }, formatDuration(clip.durationSeconds))
-        ),
-        body
-      )
+    const thumb = h(
+      'div',
+      { class: 'thumb', onclick: () => showClip(clip) },
+      clip.thumb ? h('img', { src: fileUrl(clip.thumb), alt: '' }) : null,
+      h('span', { class: 'play-badge' }, '▶'),
+      h('span', { class: 'dur' }, formatDuration(clip.durationSeconds))
     );
+    thumb.addEventListener('mouseenter', () => startPreview(thumb, clip));
+    thumb.addEventListener('mouseleave', () => {
+      if (preview?.host === thumb) stopPreview();
+    });
+    // Zaškrtávátko výběru a hvězdička leží nad náhledem - klik na ně klip neotvírá.
+    const pick = h('input', {
+      type: 'checkbox',
+      class: 'pick',
+      checked: isSelected,
+      title: t('selectionHint'),
+      onclick: (e: Event) => e.stopPropagation(),
+      onchange: (e: Event) => toggleSelected(clip.id, (e.target as HTMLInputElement).checked),
+    });
+    const star = h(
+      'button',
+      {
+        class: `star ${clip.favorite ? 'on' : ''}`,
+        title: clip.favorite ? t('libraryUnfavorite') : t('libraryFavorite'),
+        onclick: (e: Event) => {
+          e.stopPropagation();
+          void kine.setFavorite(clip.id, !clip.favorite);
+        },
+      },
+      clip.favorite ? '★' : '☆'
+    );
+    thumb.append(pick, star);
+
+    grid.append(h('div', { class: `clip ${isSelected ? 'selected' : ''} ${clip.favorite ? 'favorite' : ''}`, 'data-id': clip.id }, thumb, body));
     if (renaming === clip.id) setTimeout(() => (titleEl as HTMLInputElement).focus?.(), 0);
   }
   container.append(grid);

@@ -2,15 +2,17 @@
  * Klávesové zkratky appky.
  *
  * Zkratka je text z částí spojených plusem: modifikátory (Ctrl, Alt,
- * Shift, Super), klávesy (F8, S, 5, num5, Space, PageUp, `, …) a tlačítka
- * myši (Mouse3 = kolečko, Mouse4/Mouse5 = boční tlačítka). Může to být
- * klidně víc kláves najednou: "F8", "Ctrl+Shift+S", "F8+F9", "Ctrl+Mouse5".
+ * Shift, Super), klávesy (F8, S, 5, num5, Space, PageUp, `, …), tlačítka
+ * myši (Mouse3 = kolečko, Mouse4/Mouse5 = boční tlačítka) a tlačítka
+ * ovladače (PadA, PadRB, PadBack, PadUp…). Může to být klidně víc kláves
+ * najednou: "F8", "Ctrl+Shift+S", "F8+F9", "Ctrl+Mouse5", "PadBack+PadRB".
  *
  * Dva způsoby, jak appka zkratku poslouchá:
  *  - jednoduchá (modifikátory + jedna klávesa): systémová zkratka přes
  *    Electron globalShortcut - funguje všude, i na macOS/Linuxu;
- *  - složená (víc kláves, tlačítko myši, klávesa jako Pause): pomocník na
- *    Windows (main/winHelper.ts) sleduje stav kláves přes GetAsyncKeyState.
+ *  - složená (víc kláves, tlačítko myši, klávesa jako Pause, ovladač):
+ *    pomocník na Windows (main/winHelper.ts) sleduje stav kláves přes
+ *    GetAsyncKeyState a ovladač přes XInput.
  *
  * Bere se event.code, ne event.key: kód nezávisí na rozložení klávesnice
  * ani na Shiftu, takže "Shift+S" nedopadne jako "Shift+s".
@@ -23,12 +25,47 @@ export type Hotkey = {
   keys: string[];
   /** "Mouse3" | "Mouse4" | "Mouse5". */
   mouse: string[];
+  /** Tlačítka ovladače ("PadA", "PadRB", …) - drží se všechna najednou. */
+  pad: string[];
 };
 
 export type Modifier = 'Ctrl' | 'Alt' | 'Shift' | 'Super';
 
 const MODIFIERS: Modifier[] = ['Ctrl', 'Alt', 'Shift', 'Super'];
 const MOUSE = ['Mouse3', 'Mouse4', 'Mouse5'];
+
+/**
+ * Tlačítka ovladače (Xbox / XInput): název části -> maska XInput wButtons
+ * (spouště LT/RT jako vlastní bity nad ní), popisek a pořadí tlačítka ve
+ * standardním rozložení Gamepad API prohlížeče (pro záznam v nastavení).
+ * Pomocník na Windows dostane masku posunutou o PAD_VK_BASE, aby se
+ * vešla mezi virtual-key kódy kláves.
+ */
+export const PAD_VK_BASE = 0x100000;
+export const PAD_BUTTONS: Record<string, { mask: number; label: string; gamepadIndex: number }> = {
+  PadA: { mask: 0x1000, label: 'A', gamepadIndex: 0 },
+  PadB: { mask: 0x2000, label: 'B', gamepadIndex: 1 },
+  PadX: { mask: 0x4000, label: 'X', gamepadIndex: 2 },
+  PadY: { mask: 0x8000, label: 'Y', gamepadIndex: 3 },
+  PadLB: { mask: 0x0100, label: 'LB', gamepadIndex: 4 },
+  PadRB: { mask: 0x0200, label: 'RB', gamepadIndex: 5 },
+  PadLT: { mask: 0x10000, label: 'LT', gamepadIndex: 6 },
+  PadRT: { mask: 0x20000, label: 'RT', gamepadIndex: 7 },
+  PadBack: { mask: 0x0020, label: 'View', gamepadIndex: 8 },
+  PadStart: { mask: 0x0010, label: 'Menu', gamepadIndex: 9 },
+  PadLS: { mask: 0x0040, label: 'LS', gamepadIndex: 10 },
+  PadRS: { mask: 0x0080, label: 'RS', gamepadIndex: 11 },
+  PadUp: { mask: 0x0001, label: 'D-pad ↑', gamepadIndex: 12 },
+  PadDown: { mask: 0x0002, label: 'D-pad ↓', gamepadIndex: 13 },
+  PadLeft: { mask: 0x0004, label: 'D-pad ←', gamepadIndex: 14 },
+  PadRight: { mask: 0x0008, label: 'D-pad →', gamepadIndex: 15 },
+};
+const PAD_ORDER = Object.keys(PAD_BUTTONS);
+
+/** Část zkratky podle pořadí tlačítka ve standardním rozložení Gamepad API, nebo null. */
+export function partFromGamepadButton(index: number): string | null {
+  return PAD_ORDER.find((name) => PAD_BUTTONS[name].gamepadIndex === index) ?? null;
+}
 
 /** Klávesy podle názvu části -> Windows virtual-key kód (pro pomocníka) a název pro Electron. */
 const KEYS: Record<string, { vk: number; electron: string | null; label?: string }> = {
@@ -86,33 +123,43 @@ export function parseHotkey(text: unknown): Hotkey | null {
   const mods = new Set<Modifier>();
   const keys: string[] = [];
   const mouse: string[] = [];
+  const pad: string[] = [];
   for (const raw of text.split('+')) {
     const part = raw.trim();
     if (part === 'CommandOrControl' || part === 'Control' || part === 'Ctrl') mods.add('Ctrl');
     else if ((MODIFIERS as string[]).includes(part)) mods.add(part as Modifier);
     else if (MOUSE.includes(part)) {
       if (!mouse.includes(part)) mouse.push(part);
+    } else if (PAD_BUTTONS[part]) {
+      if (!pad.includes(part)) pad.push(part);
     } else if (KEYS[part]) {
       if (!keys.includes(part)) keys.push(part);
     } else return null;
   }
-  if (keys.length + mouse.length === 0) return null;
-  if (keys.length + mouse.length > 3) return null;
-  return { mods: MODIFIERS.filter((m) => mods.has(m)), keys, mouse };
+  if (keys.length + mouse.length + pad.length === 0) return null;
+  if (keys.length + mouse.length + pad.length > 3) return null;
+  // Ovladač je vždy jen ovladač - modifikátory klávesnice se s ním nekombinují.
+  if (pad.length > 0 && mods.size > 0) return null;
+  return { mods: MODIFIERS.filter((m) => mods.has(m)), keys, mouse, pad: PAD_ORDER.filter((p) => pad.includes(p)) };
 }
 
 export function isHotkey(value: unknown): boolean {
   return parseHotkey(value) !== null;
 }
 
-/** Zpátky na text v pevném pořadí (Ctrl+Alt+Shift+Super+klávesy+myš). */
+/** Zpátky na text v pevném pořadí (Ctrl+Alt+Shift+Super+klávesy+myš+ovladač). */
 export function formatHotkey(h: Hotkey): string {
-  return [...h.mods, ...h.keys, ...h.mouse].join('+');
+  return [...h.mods, ...h.keys, ...h.mouse, ...(h.pad ?? [])].join('+');
+}
+
+/** Je ve zkratce ovladač? */
+export function hasPad(h: Hotkey): boolean {
+  return (h.pad?.length ?? 0) > 0;
 }
 
 /** Jde to jako systémová zkratka Electronu (modifikátory + jedna klávesa)? */
 export function isSimpleHotkey(h: Hotkey): boolean {
-  return h.mouse.length === 0 && h.keys.length === 1 && KEYS[h.keys[0]]?.electron !== null;
+  return h.mouse.length === 0 && !hasPad(h) && h.keys.length === 1 && KEYS[h.keys[0]]?.electron !== null;
 }
 
 /** Electron accelerator pro jednoduchou zkratku, jinak null. */
@@ -121,12 +168,21 @@ export function toAccelerator(h: Hotkey): string | null {
   return [...h.mods, KEYS[h.keys[0]].electron as string].join('+');
 }
 
-/** Virtual-key kódy pro pomocníka na Windows (Super = 0x5b, pomocník bere i pravou klávesu Win). */
+/**
+ * Virtual-key kódy pro pomocníka na Windows (Super = 0x5b, pomocník bere i
+ * pravou klávesu Win). Tlačítka ovladače jako PAD_VK_BASE + maska XInput -
+ * pomocník podle základu pozná, že se má ptát ovladače, ne klávesnice.
+ */
 export function hotkeyVks(h: Hotkey): number[] {
-  return [...h.mods.map((m) => MOD_VK[m]), ...h.keys.map((k) => KEYS[k].vk), ...h.mouse.map((m) => MOUSE_VK[m])];
+  return [
+    ...h.mods.map((m) => MOD_VK[m]),
+    ...h.keys.map((k) => KEYS[k].vk),
+    ...h.mouse.map((m) => MOUSE_VK[m]),
+    ...(h.pad ?? []).map((p) => PAD_VK_BASE + PAD_BUTTONS[p].mask),
+  ];
 }
 
-/** Lidsky čitelný tvar ("Ctrl + Shift + S", "Mouse 5", "F8 + F9"). */
+/** Lidsky čitelný tvar ("Ctrl + Shift + S", "Mouse 5", "F8 + F9", "🎮 View + RB"). */
 export function hotkeyLabel(text: string): string {
   const h = parseHotkey(text);
   if (!h) return text;
@@ -134,6 +190,7 @@ export function hotkeyLabel(text: string): string {
     ...h.mods.map((m) => (m === 'Super' ? 'Win' : m)),
     ...h.keys.map((k) => KEYS[k]?.label ?? k),
     ...h.mouse.map((m) => m.replace('Mouse', 'Mouse ')),
+    ...(h.pad ?? []).map((p, i) => (i === 0 ? '🎮 ' : '') + PAD_BUTTONS[p].label),
   ];
   return parts.join(' + ');
 }
@@ -214,6 +271,7 @@ export class HotkeyRecorder {
   private mods = new Set<Modifier>();
   private keys: string[] = [];
   private mouse: string[] = [];
+  private pad: string[] = [];
   private held = new Set<string>();
 
   /** Stisk (KeyboardEvent.code). Vrací true, když to bylo něco použitelného. */
@@ -222,7 +280,7 @@ export class HotkeyRecorder {
     if (!part) return false;
     this.held.add(code);
     if (part.kind === 'mod') this.mods.add(part.part);
-    else if (!this.keys.includes(part.part) && this.keys.length + this.mouse.length < 3) this.keys.push(part.part);
+    else if (!this.keys.includes(part.part) && this.count() < 3) this.keys.push(part.part);
     return true;
   }
 
@@ -236,7 +294,7 @@ export class HotkeyRecorder {
     const part = partFromMouseButton(button);
     if (!part) return false;
     this.held.add(`mouse:${button}`);
-    if (!this.mouse.includes(part) && this.keys.length + this.mouse.length < 3) this.mouse.push(part);
+    if (!this.mouse.includes(part) && this.count() < 3) this.mouse.push(part);
     return true;
   }
 
@@ -245,20 +303,44 @@ export class HotkeyRecorder {
     return this.maybeDone();
   }
 
-  /** Co je zatím stisknuté (pro živý náhled v poli). */
+  /**
+   * Stav tlačítek ovladače (Gamepad API, standardní rozložení): která jsou
+   * teď stisknutá. Volá se dokola při záznamu; vrací hotovou zkratku, když
+   * hráč všechno pustil.
+   */
+  padState(pressedIndexes: number[]): Hotkey | null {
+    const now = new Set<string>();
+    for (const index of pressedIndexes) {
+      const part = partFromGamepadButton(index);
+      if (!part) continue;
+      now.add(`pad:${part}`);
+      if (!this.pad.includes(part) && this.count() < 3) this.pad.push(part);
+    }
+    for (const key of [...this.held]) if (key.startsWith('pad:') && !now.has(key)) this.held.delete(key);
+    for (const key of now) this.held.add(key);
+    return this.maybeDone();
+  }
+
+  private count(): number {
+    return this.keys.length + this.mouse.length + this.pad.length;
+  }
+
+  /** Co je zatím stisknuté (pro živý náhled v poli). S ovladačem se modifikátory klávesnice neberou. */
   current(): Hotkey {
-    return { mods: MODIFIERS.filter((m) => this.mods.has(m)), keys: [...this.keys], mouse: [...this.mouse] };
+    const pad = PAD_ORDER.filter((p) => this.pad.includes(p));
+    return { mods: pad.length > 0 ? [] : MODIFIERS.filter((m) => this.mods.has(m)), keys: [...this.keys], mouse: [...this.mouse], pad };
   }
 
   /** Něco nahraného (mimo samotné modifikátory)? */
   hasKey(): boolean {
-    return this.keys.length + this.mouse.length > 0;
+    return this.count() > 0;
   }
 
   reset(): void {
     this.mods.clear();
     this.keys = [];
     this.mouse = [];
+    this.pad = [];
     this.held.clear();
   }
 

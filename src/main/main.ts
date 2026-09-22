@@ -21,7 +21,7 @@ import type { CaptureEvent, Clip, DisplayInfo, Settings, Status, Visibility } fr
 import { hexToRgbTriplet } from '../shared/plan';
 import { makeT, type Key } from '../shared/i18n';
 import { hotkeyLabel } from '../shared/hotkeys';
-import { defaultClipTitle } from '../shared/clipNaming';
+import { clipFileBase, defaultClipTitle, safeFilePart } from '../shared/clipNaming';
 import { maxClipSecondsFor } from '../shared/plan';
 import { initLog, log, logDir } from './log';
 import { SettingsStore } from './settings';
@@ -37,7 +37,8 @@ import { Toast } from './toast';
 import { checkForUpdates, initUpdater } from './updater';
 import { runTestDriver } from './testDriver';
 import { WinHelper } from './winHelper';
-import { makeThumbnail, trimClip } from './edit';
+import { makeGif, makeThumbnail, mergeClips, trimClip } from './edit';
+import { GIF_MAX_SECONDS } from './editPlan';
 import { APP_USER_MODEL_IDS, PRODUCT_NAMES, detectVariant, modeForVariant, siblingExe } from './variant';
 import { brandIcon, trayIcon } from './icon';
 import { HotkeyManager, type HotkeyId, type HotkeyReason } from './hotkeys';
@@ -1018,6 +1019,88 @@ class KineApp {
     log(`klip poslán na Discord: ${clip.title}`);
   }
 
+  /**
+   * Sestřih: vybrané klipy (od nejstaršího) za sebou do jednoho nového
+   * klipu vedle nich (mp4). Průběh chodí oknům jako "clips:trimProgress"
+   * s id "merge". Původní klipy zůstávají.
+   */
+  async mergeSelected(ids: string[]): Promise<Clip> {
+    const clips = ids
+      .map((id) => this.library.get(id))
+      .filter((c): c is Clip => !!c)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    if (clips.length < 2) throw new Error('too-few');
+    if (clips.length > 30) throw new Error('too-many');
+    const dir = this.settings.clipsDir();
+    mkdirSync(dir, { recursive: true });
+    const games = [...new Set(clips.map((c) => c.game).filter((g): g is string => !!g))];
+    const game = games.length === 1 ? games[0] : null;
+    const now = new Date();
+    const word = this.t('montageWord');
+    const baseTitle = defaultClipTitle(now, game, word);
+    const stem = `${clipFileBase(now, game)} ${safeFilePart(word)}`;
+    let out = join(dir, `${stem}.mp4`);
+    for (let n = 2; existsSync(out); n++) out = join(dir, `${stem} ${n}.mp4`);
+    const progress = (percent: number) => this.broadcast('clips:trimProgress', { id: 'merge', percent });
+    const result = await mergeClips(
+      clips.map((c) => ({ file: c.file, durationSeconds: c.durationSeconds })),
+      out,
+      progress
+    );
+    const thumbsDir = join(app.getPath('userData'), 'thumbs');
+    mkdirSync(thumbsDir, { recursive: true });
+    const thumb = join(thumbsDir, `${basename(out, '.mp4')}.jpg`);
+    const thumbOk = await makeThumbnail(out, thumb);
+    const clip: Clip = {
+      id: randomUUID(),
+      file: out,
+      thumb: thumbOk ? thumb : null,
+      title: `${baseTitle} · ${this.t('montageCount', { count: clips.length })}`.slice(0, 150),
+      game,
+      createdAt: now.toISOString(),
+      durationSeconds: result.durationSeconds,
+      sizeBytes: result.sizeBytes,
+      width: result.width,
+      height: result.height,
+      sessionId: clips[clips.length - 1].sessionId,
+      upload: null,
+    };
+    this.library.add(clip);
+    log(`sestřih ${clips.length} klipů: ${out} (${result.durationSeconds.toFixed(1)} s)`);
+    return clip;
+  }
+
+  /**
+   * GIF z úseku klipu (nejvýš GIF_MAX_SECONDS s) - soubor vedle klipu,
+   * do knihovny nepatří (jsou v ní jen videa). Vrací cestu k souboru.
+   */
+  async gifFromClip(id: string, range: { start: number; end: number }): Promise<{ file: string; sizeBytes: number; lengthSeconds: number }> {
+    const clip = this.library.get(id);
+    if (!clip) throw new Error('clip not found');
+    const start = Math.max(0, Number(range.start) || 0);
+    const total = clip.durationSeconds > 0 ? clip.durationSeconds : Infinity;
+    const end = Math.min(total, Number(range.end) || total);
+    if (!Number.isFinite(end)) throw new Error('unknown length');
+    if (end - start < 0.2) throw new Error('too-short');
+    if (end - start > GIF_MAX_SECONDS + 0.05) throw new Error('gif-too-long');
+    const dir = dirname(clip.file);
+    const stem = basename(clip.file, extname(clip.file));
+    let out = join(dir, `${stem}.gif`);
+    for (let n = 2; existsSync(out); n++) out = join(dir, `${stem} ${n}.gif`);
+    const progress = (percent: number) => this.broadcast('clips:trimProgress', { id, percent });
+    const result = await makeGif(clip.file, out, { start, end }, progress);
+    log(`GIF z klipu: ${out} (${result.lengthSeconds.toFixed(1)} s, ${Math.round(result.sizeBytes / 1024)} kB)`);
+    return result;
+  }
+
+  /** Ukázat soubor ve složce - jen soubory ve složce s klipy (nic jiného okno nesmí otvírat). */
+  revealFile(file: string): void {
+    const dir = this.settings.clipsDir();
+    const target = String(file);
+    if (!target.startsWith(dir) || !existsSync(target)) return;
+    shell.showItemInFolder(target);
+  }
+
   // ---- IPC ---------------------------------------------------------------------
 
   private registerIpc(): void {
@@ -1078,6 +1161,11 @@ class KineApp {
     ipcMain.handle('clips:trim', (_e, id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' }) => this.trimClip(id, opts));
     ipcMain.handle('app:copy', (_e, text: string) => clipboard.writeText(String(text ?? '')));
     ipcMain.handle('clips:discord', (_e, id: string) => this.shareToDiscord(id));
+    ipcMain.handle('clips:favorite', (_e, id: string, favorite: boolean) => this.library.update(id, { favorite: Boolean(favorite) }));
+    ipcMain.handle('clips:merge', (_e, ids: string[]) => this.mergeSelected(Array.isArray(ids) ? ids.map(String) : []));
+    ipcMain.handle('clips:gif', (_e, id: string, range: { start: number; end: number }) => this.gifFromClip(id, range ?? { start: 0, end: 0 }));
+    ipcMain.handle('clips:revealFile', (_e, file: string) => this.revealFile(file));
+    ipcMain.handle('capture:pause', () => this.togglePause());
 
     ipcMain.handle('auth:loginBrowser', async () => {
       this.browserLoginWaiting = true;

@@ -62,7 +62,14 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
 - **Zkratky** (`src/shared/hotkeys.ts`, `src/main/hotkeys.ts`): jedna
   klávesa s Ctrl/Alt/Shift jde přes systémovou zkratku Electronu; víc
   kláves najednou („F8+F9“), tlačítka myši (Mouse4/5) a klávesy jako
-  Pause hlídá pomocník na Windows přes `GetAsyncKeyState`.
+  Pause hlídá pomocník na Windows přes `GetAsyncKeyState`. **Ovladač**
+  (Xbox / XInput, PlayStation přes Steam): tlačítka `PadA`, `PadRB`,
+  `PadBack`… se do zkratky nahrají tak, že je hráč podrží, když je pole
+  aktivní (Gamepad API v okně); pomocník je pak čte přes
+  `XInputGetState` (`xinput1_4.dll`, záložně `xinput9_1_0.dll`) jako
+  pseudo-klávesy `0x100000 + maska`, takže platí stejná pravidla jako
+  pro kombinace kláves (držet všechno najednou, delší kombinace vyhrává).
+  Odpojené sloty ovladače se zkouší jen každé 2 s, ať to nežere výkon.
 - **Přihlášení:** přes prohlížeč (Kine `/connect` → jednorázový token →
   `http://127.0.0.1:<port>/link` nebo `kine://link?…`), nebo e-mail +
   heslo. Relace se ukládá zašifrovaná (`safeStorage`, na Windows DPAPI).
@@ -82,6 +89,23 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   vrstvě se zastíní, co se odřízne, hráč vybere levou/střední/pravou část
   obrazu a uloží se nový klip `… (9:16)` (výška zůstane, šířka =
   výška·9/16; `crop` filtr v `edit.ts`). Původní se nikdy nepřepisuje.
+  **GIF** (třetí formát): úsek do 15 s, 480 px, 15 fps, paleta +
+  dithering (`editPlan.gifArgs`), bez zvuku, soubor `.gif` vedle klipu
+  (do knihovny nepatří - tam jsou jen videa), tlačítko „Ukázat ve složce“.
+- **Knihovna klipů** (`src/renderer/settings.ts`): najetí myší na kartu
+  tiše přehrává klip (jeden náhled naráz, po odjetí se pustí z ruky);
+  hvězdička = oblíbený (`Clip.favorite`) a filtr „Oblíbené“; zaškrtávátka
+  na kartách vyberou víc klipů a lišta nad mřížkou je **spojí do jednoho
+  klipu** (sestřih: `editPlan.mergePlan` - společný rozměr s černými
+  pruhy místo roztažení, společné fps, zvuk 48 kHz stereo a ticho tam,
+  kde klip zvuk nemá, `concat` filtr, libx264), nebo je naráz nahraje či
+  smaže. Sestřih je nový klip `Kine … sestřih.mp4`, původní zůstávají.
+- **Postranní panel:** nahoře Kine a Klipy, pod hlavičkou Nastavení
+  Záznam / Hry / Nahrání a sdílení / Účet / O appce (každá položka
+  s ikonou), dole karta stavu: co appka dělá, jak dlouhý zásobník drží
+  a jakou zkratkou se klip uloží, tlačítka **Uložit klip** a
+  **Pozastavit / Pokračovat** (v ručním režimu Zapnout/Vypnout
+  zásobník), a účet (avatar, @jméno, PLUS) nebo Přihlásit se.
 - **Klipy samy z událostí ve hře** (`src/main/gameEvents.ts`, čistá část
   `gameEventsParse.ts` s testy): appka pozná zabití a uloží klip bez
   zkratky – v základu od dvojnásobného zabití výš („Dvojité zabití“,
@@ -102,7 +126,7 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   Allstar).
 - **Sdílení:** u nahraného klipu je „Kopírovat odkaz“ (odkaz na Kine do
   schránky) a „Poslat na Discord“ – webhook kanálu se vyplní v záložce
-  Nahrávání, appka pošle název + odkaz (`main.ts` → `shareToDiscord`).
+  Nahrání a sdílení, appka pošle název + odkaz (`main.ts` → `shareToDiscord`).
 - **Dvě appky vedle sebe** se hlídají: hlídání her dává každé kolo (5 s)
   seznam procesů i hlavnímu procesu (`onProcesses`); Kine Clipper se při
   běžícím `Kine.exe` sám vypne (klipovač je v Kine do PC), Kine při
@@ -138,7 +162,7 @@ Užitečné proměnné prostředí:
 | `KINE_DEBUG=1` | protokol i na stdout (jinak jen `%APPDATA%\kine-desktop\logs\kine.log`) |
 | `KINE_USER_DATA=…` | jiná složka s nastavením (zkoušky) |
 | `KINE_FFMPEG=…` | vlastní ffmpeg místo přibaleného |
-| `KINE_TEST=1` | samočinná zkouška: zásobník → dva klipy → přehrávač v okně → screenshoty → konec (`tests/e2e.sh`) |
+| `KINE_TEST=1` | samočinná zkouška: zásobník → dva klipy → přehrávač, úpravy, 9:16, GIF, sestřih, oblíbené, panel → screenshoty → konec (`tests/e2e.sh`) |
 | `KINE_NO_HELPER=1` | nespouštět pomocníka pro Windows (hry jen podle seznamu a Steamu, jen jednoduché zkratky) |
 | `KINE_VARIANT=clipper` | při vývoji se chovat jako appka Kine Clipper (zabalená appka to má v package.json) |
 
@@ -177,7 +201,8 @@ src/main/        hlavní proces (Electron, Node)
   games.ts       hlídání her (procesy, Steam, popředí), gamesParse.ts čistá část (test)
   gameEvents.ts  klipy samy z událostí: CS2 Game State Integration (lokální server + cfg), LoL Live Client API
   gameEventsParse.ts  čistá část: rozbor událostí CS2/LoL, série zabití, obsah cfg (test)
-  edit.ts        zkrácení / ztlumení / výřez 9:16 klipu (ffmpeg), náhled k upravenému klipu
+  edit.ts        zkrácení / ztlumení / výřez 9:16, sestřih víc klipů, GIF (ffmpeg), náhled k upravenému klipu
+  editPlan.ts    čistá část úprav: argumenty pro sestřih a GIF, rozbor hlavičky ffmpeg, průběh (test)
   winHelper.ts   pomocník pro Windows (PowerShell + C# přes Add-Type): okno v popředí, procesy, okna, Steam, stav kláves
   hotkeys.ts     zkratky: systémové (Electron) + složené přes pomocníka
   clips.ts       knihovna klipů (index.json ve složce s klipy)
@@ -186,8 +211,9 @@ src/main/        hlavní proces (Electron, Node)
   kineApi.ts     volání Kine (create-upload-url, confirm)
   settings.ts    nastavení (userData/settings.json), shared/settingsSchema.ts (test)
   toast.ts       okénko „Klip uložen“ v rohu
-src/renderer/    stránky oken: settings (záložka Kine s lištou, klipy s filtry, nastavení,
-                 průvodce), player (přehrávač + úpravy klipu ve vrstvě), review
+src/renderer/    stránky oken: settings (postranní panel s kartou stavu, záložka Kine s lištou,
+                 klipy s filtry / oblíbenými / výběrem a sestřihem, nastavení, průvodce),
+                 player (přehrávač + úpravy klipu ve vrstvě: řez, 9:16, GIF), review
                  (okýnko po hře), toast, capture (skrytá snímací)
 src/preload/     most window.kine / window.kineCapture
 src/shared/      typy, překlady (i18n/: en cs sk de pl es fr uk), názvy klipů, zkratky, plány
@@ -220,3 +246,7 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   velké hry s oficiálním rozhraním pro stav hry). U CS2 se cfg zapíše, až
   když appka běží s CS2 nainstalovaným přes Steam; hra ho načte při
   dalším spuštění. Ostatní hry: jen zkratka.
+- Zkratka na ovladači je podle dokumentace XInput a projde testy, ale na
+  skutečném ovladači zatím vyzkoušená není (tady žádný není). Ovladač
+  připojený přes Bluetooth bez XInputu (starší DualShock bez Steamu)
+  appka nevidí.

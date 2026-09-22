@@ -1,6 +1,6 @@
 import type { Clip } from '../shared/types';
 import type { Key } from '../shared/i18n';
-import { clear, errorText, fileUrl, h } from './ui';
+import { clear, errorText, fileUrl, formatBytes, h } from './ui';
 
 /**
  * Přehrávač klipu jako vrstva přes celé okno (lightbox): mřížka klipů pod
@@ -20,6 +20,12 @@ type T = (key: Key, vars?: Record<string, string | number>) => string;
 
 export type TrimRequest = { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' };
 type CropAnchor = 'left' | 'center' | 'right';
+/** Formát výstupu v úpravách: původní video, výřez na výšku, nebo GIF (soubor vedle klipu). */
+type ExportFormat = 'original' | 'vertical' | 'gif';
+
+/** Nejdelší GIF (s) - stejná hranice jako v hlavním procesu (editPlan.GIF_MAX_SECONDS). */
+export const GIF_MAX_SECONDS = 15;
+const GIF_WIDTH = 480;
 
 export type PlayerOptions = {
   clip: Clip;
@@ -33,6 +39,10 @@ export type PlayerOptions = {
   edit?: {
     run: (clip: Clip, request: TrimRequest) => Promise<Clip>;
     onProgress: (cb: (p: { id: string; percent: number }) => void) => () => void;
+    /** GIF z úseku; bez tohohle formát GIF v nabídce není. */
+    gif?: (clip: Clip, range: { start: number; end: number }) => Promise<{ file: string; sizeBytes: number; lengthSeconds: number }>;
+    /** Ukázat hotový soubor ve složce. */
+    reveal?: (file: string) => void;
   };
 };
 
@@ -79,8 +89,10 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   let mute = false;
   /** Výřez na výšku 9:16 (TikTok, Shorts); null = původní formát. */
   let vertical: CropAnchor | null = null;
+  /** Formát GIF (bez zvuku, soubor vedle klipu, ne do knihovny). */
+  let gif = false;
   let editing = false;
-  let saving: { mode: 'new' | 'replace'; percent: number } | null = null;
+  let saving: { mode: 'new' | 'replace' | 'gif'; percent: number } | null = null;
   let confirmReplace = false;
   let confirmTimer: ReturnType<typeof setTimeout> | null = null;
   let noteTimer: ReturnType<typeof setTimeout> | null = null;
@@ -133,12 +145,13 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const endVal = h('b', {});
   const lenVal = h('b', {});
   const muteBox = h('input', { type: 'checkbox', onchange: (e: Event) => { mute = (e.target as HTMLInputElement).checked; refreshButtons(); } }) as HTMLInputElement;
-  const saveNewBtn = h('button', { class: 'small primary', onclick: () => void save('new') }, t('trimSaveNew'));
+  const saveNewBtn = h('button', { class: 'small primary', onclick: () => void (gif ? saveGif() : save('new')) }, t('trimSaveNew'));
   const replaceBtn = h('button', { class: 'small quiet', onclick: () => onReplaceClick() }, t('trimReplace'));
-  // Formát: původní / na výšku (a kde výřez leží).
-  const formatBtns: Record<'original' | 'vertical', HTMLButtonElement> = {
-    original: h('button', { class: 'small quiet seg active', onclick: () => setVertical(null) }, t('exportOriginal')),
-    vertical: h('button', { class: 'small quiet seg', onclick: () => setVertical(vertical ?? 'center') }, '📱 ' + t('exportVertical')),
+  // Formát: původní / na výšku (a kde výřez leží) / GIF.
+  const formatBtns: Record<ExportFormat, HTMLButtonElement> = {
+    original: h('button', { class: 'small quiet seg active', onclick: () => setFormat('original') }, t('exportOriginal')),
+    vertical: h('button', { class: 'small quiet seg', onclick: () => setFormat('vertical') }, '📱 ' + t('exportVertical')),
+    gif: h('button', { class: 'small quiet seg', onclick: () => setFormat('gif') }, t('exportGif', { max: GIF_MAX_SECONDS })),
   };
   const anchorBtns: Record<CropAnchor, HTMLButtonElement> = {
     left: h('button', { class: 'small quiet seg', onclick: () => setVertical('left') }, t('exportCropLeft')),
@@ -146,6 +159,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     right: h('button', { class: 'small quiet seg', onclick: () => setVertical('right') }, t('exportCropRight')),
   };
   const anchorRow = h('div', { class: 'row hidden', style: 'gap:6px' }, anchorBtns.left, anchorBtns.center, anchorBtns.right, h('span', { class: 'faint' }, t('exportVerticalHint')));
+  const gifHint = h('p', { class: 'hint gif-hint hidden' }, t('exportGifHint', { width: GIF_WIDTH, max: GIF_MAX_SECONDS }));
   const progressBar = h('span', {});
   const progress = h('div', { class: 'progress trim-progress hidden' }, progressBar);
   const progressText = h('span', { class: 'faint hidden' });
@@ -165,8 +179,9 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       h('label', { class: 'check', style: 'align-items:center' }, muteBox, t('trimMute'))
     ),
     h('p', { class: 'hint' }, t('trimHint')),
-    h('div', { class: 'row', style: 'gap:6px' }, h('span', { class: 'faint', style: 'margin-right:4px' }, t('exportFormat')), formatBtns.original, formatBtns.vertical),
+    h('div', { class: 'row', style: 'gap:6px' }, h('span', { class: 'faint', style: 'margin-right:4px' }, t('exportFormat')), formatBtns.original, formatBtns.vertical, edit?.gif ? formatBtns.gif : null),
     anchorRow,
+    gifHint,
     uploadedNote,
     h('div', { class: 'row trim-actions' }, saveNewBtn, replaceBtn, progress, progressText)
   );
@@ -269,12 +284,23 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   }
   function setVertical(anchor: CropAnchor | null) {
     vertical = anchor;
-    formatBtns.original.classList.toggle('active', !anchor);
+    if (anchor) gif = false;
+    formatBtns.original.classList.toggle('active', !anchor && !gif);
     formatBtns.vertical.classList.toggle('active', !!anchor);
+    formatBtns.gif.classList.toggle('active', gif);
     anchorRow.classList.toggle('hidden', !anchor);
+    gifHint.classList.toggle('hidden', !gif);
     for (const [key, btn] of Object.entries(anchorBtns)) btn.classList.toggle('active', key === anchor);
     layoutCrop();
     refreshButtons();
+  }
+  function setFormat(format: ExportFormat) {
+    if (format === 'vertical') {
+      setVertical(vertical ?? 'center');
+      return;
+    }
+    gif = format === 'gif';
+    setVertical(null);
   }
   window.addEventListener('resize', layoutCrop);
 
@@ -375,23 +401,32 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       mute = false;
       muteBox.checked = false;
       confirmReplace = false;
+      gif = false;
       setVertical(null);
     }
     layout();
   }
   function nothingToDo(): boolean {
-    return start <= 0.05 && end >= duration - 0.05 && !mute && !vertical;
+    return start <= 0.05 && end >= duration - 0.05 && !mute && !vertical && !gif;
+  }
+  /** GIF: úsek musí být nejvýš GIF_MAX_SECONDS. */
+  function gifTooLong(): boolean {
+    return gif && end - start > GIF_MAX_SECONDS + 0.05;
   }
   function refreshButtons() {
     const idle = !saving && !broken && duration > 0;
-    saveNewBtn.disabled = !idle || nothingToDo();
-    // Jiný formát nejde "nahradit" - vždy nový klip vedle.
-    replaceBtn.disabled = !idle || nothingToDo() || !!vertical;
-    saveNewBtn.title = nothingToDo() ? t('trimNothingToDo') : '';
+    saveNewBtn.disabled = !idle || nothingToDo() || gifTooLong();
+    saveNewBtn.textContent = gif ? t('gifSave') : t('trimSaveNew');
+    // Jiný formát nejde "nahradit" - vždy nový klip (nebo soubor) vedle.
+    replaceBtn.disabled = !idle || nothingToDo() || !!vertical || gif;
+    replaceBtn.classList.toggle('hidden', gif);
+    muteBox.disabled = gif;
+    saveNewBtn.title = nothingToDo() ? t('trimNothingToDo') : gifTooLong() ? t('gifTooLong', { max: GIF_MAX_SECONDS }) : '';
     replaceBtn.title = nothingToDo() ? t('trimNothingToDo') : '';
     replaceBtn.textContent = confirmReplace ? t('trimReplaceConfirm') : t('trimReplace');
     replaceBtn.classList.toggle('danger', confirmReplace);
     replaceBtn.classList.toggle('quiet', !confirmReplace);
+    gifHint.classList.toggle('warn', gifTooLong());
     progress.classList.toggle('hidden', !saving);
     progressText.classList.toggle('hidden', !saving);
     if (saving) {
@@ -414,11 +449,40 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     confirmReplace = false;
     void save('replace');
   }
-  function showNote(message: string, kind: 'ok' | 'error') {
-    note.textContent = message;
+  function showNote(message: string, kind: 'ok' | 'error', action?: { label: string; onClick: () => void }) {
+    clear(note);
+    note.append(h('span', {}, message));
+    if (action) note.append(h('button', { class: 'small quiet', style: 'margin-left:10px', onclick: action.onClick }, action.label));
     note.className = `player-note ${kind}`;
     if (noteTimer) clearTimeout(noteTimer);
-    noteTimer = setTimeout(() => note.classList.add('hidden'), kind === 'error' ? 8000 : 4000);
+    noteTimer = setTimeout(() => note.classList.add('hidden'), kind === 'error' ? 8000 : action ? 9000 : 4000);
+  }
+  /** GIF z výběru: soubor vedle klipu, klip sám se nemění; okno zůstane v úpravách. */
+  async function saveGif() {
+    if (!edit?.gif || saving || nothingToDo() || gifTooLong()) return;
+    saving = { mode: 'gif', percent: 0 };
+    refreshButtons();
+    const unsubscribe = edit.onProgress((p) => {
+      if (saving && p.id === clip.id) {
+        saving.percent = p.percent;
+        refreshButtons();
+      }
+    });
+    try {
+      const result = await edit.gif(clip, { start, end });
+      saving = null;
+      const name = result.file.split(/[\\/]/).pop() ?? result.file;
+      const reveal = edit.reveal;
+      showNote(t('gifDone', { name, size: formatBytes(result.sizeBytes) }), 'ok', reveal ? { label: t('gifReveal'), onClick: () => reveal(result.file) } : undefined);
+    } catch (e) {
+      saving = null;
+      options.onLog?.(`GIF: ${(e as Error).message}`);
+      const message = (e as Error).message ?? String(e);
+      showNote(/gif-too-long/.test(message) ? t('gifTooLong', { max: GIF_MAX_SECONDS }) : t('gifFailed', { message: errorText(e, t) }), 'error');
+    } finally {
+      unsubscribe();
+      refreshButtons();
+    }
   }
   async function save(mode: 'new' | 'replace') {
     if (!edit || saving || nothingToDo()) return;

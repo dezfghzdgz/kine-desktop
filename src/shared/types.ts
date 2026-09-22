@@ -128,6 +128,8 @@ export type Clip = {
   /** Hraní, ke kterému klip patří - podle toho se po hře sesbírají do okýnka. */
   sessionId: string;
   upload: ClipUpload | null;
+  /** Oblíbený (hvězdička v knihovně) - starší index ho nemá, proto volitelný. */
+  favorite?: boolean;
 };
 
 export type CaptureState = 'off' | 'starting' | 'on' | 'error';

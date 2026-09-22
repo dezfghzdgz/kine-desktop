@@ -41,8 +41,18 @@ const kine = {
   copyText: (text: string): Promise<void> => ipcRenderer.invoke('app:copy', text),
   /** Nahraný klip na Discord (webhook z nastavení). */
   shareToDiscord: (id: string): Promise<void> => ipcRenderer.invoke('clips:discord', id),
+  /** Hvězdička u klipu. */
+  setFavorite: (id: string, favorite: boolean): Promise<Clip | null> => ipcRenderer.invoke('clips:favorite', id, favorite),
+  /** Sestřih vybraných klipů do jednoho nového (průběh chodí jako onTrimProgress s id "merge"). */
+  mergeClips: (ids: string[]): Promise<Clip> => ipcRenderer.invoke('clips:merge', ids),
+  /** GIF z úseku klipu - soubor vedle klipu (průběh jako onTrimProgress s id klipu). */
+  makeGif: (id: string, range: { start: number; end: number }): Promise<{ file: string; sizeBytes: number; lengthSeconds: number }> => ipcRenderer.invoke('clips:gif', id, range),
+  /** Ukázat soubor ze složky s klipy (třeba GIF) ve složce. */
+  revealFile: (file: string): Promise<void> => ipcRenderer.invoke('clips:revealFile', file),
   onTrimProgress: (cb: (p: { id: string; percent: number }) => void) => on<{ id: string; percent: number }>('clips:trimProgress', cb),
   toggleCapture: (): Promise<void> => ipcRenderer.invoke('capture:toggle'),
+  /** Pozastavit / obnovit nahrávání do zásobníku (jako v nabídce u hodin). */
+  togglePause: (): Promise<void> => ipcRenderer.invoke('capture:pause'),
 
   loginBrowser: (): Promise<void> => ipcRenderer.invoke('auth:loginBrowser'),
   cancelBrowserLogin: (): Promise<void> => ipcRenderer.invoke('auth:cancelBrowser'),

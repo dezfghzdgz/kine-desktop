@@ -1,9 +1,11 @@
 import { statSync } from 'node:fs';
 import { spawnFfmpeg, probe, runFfmpeg } from './ffmpeg';
+import { GIF_FPS, GIF_WIDTH, gifArgs, mergePlan, progressPercent, type MergeInput } from './editPlan';
 import { log } from './log';
 
 /**
- * Lehké úpravy klipu: zkrácení (začátek/konec) a ztlumení zvuku.
+ * Lehké úpravy klipu: zkrácení (začátek/konec), ztlumení zvuku, výřez na
+ * výšku, sestřih několika klipů do jednoho a GIF z úseku.
  *
  * Řez je přesný na snímek, takže se obraz překóduje (libx264, rychlý
  * preset) - u minutového klipu to na běžném procesoru trvá pár sekund.
@@ -35,6 +37,59 @@ export function verticalCropFilter(anchor: TrimOptions['vertical']): string | nu
 
 export type TrimResult = { file: string; durationSeconds: number; sizeBytes: number; width: number | null; height: number | null };
 
+/**
+ * Spustí ffmpeg s `-progress pipe:1` a hlásí procenta podle out_time
+ * vůči očekávané délce výstupu. Při chybě hodí poslední řádek stderr.
+ */
+function runWithProgress(args: string[], totalSeconds: number, what: string, onProgress?: (percent: number) => void): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawnFfmpeg(args);
+    let stderr = '';
+    let stdout = '';
+    child.stderr.on('data', (d) => {
+      stderr += d.toString();
+      if (stderr.length > 20000) stderr = stderr.slice(-10000);
+    });
+    child.stdout.on('data', (d) => {
+      stdout += d.toString();
+      let idx: number;
+      while ((idx = stdout.indexOf('\n')) >= 0) {
+        const line = stdout.slice(0, idx);
+        stdout = stdout.slice(idx + 1);
+        const percent = progressPercent(line, totalSeconds);
+        if (percent !== null && onProgress) onProgress(percent);
+      }
+    });
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error('ffmpeg se zasekl'));
+    }, 10 * 60 * 1000);
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else {
+        log(`${what} skončil s kódem ${code}: ${stderr.slice(-800)}`);
+        reject(new Error(stderr.trim().split('\n').pop() || `ffmpeg ${code}`));
+      }
+    });
+  });
+}
+
+async function describe(output: string, fallbackSeconds: number): Promise<TrimResult> {
+  const info = await probe(output);
+  return {
+    file: output,
+    durationSeconds: info.durationSeconds ?? fallbackSeconds,
+    sizeBytes: statSync(output).size,
+    width: info.width,
+    height: info.height,
+  };
+}
+
 export async function trimClip(input: string, output: string, options: TrimOptions, onProgress?: (percent: number) => void): Promise<TrimResult> {
   const start = Math.max(0, options.start);
   const length = Math.max(0.2, options.end - start);
@@ -51,52 +106,43 @@ export async function trimClip(input: string, output: string, options: TrimOptio
   else args.push('-c:a', isWebm ? 'libopus' : 'aac', '-b:a', '160k');
   args.push(output);
 
-  await new Promise<void>((resolve, reject) => {
-    const child = spawnFfmpeg(args);
-    let stderr = '';
-    let stdout = '';
-    child.stderr.on('data', (d) => {
-      stderr += d.toString();
-      if (stderr.length > 20000) stderr = stderr.slice(-10000);
-    });
-    child.stdout.on('data', (d) => {
-      stdout += d.toString();
-      // Řádky "out_time_us=1234567" (starší ffmpeg "out_time_ms" - obojí jsou mikrosekundy).
-      let idx: number;
-      while ((idx = stdout.indexOf('\n')) >= 0) {
-        const line = stdout.slice(0, idx).trim();
-        stdout = stdout.slice(idx + 1);
-        const m = /^out_time_(?:us|ms)=(\d+)/.exec(line);
-        if (m && onProgress) onProgress(Math.min(99, Math.round((Number(m[1]) / 1e6 / length) * 100)));
-      }
-    });
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error('ffmpeg se zasekl'));
-    }, 10 * 60 * 1000);
-    child.on('error', (e) => {
-      clearTimeout(timer);
-      reject(e);
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve();
-      else {
-        log(`zkrácení klipu skončilo s kódem ${code}: ${stderr.slice(-800)}`);
-        reject(new Error(stderr.trim().split('\n').pop() || `ffmpeg ${code}`));
-      }
-    });
-  });
-
-  const info = await probe(output);
+  await runWithProgress(args, length, 'zkrácení klipu', onProgress);
+  const result = await describe(output, length);
   onProgress?.(100);
-  return {
-    file: output,
-    durationSeconds: info.durationSeconds ?? length,
-    sizeBytes: statSync(output).size,
-    width: info.width,
-    height: info.height,
-  };
+  return result;
+}
+
+/**
+ * Sestřih: několik klipů za sebou do jednoho souboru (mp4). Rozměry
+ * a zvuk se srovnají podle editPlan.mergePlan, takže jde spojit i klipy
+ * z různých her a rozlišení nebo klip bez zvuku s klipem se zvukem.
+ */
+export async function mergeClips(inputs: { file: string; durationSeconds: number }[], output: string, onProgress?: (percent: number) => void): Promise<TrimResult> {
+  const described: MergeInput[] = [];
+  for (const input of inputs) {
+    const info = await probe(input.file);
+    described.push({
+      file: input.file,
+      width: info.width,
+      height: info.height,
+      hasAudio: info.hasAudio,
+      fps: info.fps,
+      durationSeconds: info.durationSeconds ?? input.durationSeconds,
+    });
+  }
+  const plan = mergePlan(described, output);
+  await runWithProgress(plan.args, plan.totalSeconds, 'sestřih klipů', onProgress);
+  const result = await describe(output, plan.totalSeconds);
+  onProgress?.(100);
+  return result;
+}
+
+/** GIF z úseku klipu (bez zvuku, 480 px, 15 fps, smyčka). Vrací velikost souboru. */
+export async function makeGif(input: string, output: string, range: { start: number; end: number }, onProgress?: (percent: number) => void): Promise<{ file: string; sizeBytes: number; lengthSeconds: number }> {
+  const { args, lengthSeconds } = gifArgs(input, output, { start: range.start, end: range.end, width: GIF_WIDTH, fps: GIF_FPS });
+  await runWithProgress(args, lengthSeconds, 'GIF', onProgress);
+  onProgress?.(100);
+  return { file: output, sizeBytes: statSync(output).size, lengthSeconds };
 }
 
 /** Náhled (první snímek) k upravenému klipu. */

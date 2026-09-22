@@ -55,6 +55,7 @@ await build({
     segments: 'src/main/segments.ts',
     gamesParse: 'src/main/gamesParse.ts',
     gameEventsParse: 'src/main/gameEventsParse.ts',
+    editPlan: 'src/main/editPlan.ts',
     tus: 'src/main/tus.ts',
     uploader: 'src/main/uploader.ts',
     clips: 'src/main/clips.ts',

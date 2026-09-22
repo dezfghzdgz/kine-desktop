@@ -63,6 +63,44 @@ public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 [StructLayout(LayoutKind.Sequential)] public struct MONITORINFO { public uint cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags; }
 
+/* Ovladac (Xbox / XInput): xinput1_4.dll je na Windows 8+, xinput9_1_0.dll vsude jako zaloha. */
+[DllImport("xinput1_4.dll", EntryPoint = "XInputGetState")] public static extern uint XInputGetState14(uint index, out XINPUT_STATE state);
+[DllImport("xinput9_1_0.dll", EntryPoint = "XInputGetState")] public static extern uint XInputGetState910(uint index, out XINPUT_STATE state);
+[StructLayout(LayoutKind.Sequential)] public struct XINPUT_GAMEPAD { public ushort wButtons; public byte bLeftTrigger; public byte bRightTrigger; public short sThumbLX; public short sThumbLY; public short sThumbRX; public short sThumbRY; }
+[StructLayout(LayoutKind.Sequential)] public struct XINPUT_STATE { public uint dwPacketNumber; public XINPUT_GAMEPAD Gamepad; }
+/* -1 = jeste nevime, 1 = xinput1_4, 0 = xinput9_1_0, -2 = XInput tu neni (zadne dalsi pokusy). */
+static int xinputDll = -1;
+static bool[] padConnected = new bool[4];
+
+static uint PadState(uint index, out XINPUT_STATE state) {
+  if (xinputDll != 0) {
+    try { uint rc = XInputGetState14(index, out state); xinputDll = 1; return rc; }
+    catch (DllNotFoundException) { if (xinputDll == 1) throw; xinputDll = 0; }
+    catch (EntryPointNotFoundException) { if (xinputDll == 1) throw; xinputDll = 0; }
+  }
+  return XInputGetState910(index, out state);
+}
+
+/* Stisknuta tlacitka na vsech pripojenych ovladacich dohromady (maska wButtons; spouste jako 0x10000 / 0x20000).
+   Odpojene sloty se zkouseji jen obcas (XInput je u prazdneho slotu pomaly). -1 = XInput neni. */
+public static int PadButtons(int tick) {
+  if (xinputDll == -2) return -1;
+  int result = 0;
+  for (uint i = 0; i < 4; i++) {
+    if (!padConnected[i] && (tick % 66) != 0) continue;
+    XINPUT_STATE st;
+    uint rc;
+    try { rc = PadState(i, out st); }
+    catch (Exception) { xinputDll = -2; return -1; }
+    if (rc != 0) { padConnected[i] = false; continue; }
+    padConnected[i] = true;
+    result |= st.Gamepad.wButtons;
+    if (st.Gamepad.bLeftTrigger > 100) result |= 0x10000;
+    if (st.Gamepad.bRightTrigger > 100) result |= 0x20000;
+  }
+  return result;
+}
+
 /* Nazev programu (jen soubor, napr. "cs2.exe") - PROCESS_QUERY_LIMITED_INFORMATION staci i na procesy bezici jako spravce. */
 public static string ExeName(uint pid) {
   if (pid == 0) return "";
@@ -99,14 +137,21 @@ public static uint[] WindowedPids() {
 }
 '@
 
-# Zkratky: "119;17,120" = F8 a Ctrl+F9 (virtual-key kody).
+# Zkratky: "119;17,120" = F8 a Ctrl+F9 (virtual-key kody). Kody od 0x100000 vys
+# jsou tlacitka ovladace (0x100000 + maska XInput) - viz shared/hotkeys.ts.
 $chords = @()
+$usePad = $false
 if ($env:KINE_HOTKEYS) {
   foreach ($g in ($env:KINE_HOTKEYS -split ';')) {
-    if ($g) { $chords += ,([int[]]($g -split ',')) }
+    if ($g) {
+      $chord = [int[]]($g -split ',')
+      $chords += ,$chord
+      foreach ($vk in $chord) { if ($vk -ge 0x100000) { $usePad = $true } }
+    }
   }
 }
 $wasDown = New-Object bool[] ([Math]::Max(1, $chords.Count))
+$pad = 0
 
 # Rychla smycka (30 ms) jen kdyz je co hlidat - kombinace klaves nebo tlacitka
 # mysi. Bez nich staci jedno kolo za sekundu; popredi se hlasi kazdou
@@ -123,6 +168,11 @@ $names = @{}
 Write-Output '{"t":"ready"}'
 
 function KeyDown($vk) {
+  if ($vk -ge 0x100000) {
+    # Tlacitko ovladace: stav se cte jednou za kolo do $pad (PadButtons); -1 = ovladac tu neni.
+    $m = $vk - 0x100000
+    return ($script:pad -ge 0) -and (($script:pad -band $m) -eq $m)
+  }
   if ($vk -eq 0x5B) {
     return ((([KineWin.Native]::GetAsyncKeyState(0x5B)) -band 0x8000) -ne 0) -or ((([KineWin.Native]::GetAsyncKeyState(0x5C)) -band 0x8000) -ne 0)
   }
@@ -132,6 +182,7 @@ function KeyDown($vk) {
 while ($true) {
   try {
     if ($fast) {
+      if ($usePad) { $script:pad = [KineWin.Native]::PadButtons($tick) }
       $down = New-Object bool[] $chords.Count
       for ($i = 0; $i -lt $chords.Count; $i++) {
         $all = $true

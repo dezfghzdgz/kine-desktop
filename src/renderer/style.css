@@ -193,8 +193,13 @@ kbd {
 /* ---------- Rozložení nastavení (jako levý sloupec webu) ---------- */
 .app { display: flex; height: 100vh; }
 .side {
-  width: 216px; flex: none; padding: 16px 12px; border-right: 1px solid var(--border);
-  background: var(--panel); display: flex; flex-direction: column; gap: 2px;
+  width: 228px; flex: none; padding: 16px 12px 12px; border-right: 1px solid var(--border);
+  background: var(--panel); display: flex; flex-direction: column; gap: 2px; overflow-y: auto; overflow-x: hidden;
+}
+.side-nav { display: flex; flex-direction: column; gap: 2px; }
+/* Hlavička skupiny položek ("Nastavení") - malé kapitálky, ať je seznam na první pohled rozdělený. */
+.side-section {
+  margin: 14px 0 4px; padding: 0 14px; font-size: var(--fs-2xs); font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-faint);
 }
 .brand { display: flex; align-items: center; gap: 10px; padding: 6px 10px 18px; font-weight: 700; font-size: var(--fs-xl); letter-spacing: var(--track-tight); cursor: default; user-select: none; }
 .brand-wrap { position: relative; }
@@ -224,20 +229,46 @@ kbd {
 .app-icon { display: inline-block; width: 44px; height: 44px; flex: none; border-radius: 10px; }
 .app-icon svg { display: block; border-radius: 10px; }
 .tab {
-  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
-  padding: 11px 14px; border-radius: var(--radius-md);
+  display: flex; align-items: center; gap: 11px; width: 100%; text-align: left;
+  padding: 9px 12px; border-radius: var(--radius-md);
   color: var(--text-dim); font-size: var(--fs-md); font-weight: 500;
   background: none; box-shadow: none; min-height: 0;
   transition: background var(--dur-2) var(--ease), color var(--dur-2) var(--ease);
 }
 .tab:hover:not(:disabled) { color: var(--text); background: var(--panel-raised); }
 .tab.active { color: var(--text); background: var(--panel-raised); box-shadow: inset 0 0 0 1px var(--accent-line); }
+.tab .tab-icon { flex: none; color: var(--text-faint); transition: color var(--dur-2) var(--ease); }
+.tab:hover .tab-icon, .tab.active .tab-icon { color: var(--brand); }
+.tab .tab-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tab .count { margin-left: auto; font-size: var(--fs-2xs); color: var(--text-faint); background: var(--panel-raised); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 0 7px; line-height: 18px; }
 .tab.active .count { color: var(--brand); border-color: rgba(var(--brand-rgb), 0.35); }
-.side .status { margin-top: auto; padding: 12px 14px 6px; font-size: var(--fs-sm); color: var(--text-faint); line-height: 1.5; border-top: 1px solid var(--border); }
-.side .status b { color: var(--text); font-weight: 600; }
-.side .status .warn, .hint.warn { color: var(--warn); }
-.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); margin-right: 7px; vertical-align: middle; }
+/* Karta stavu dole: co appka právě dělá, "Uložit klip", pauza, účet. */
+.side-status {
+  margin-top: auto; padding: 12px 12px 10px; display: flex; flex-direction: column; gap: 6px;
+  font-size: var(--fs-sm); color: var(--text-faint); line-height: 1.45;
+  background: var(--panel-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--hairline);
+}
+.side-state { display: flex; align-items: center; min-width: 0; }
+.side-state b { color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-sub { font-size: var(--fs-xs); }
+.side-sub.warn, .hint.warn { color: var(--warn); }
+.side-actions { display: flex; gap: 6px; margin-top: 4px; }
+.side-actions button.small { flex: 1; min-height: 30px; padding: 4px 6px; font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.side-actions .side-clip:not(:disabled) { color: var(--brand); }
+.side-account {
+  display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 6px; padding: 6px 4px 2px; min-height: 0;
+  background: none; box-shadow: none; border-top: 1px solid var(--border); border-radius: 0; text-align: left; font-size: var(--fs-sm); color: var(--text);
+}
+.side-account:hover:not(:disabled) { background: none; color: var(--brand); }
+.side-account .who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-account .who.dim { color: var(--text-dim); }
+.side-account .plan-pill { flex: none; }
+.avatar {
+  width: 24px; height: 24px; flex: none; display: grid; place-items: center; border-radius: 50%;
+  font-size: var(--fs-xs); font-weight: 700; color: var(--brand); background: var(--brand-soft); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.35);
+}
+.avatar.guest { color: var(--text-faint); background: var(--panel); box-shadow: inset 0 0 0 1px var(--border); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); margin-right: 7px; vertical-align: middle; flex: none; }
 .dot.on { background: var(--brand); box-shadow: 0 0 8px rgba(var(--brand-rgb), 0.8); }
 .dot.err { background: var(--danger); }
 .main { flex: 1; overflow: auto; padding: 26px 30px 40px; }
@@ -319,6 +350,7 @@ kbd {
 .player-error p { margin: 0; max-width: 520px; }
 .player-note {
   position: absolute; left: 50%; top: 64px; transform: translateX(-50%); z-index: 5; max-width: calc(100% - 40px);
+  display: flex; align-items: center;
   padding: 8px 14px; border-radius: var(--radius-md); font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   background: var(--glass-bg-strong); box-shadow: var(--shadow-md), inset 0 1px 0 var(--glass-highlight), inset 0 0 0 1px var(--glass-line);
   animation: box-in var(--dur-2) var(--ease);
@@ -358,7 +390,37 @@ button.seg.active { color: var(--brand); box-shadow: inset 0 0 0 1px rgba(var(--
 .filters label { min-width: 150px; }
 .filters label.grow { flex: 1; min-width: 200px; }
 .filters select, .filters input { min-height: 36px; padding: 6px 10px; }
-.clip .thumb .pick { position: absolute; left: 8px; top: 8px; width: 20px; height: 20px; accent-color: var(--brand); }
+.filters .fav-filter { min-height: 36px; display: inline-flex; align-items: center; gap: 6px; }
+.filters .fav-filter.active { color: var(--brand); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.55); background-color: var(--brand-soft); }
+.filters .fav-filter .count { font-size: var(--fs-2xs); color: var(--text-faint); background: var(--panel-raised); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 0 6px; line-height: 16px; }
+/* Výběr více klipů: zaškrtávátko a hvězdička nad náhledem - ukážou se při najetí, vybrané/oblíbené pořád. */
+.clip .thumb .pick {
+  position: absolute; left: 8px; top: 8px; width: 20px; height: 20px; margin: 0; accent-color: var(--brand); cursor: pointer; z-index: 3;
+  opacity: 0; transition: opacity var(--dur-2) var(--ease);
+}
+.clip .thumb:hover .pick, .clips.selecting .pick, .clip.selected .pick { opacity: 1; }
+/* Okýnko po hře vybírá, co nahrát - tam jsou zaškrtávátka vidět pořád. */
+.review .clip .thumb .pick { opacity: 1; }
+.clip .thumb .star {
+  position: absolute; right: 6px; top: 6px; width: 28px; height: 28px; min-height: 0; padding: 0; z-index: 3;
+  display: grid; place-items: center; border-radius: 50%; font-size: 15px; line-height: 1;
+  background: var(--glass-bg-strong); background-image: none; color: var(--text-dim);
+  box-shadow: inset 0 0 0 1px var(--glass-line); opacity: 0; transition: opacity var(--dur-2) var(--ease), color var(--dur-2) var(--ease);
+}
+.clip .thumb:hover .star, .clip .thumb .star.on { opacity: 1; }
+.clip .thumb .star.on { color: var(--warn); }
+.clip .thumb .star:hover:not(:disabled) { color: var(--warn); background-color: var(--glass-bg-strong); }
+/* Náhled při najetí: tiché video přes obrázek, obrázek pod ním zůstává, dokud se video nerozjede. */
+.clip .thumb video.preview { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity var(--dur-2) var(--ease); pointer-events: none; }
+.clip .thumb.previewing video.preview { opacity: 1; }
+.clip .thumb.previewing .play-badge { opacity: 0; }
+.selection-bar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 14px;
+  background: var(--panel-raised); border: 1px solid rgba(var(--brand-rgb), 0.35); border-radius: var(--radius-md); box-shadow: var(--hairline);
+}
+.selection-bar .sel-count { color: var(--text); font-weight: 600; }
+.selection-bar .progress { width: 160px; }
+.gif-hint.warn { color: var(--warn); }
 .clip .body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 6px; }
 .clip .title { font-weight: 600; font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .clip input.title-edit { min-height: 32px; padding: 4px 8px; font-size: var(--fs-sm); }

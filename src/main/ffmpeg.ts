@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { parseProbe, type ProbeResult } from './editPlan';
 import { log } from './log';
 
 /**
@@ -48,7 +49,7 @@ export function runFfmpeg(args: string[], timeoutMs = 120000): Promise<string> {
   });
 }
 
-export type ProbeResult = { durationSeconds: number | null; width: number | null; height: number | null };
+export type { ProbeResult };
 
 /**
  * Délka a rozměry ze souboru. ffmpeg-static nemá ffprobe, tak se čte
@@ -62,16 +63,7 @@ export function probe(file: string): Promise<ProbeResult> {
     child.stderr.on('data', (d) => {
       stderr += d.toString();
     });
-    const finish = () => {
-      const dur = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(stderr);
-      const durationSeconds = dur ? Number(dur[1]) * 3600 + Number(dur[2]) * 60 + Number(dur[3]) : null;
-      const video = /Stream #\d+:\d+.*?Video:.*?\b(\d{2,5})x(\d{2,5})\b/.exec(stderr);
-      resolve({
-        durationSeconds: durationSeconds !== null && Number.isFinite(durationSeconds) ? durationSeconds : null,
-        width: video ? Number(video[1]) : null,
-        height: video ? Number(video[2]) : null,
-      });
-    };
+    const finish = () => resolve(parseProbe(stderr));
     child.on('close', finish);
     child.on('error', finish);
     setTimeout(() => child.kill(), 15000);

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { sanitizeSettings, DEFAULT_SETTINGS, isAccelerator, isDiscordWebhook, suggestedMbps } from '../dist/esm/settingsSchema.js';
-import { parseHotkey, formatHotkey, isSimpleHotkey, toAccelerator, hotkeyVks, hotkeyLabel, partFromCode, HotkeyRecorder } from '../dist/esm/hotkeys.js';
+import { parseHotkey, formatHotkey, isSimpleHotkey, toAccelerator, hotkeyVks, hotkeyLabel, partFromCode, partFromGamepadButton, HotkeyRecorder, PAD_VK_BASE } from '../dist/esm/hotkeys.js';
 import { clipFileBase, defaultClipTitle, gameHashtag, safeFilePart, formatDuration } from '../dist/esm/clipNaming.js';
 import { translate, langFromLocale, DICTS, LANG_NAMES } from '../dist/esm/i18n.js';
 
@@ -58,7 +58,7 @@ test('záznam zkratky: drží se víc kláves, hotovo po puštění všech', () 
   assert.ok(r.keyDown('ControlLeft'));
   assert.ok(r.keyDown('F8'));
   assert.equal(r.keyUp('ControlLeft'), null, 'F8 se ještě drží');
-  assert.deepEqual(r.keyUp('F8'), { mods: ['Ctrl'], keys: ['F8'], mouse: [] });
+  assert.deepEqual(r.keyUp('F8'), { mods: ['Ctrl'], keys: ['F8'], mouse: [], pad: [] });
   // samotný modifikátor zkratku nedělá
   r.keyDown('ShiftLeft');
   assert.equal(r.keyUp('ShiftLeft'), null);
@@ -127,4 +127,30 @@ test('nové volby 0.6: automatické klipy, token pro CS2, webhook Discordu', () 
   assert.equal(sanitizeSettings({ discordWebhook: 'https://example.com/api/webhooks/1/x' }).discordWebhook, '', 'jen Discord');
   assert.equal(isDiscordWebhook('https://discordapp.com/api/webhooks/1/x_y'), true);
   assert.equal(isDiscordWebhook('http://discord.com/api/webhooks/1/x'), false, 'jen https');
+});
+
+test('zkratky na ovladači: části Pad*, kódy pro pomocníka, záznam z Gamepad API', () => {
+  const combo = parseHotkey('PadRB+PadBack');
+  assert.ok(combo, 'ovladač je platná zkratka');
+  assert.deepEqual(combo.pad, ['PadRB', 'PadBack'], 'pevné pořadí tlačítek');
+  assert.equal(formatHotkey(combo), 'PadRB+PadBack');
+  assert.ok(!isSimpleHotkey(combo), 'ovladač jde jen přes pomocníka');
+  assert.deepEqual(hotkeyVks(combo), [PAD_VK_BASE + 0x0200, PAD_VK_BASE + 0x0020]);
+  assert.equal(hotkeyLabel('PadBack+PadRB'), '🎮 RB + View', 'pevné pořadí jako u kláves');
+  assert.equal(parseHotkey('Ctrl+PadA'), null, 'modifikátory klávesnice se s ovladačem nekombinují');
+  assert.equal(parseHotkey('PadFoo'), null);
+  assert.deepEqual(hotkeyVks(parseHotkey('F8+PadA')), [0x77, PAD_VK_BASE + 0x1000], 'klávesa + ovladač dohromady jde');
+  assert.equal(partFromGamepadButton(5), 'PadRB');
+  assert.equal(partFromGamepadButton(40), null);
+  // Záznam: tlačítka držená na ovladači, hotovo po puštění všech.
+  const r = new HotkeyRecorder();
+  assert.equal(r.padState([8, 5]), null, 'ještě drží');
+  assert.equal(formatHotkey(r.current()), 'PadRB+PadBack');
+  assert.equal(r.padState([5]), null, 'jedno pořád drží');
+  assert.equal(formatHotkey(r.padState([])), 'PadRB+PadBack');
+  // Ovladač zahodí modifikátory klávesnice, které hráč drží omylem.
+  r.keyDown('ShiftLeft');
+  r.padState([0]);
+  r.keyUp('ShiftLeft');
+  assert.equal(formatHotkey(r.padState([])), 'PadA');
 });

@@ -18,7 +18,8 @@ import { clear, errorText, fileUrl, h } from './ui';
  */
 type T = (key: Key, vars?: Record<string, string | number>) => string;
 
-export type TrimRequest = { start: number; end: number; mute: boolean; mode: 'new' | 'replace' };
+export type TrimRequest = { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' };
+type CropAnchor = 'left' | 'center' | 'right';
 
 export type PlayerOptions = {
   clip: Clip;
@@ -76,6 +77,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   let start = 0;
   let end = duration;
   let mute = false;
+  /** Výřez na výšku 9:16 (TikTok, Shorts); null = původní formát. */
+  let vertical: CropAnchor | null = null;
   let editing = false;
   let saving: { mode: 'new' | 'replace'; percent: number } | null = null;
   let confirmReplace = false;
@@ -87,7 +90,10 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
 
   // ---- prvky ----------------------------------------------------------------------
   const video = h('video', { class: 'player-video', controls: true, autoplay: true, preload: 'auto' }) as HTMLVideoElement;
-  const stage = h('div', { class: 'player-stage' }, video);
+  // Stínování mimo výřez 9:16 (jen v úpravách s formátem na výšku).
+  const shadeLeft = h('div', { class: 'crop-shade hidden' });
+  const shadeRight = h('div', { class: 'crop-shade hidden' });
+  const stage = h('div', { class: 'player-stage' }, video, shadeLeft, shadeRight);
   const titleEl = h('div', { class: 'title' });
   const editBtn = h('button', { class: 'small quiet', onclick: () => toggleEdit() }, t('libraryEdit'));
   const note = h('div', { class: 'player-note hidden' });
@@ -129,6 +135,17 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const muteBox = h('input', { type: 'checkbox', onchange: (e: Event) => { mute = (e.target as HTMLInputElement).checked; refreshButtons(); } }) as HTMLInputElement;
   const saveNewBtn = h('button', { class: 'small primary', onclick: () => void save('new') }, t('trimSaveNew'));
   const replaceBtn = h('button', { class: 'small quiet', onclick: () => onReplaceClick() }, t('trimReplace'));
+  // Formát: původní / na výšku (a kde výřez leží).
+  const formatBtns: Record<'original' | 'vertical', HTMLButtonElement> = {
+    original: h('button', { class: 'small quiet seg active', onclick: () => setVertical(null) }, t('exportOriginal')),
+    vertical: h('button', { class: 'small quiet seg', onclick: () => setVertical(vertical ?? 'center') }, '📱 ' + t('exportVertical')),
+  };
+  const anchorBtns: Record<CropAnchor, HTMLButtonElement> = {
+    left: h('button', { class: 'small quiet seg', onclick: () => setVertical('left') }, t('exportCropLeft')),
+    center: h('button', { class: 'small quiet seg active', onclick: () => setVertical('center') }, t('exportCropCenter')),
+    right: h('button', { class: 'small quiet seg', onclick: () => setVertical('right') }, t('exportCropRight')),
+  };
+  const anchorRow = h('div', { class: 'row hidden', style: 'gap:6px' }, anchorBtns.left, anchorBtns.center, anchorBtns.right, h('span', { class: 'faint' }, t('exportVerticalHint')));
   const progressBar = h('span', {});
   const progress = h('div', { class: 'progress trim-progress hidden' }, progressBar);
   const progressText = h('span', { class: 'faint hidden' });
@@ -148,6 +165,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       h('label', { class: 'check', style: 'align-items:center' }, muteBox, t('trimMute'))
     ),
     h('p', { class: 'hint' }, t('trimHint')),
+    h('div', { class: 'row', style: 'gap:6px' }, h('span', { class: 'faint', style: 'margin-right:4px' }, t('exportFormat')), formatBtns.original, formatBtns.vertical),
+    anchorRow,
     uploadedNote,
     h('div', { class: 'row trim-actions' }, saveNewBtn, replaceBtn, progress, progressText)
   );
@@ -173,7 +192,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     broken = false;
     editBtn.disabled = false;
     clear(stage);
-    stage.append(video);
+    stage.append(video, shadeLeft, shadeRight);
     if (guard) clearTimeout(guard);
     video.src = fileUrl(clip.file) + (bust ? `?v=${Date.now()}` : '');
     video.load();
@@ -223,6 +242,42 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   function layoutPlayhead() {
     playhead.style.left = pct(video.currentTime || 0);
   }
+  /** Stínování mimo výřez 9:16 - podle toho, kde ve stránce video opravdu leží (může být s pruhy). */
+  function layoutCrop() {
+    const on = editing && !!vertical && video.videoWidth > 0 && video.videoHeight > 0;
+    shadeLeft.classList.toggle('hidden', !on);
+    shadeRight.classList.toggle('hidden', !on);
+    if (!on) return;
+    const box = video.getBoundingClientRect();
+    const stageBox = stage.getBoundingClientRect();
+    const scale = Math.min(box.width / video.videoWidth, box.height / video.videoHeight);
+    const dw = video.videoWidth * scale;
+    const dh = video.videoHeight * scale;
+    const offX = box.left - stageBox.left + (box.width - dw) / 2;
+    const offY = box.top - stageBox.top + (box.height - dh) / 2;
+    const cropW = Math.min(video.videoWidth, (video.videoHeight * 9) / 16) * scale;
+    const k = vertical === 'left' ? 0 : vertical === 'right' ? 1 : 0.5;
+    const cropX = (dw - cropW) * k;
+    for (const el of [shadeLeft, shadeRight]) {
+      el.style.top = `${offY}px`;
+      el.style.height = `${dh}px`;
+    }
+    shadeLeft.style.left = `${offX}px`;
+    shadeLeft.style.width = `${Math.max(0, cropX)}px`;
+    shadeRight.style.left = `${offX + cropX + cropW}px`;
+    shadeRight.style.width = `${Math.max(0, dw - cropX - cropW)}px`;
+  }
+  function setVertical(anchor: CropAnchor | null) {
+    vertical = anchor;
+    formatBtns.original.classList.toggle('active', !anchor);
+    formatBtns.vertical.classList.toggle('active', !!anchor);
+    anchorRow.classList.toggle('hidden', !anchor);
+    for (const [key, btn] of Object.entries(anchorBtns)) btn.classList.toggle('active', key === anchor);
+    layoutCrop();
+    refreshButtons();
+  }
+  window.addEventListener('resize', layoutCrop);
+
   function layout() {
     range.style.left = pct(start);
     range.style.width = duration > 0 ? `${((end - start) / duration) * 100}%` : '0%';
@@ -232,6 +287,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     endVal.textContent = formatTime(end);
     lenVal.textContent = `${(end - start).toFixed(1)} s`;
     layoutPlayhead();
+    layoutCrop();
     refreshButtons();
   }
   function setStart(time: number) {
@@ -319,16 +375,18 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       mute = false;
       muteBox.checked = false;
       confirmReplace = false;
+      setVertical(null);
     }
     layout();
   }
   function nothingToDo(): boolean {
-    return start <= 0.05 && end >= duration - 0.05 && !mute;
+    return start <= 0.05 && end >= duration - 0.05 && !mute && !vertical;
   }
   function refreshButtons() {
     const idle = !saving && !broken && duration > 0;
     saveNewBtn.disabled = !idle || nothingToDo();
-    replaceBtn.disabled = !idle || nothingToDo();
+    // Jiný formát nejde "nahradit" - vždy nový klip vedle.
+    replaceBtn.disabled = !idle || nothingToDo() || !!vertical;
     saveNewBtn.title = nothingToDo() ? t('trimNothingToDo') : '';
     replaceBtn.title = nothingToDo() ? t('trimNothingToDo') : '';
     replaceBtn.textContent = confirmReplace ? t('trimReplaceConfirm') : t('trimReplace');
@@ -380,7 +438,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       video.load();
     }
     try {
-      const result = await edit.run(original, { start, end, mute, mode });
+      const result = await edit.run(original, { start, end, mute, mode, vertical: vertical ?? undefined });
       clip = result;
       titleEl.textContent = clip.title;
       titleEl.title = clip.title;
@@ -438,6 +496,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     if (closed) return;
     closed = true;
     document.removeEventListener('keydown', onKey, true);
+    window.removeEventListener('resize', layoutCrop);
     if (raf) cancelAnimationFrame(raf);
     if (guard) clearTimeout(guard);
     if (confirmTimer) clearTimeout(confirmTimer);

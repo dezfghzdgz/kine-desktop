@@ -18,7 +18,20 @@ export type TrimOptions = {
   mute: boolean;
   /** Datový tok obrazu (Mb/s) - stejný jako při nahrávání. */
   videoMbps: number;
+  /**
+   * Výřez na výšku 9:16 (TikTok, Shorts, Reels): z obrazu se vezme pruh
+   * o šířce výška·9/16 - vlevo, uprostřed, nebo vpravo. Výška zůstává.
+   */
+  vertical?: 'left' | 'center' | 'right';
 };
+
+/** Filtr ffmpeg pro výřez na výšku; null = bez výřezu. */
+export function verticalCropFilter(anchor: TrimOptions['vertical']): string | null {
+  if (!anchor) return null;
+  const k = anchor === 'left' ? '0' : anchor === 'right' ? '1' : '0.5';
+  // ow = šířka výstupu; když je obraz už užší než 9:16, nechá se celý.
+  return `crop=w='min(iw,ih*9/16)':h=ih:x='(iw-ow)*${k}':y=0`;
+}
 
 export type TrimResult = { file: string; durationSeconds: number; sizeBytes: number; width: number | null; height: number | null };
 
@@ -27,6 +40,8 @@ export async function trimClip(input: string, output: string, options: TrimOptio
   const length = Math.max(0.2, options.end - start);
   const isWebm = /\.webm$/i.test(output);
   const args = ['-y', '-ss', start.toFixed(3), '-i', input, '-t', length.toFixed(3), '-progress', 'pipe:1', '-nostats', '-loglevel', 'error'];
+  const crop = verticalCropFilter(options.vertical);
+  if (crop) args.push('-vf', crop);
   if (isWebm) {
     args.push('-c:v', 'libvpx', '-b:v', `${Math.max(1, Math.round(options.videoMbps))}M`, '-deadline', 'realtime', '-cpu-used', '8');
   } else {

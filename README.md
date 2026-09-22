@@ -31,6 +31,7 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
    ffmpeg -c copy -f segment  ──►  %TEMP%\kine-buffer\gen-N\00042.mkv (2 s kousky)
                     │                staré kousky se mažou
    zkratka (F8) ────┤  nahrávání se zastaví (přesný konec) a hned rozjede znovu
+   zabití ve hře ───┤  (CS2 Game State Integration / LoL Live Client API, GameEvents)
                     ▼
    ffmpeg -f concat -c copy  ──►  Videos\Kine\Kine 2026-09-21 20-14-05 CS2.mp4 + .jpg
                     │
@@ -77,7 +78,43 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   osu se dvěma úchyty, klávesy I/O nastaví začátek a konec, jde odstranit
   zvuk; „Uložit jako nový klip“ nebo „Nahradit původní“ – řez dělá
   `src/main/edit.ts` (ffmpeg, libx264 veryfast / libvpx u WebM), průběh
-  chodí do okna.
+  chodí do okna. **Formát na výšku 9:16** (TikTok, Shorts, Reels): ve
+  vrstvě se zastíní, co se odřízne, hráč vybere levou/střední/pravou část
+  obrazu a uloží se nový klip `… (9:16)` (výška zůstane, šířka =
+  výška·9/16; `crop` filtr v `edit.ts`). Původní se nikdy nepřepisuje.
+- **Klipy samy z událostí ve hře** (`src/main/gameEvents.ts`, čistá část
+  `gameEventsParse.ts` s testy): appka pozná zabití a uloží klip bez
+  zkratky – v základu od dvojnásobného zabití výš („Dvojité zabití“,
+  „Trojité“, „Čtyřnásobné“, „Ace“ v názvu klipu), volitelně každé zabití,
+  nebo vypnuto. **CS2**: oficiální *Game State Integration* – appka
+  poslouchá na `127.0.0.1:27381` (nebo dalším volném do 27385) a do
+  `steamapps/common/Counter-Strike Global Offensive/game/csgo/cfg/` zapíše
+  `gamestate_integration_kine.cfg` (s náhodným tokenem, aby jí nic
+  cizího nepodstrkovalo události); hra ho načte při dalším spuštění a
+  posílá stav po každé změně. Počítá se jen vlastní hráč (steamid
+  pozorovaného = steamid hráče), ne spoluhráči při sledování. **League of
+  Legends**: *Live Client Data API* hry (`https://127.0.0.1:2999/liveclientdata/…`),
+  dotaz každé 2 s, jen když běží `League of Legends.exe`; události
+  `ChampionKill`/`Multikill`/`Ace` s hráčem jako zabijákem. Série zabití se
+  spojí do jednoho klipu (3,5 s klid, nejvýš 12 s), klip vzniká až po
+  konci série, aby v něm bylo všechno. Ani jedno není zásah do hry – jsou
+  to rozhraní, která hry samy nabízejí (stejně je používá Medal, Overwolf,
+  Allstar).
+- **Sdílení:** u nahraného klipu je „Kopírovat odkaz“ (odkaz na Kine do
+  schránky) a „Poslat na Discord“ – webhook kanálu se vyplní v záložce
+  Nahrávání, appka pošle název + odkaz (`main.ts` → `shareToDiscord`).
+- **Dvě appky vedle sebe** se hlídají: hlídání her dává každé kolo (5 s)
+  seznam procesů i hlavnímu procesu (`onProcesses`); Kine Clipper se při
+  běžícím `Kine.exe` sám vypne (klipovač je v Kine do PC), Kine při
+  běžícím `Kine Clipper.exe` upozorní. Zkratka, kterou držel druhý
+  program, se každých 15 s zkouší zaregistrovat znovu (`HotkeyManager.retry`).
+  Každá appka má vlastní složku zásobníku (`%TEMP%\kine-buffer`,
+  `%TEMP%\kine-clipper-buffer`); když ji nejde vyčistit (EPERM - drží ji
+  jiný proces), vezme se `<název>-<pid>` místo pádu nahrávání.
+- **Ikona v barvě hráče** (`src/main/icon.ts`): ikona okna a ikona u hodin
+  se přebarví podle zvolené barvy Kine (tyrkys v PNG se nahradí, tmavý
+  podklad zůstane); značka v panelu je SVG v `--brand`. Ikona .exe a
+  zástupce zůstává tyrkysová (za běhu se měnit nedá).
 - **Zátěž při hraní** je záměrně malá: pomocník pro Windows se bez
   složených zkratek ptá jen jednou za sekundu (s nimi každých 30 ms, aby
   neušel stisk), programy a okna čte přes Win32 API (`EnumProcesses`,
@@ -134,10 +171,13 @@ podepisuje sám.
 src/main/        hlavní proces (Electron, Node)
   main.ts        tray, okna (nastavení/klipy, okýnko po hře, okno Kine), IPC
   variant.ts     která ze dvou appek běží (Kine / Kine Clipper) - název, ikona, režim
+  icon.ts        ikona okna a lišty přebarvená podle barvy Kine hráče
   capture.ts     zásobník: skrytá stránka → ffmpeg segmenty → klip
   segments.ts    čistá logika výběru kousků (test)
   games.ts       hlídání her (procesy, Steam, popředí), gamesParse.ts čistá část (test)
-  edit.ts        zkrácení / ztlumení klipu (ffmpeg), náhled k upravenému klipu
+  gameEvents.ts  klipy samy z událostí: CS2 Game State Integration (lokální server + cfg), LoL Live Client API
+  gameEventsParse.ts  čistá část: rozbor událostí CS2/LoL, série zabití, obsah cfg (test)
+  edit.ts        zkrácení / ztlumení / výřez 9:16 klipu (ffmpeg), náhled k upravenému klipu
   winHelper.ts   pomocník pro Windows (PowerShell + C# přes Add-Type): okno v popředí, procesy, okna, Steam, stav kláves
   hotkeys.ts     zkratky: systémové (Electron) + složené přes pomocníka
   clips.ts       knihovna klipů (index.json ve složce s klipy)
@@ -176,3 +216,7 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   ve složce s klipy jsou jen videa.
 - Hry v režimu *exclusive fullscreen* okénko „Klip uložen“ neukážou –
   přijde zvukové pípnutí a systémové oznámení.
+- Klipy samy z událostí umí zatím jen CS2 a League of Legends (jediné
+  velké hry s oficiálním rozhraním pro stav hry). U CS2 se cfg zapíše, až
+  když appka běží s CS2 nainstalovaným přes Steam; hra ho načte při
+  dalším spuštění. Ostatní hry: jen zkratka.

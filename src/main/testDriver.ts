@@ -1,4 +1,5 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { request as httpRequest } from 'node:http';
 import { join } from 'node:path';
 import { BrowserWindow, app } from 'electron';
 import { log } from './log';
@@ -116,6 +117,15 @@ export async function runTestDriver(kine: {
       await sleep(200);
       result.trimValues = await win.webContents.executeJavaScript(`[...document.querySelectorAll('.trim-vals b')].map((b) => b.textContent).join(' ')`);
       await shot(win, 'settings-clips-trim');
+      // Formát na výšku: přepínač ukáže stínování mimo výřez 9:16 a zakáže "Nahradit původní".
+      await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.trim button.seg')].find((x) => /9:16/.test(x.textContent)); if (b) b.click(); return !!b; })()`);
+      await sleep(300);
+      result.verticalUi = await win.webContents.executeJavaScript(
+        `(() => { const shades = [...document.querySelectorAll('.crop-shade:not(.hidden)')]; const replace = [...document.querySelectorAll('.trim-actions button')][1]; return shades.length === 2 && shades.every((s) => s.getBoundingClientRect().width > 50) && !!replace && replace.disabled; })()`
+      );
+      await shot(win, 'settings-clips-vertical');
+      await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.trim button.seg')][0]; if (b) b.click(); return true; })()`);
+      await sleep(200);
       await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.trim-actions button')][0]; if (b && !b.disabled) b.click(); return !!b && !b.disabled; })()`);
       let trimmed = false;
       for (let i = 0; i < 60 && !trimmed; i++) {
@@ -131,6 +141,43 @@ export async function runTestDriver(kine: {
       await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
       await sleep(300);
       result.overlayClosed = !(await win.webContents.executeJavaScript(`!!document.querySelector('.overlay')`));
+
+      // Výřez na výšku 9:16: nový klip, šířka = výška · 9/16 (u 1280×800 tedy 450×800).
+      if (clip1) {
+        const vertical = await (kine as any).trimClip(clip1.id, { start: 0, end: 2, mute: false, mode: 'new', vertical: 'center' });
+        result.verticalSize = `${vertical.width}x${vertical.height}`;
+        result.vertical = !!vertical.width && !!vertical.height && Math.abs(vertical.width - Math.round((vertical.height * 9) / 16)) <= 2 && /vertical/.test(vertical.title);
+      }
+
+      // Automatické klipy: falešné zprávy CS2 (Game State Integration) na lokální
+      // port → série dvou zabití → po uklidnění jeden klip "Double kill".
+      const ge = (kine as any).gameEvents;
+      const port: number = ge?.port ?? 0;
+      if (port) {
+        const token = kine.settings.get().gsiToken;
+        const post = (roundKills: number, matchKills: number) =>
+          new Promise<void>((resolve) => {
+            const body = JSON.stringify({ auth: { token }, provider: { steamid: '1' }, map: { name: 'de_test' }, player: { steamid: '1', state: { round_kills: roundKills }, match_stats: { kills: matchKills } } });
+            const req = httpRequest({ host: '127.0.0.1', port, method: 'POST', path: '/', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, (res) => {
+              res.resume();
+              res.on('end', () => resolve());
+            });
+            req.on('error', () => resolve());
+            req.end(body);
+          });
+        // Knihovna přežívá mezi běhy zkoušky - hledá se jen klip, který teď přibyl.
+        const knownIds = new Set(kine.library.list().map((c) => c.id));
+        await post(0, 0);
+        await post(1, 1);
+        await post(2, 2);
+        result.autoClipsLive = ge.live();
+        let auto: any = null;
+        for (let i = 0; i < 30 && !auto; i++) {
+          await sleep(500);
+          auto = kine.library.list().find((c) => !knownIds.has(c.id) && /Double kill/.test(c.title));
+        }
+        result.autoClip = !!auto;
+      }
 
       // Přepsání původního klipu (bez zvuku): stejný soubor, kratší, nový náhled.
       if (clip2) {
@@ -178,11 +225,11 @@ export async function runTestDriver(kine: {
       const w = kine.settingsWindow;
       if (w && !w.isDestroyed()) {
         result.clipperSide = await w.webContents.executeJavaScript(
-          `(() => { const tabs = [...document.querySelectorAll('.side .tab')].map((b) => b.textContent.trim()); return !tabs.some((x) => x === 'Kine') && !!document.querySelector('.brand-tag') && !!document.querySelector('.brand .mark.clipper'); })()`
+          `(() => { const tabs = [...document.querySelectorAll('.side .tab')].map((b) => b.textContent.trim()); return !tabs.some((x) => x === 'Kine') && !!document.querySelector('.brand-tag') && document.querySelectorAll('.brand .mark svg path').length === 3; })()`
         );
         kine.openSettings('settings');
         await sleep(700);
-        result.clipperPanel = await w.webContents.executeJavaScript(`!!document.querySelector('.app-icon.clipper') && !document.querySelector('.kine-host')`);
+        result.clipperPanel = await w.webContents.executeJavaScript(`document.querySelectorAll('.app-icon svg path').length === 3 && !document.querySelector('.kine-host')`);
         await shot(w, 'settings-settings-clipper');
       }
       result.kineViewNever = !(kine as any).kineView && kine.settings.get().appMode === 'clipper';
@@ -198,6 +245,16 @@ export async function runTestDriver(kine: {
       await colorWin.webContents.executeJavaScript(`(() => { const s = document.querySelectorAll('.color-picker .swatch')[4]; if (s) s.click(); return true; })()`);
       await sleep(400);
       result.brandColor = kine.settings.get().brandColor;
+      // Ikona okna / u hodin v barvě hráče: střed ikony (trojúhelník) má být fialový (#a34ff7).
+      const icon = (kine as any).appIcon();
+      const { width } = icon.getSize();
+      const bmp: Buffer = icon.toBitmap();
+      const i = (Math.floor(width / 2) * width + Math.floor(width / 2)) * 4;
+      const px = [bmp[i], bmp[i + 1], bmp[i + 2]];
+      result.brandIconPixel = px;
+      result.brandIcon = Math.abs(px[1] - 79) <= 3 && Math.abs(Math.max(px[0], px[2]) - 247) <= 3 && Math.abs(Math.min(px[0], px[2]) - 163) <= 3;
+      // Značka v panelu je SVG v barvě Kine (žádný tyrkysový obrázek).
+      result.brandMarkSvg = await colorWin.webContents.executeJavaScript(`!!document.querySelector('.brand .mark svg') && getComputedStyle(document.documentElement).getPropertyValue('--brand').trim() === '#a34ff7'`);
     }
 
     // Průvodce: výběr jazyka a režimu.
@@ -210,7 +267,7 @@ export async function runTestDriver(kine: {
       await sleep(500);
       await shot(wiz, 'wizard-mode');
     }
-    const common = ['inlinePlayer', 'gridUntouched', 'trimPanel', 'trimNewClip', 'trimReplace', 'overlayClosed', 'filters', 'colorPicker'];
+    const common = ['inlinePlayer', 'gridUntouched', 'trimPanel', 'trimNewClip', 'trimReplace', 'vertical', 'verticalUi', 'autoClip', 'overlayClosed', 'filters', 'colorPicker', 'brandIcon', 'brandMarkSvg'];
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineBar', 'kineBarBack', 'kineViewHidden'];
     result.failed = checks.filter((k) => result[k] !== true);
     result.ok = !!clip1 && !!clip2 && kine.capture.state === 'on' && (result.failed as string[]).length === 0 && result.brandColor === '#a34ff7';

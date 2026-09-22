@@ -59,6 +59,8 @@ export class GameWatcher {
       settings: () => Settings;
       helper: WinHelper | null;
       onChange: (game: DetectedGame | null, previous: DetectedGame | null) => void;
+      /** Každé kolo: seznam běžících programů (pro hlídání druhé appky Kine). */
+      onProcesses?: (names: Set<string>) => void;
     }
   ) {
     deps.helper?.on({
@@ -113,6 +115,11 @@ export class GameWatcher {
 
   private async detect(): Promise<DetectedGame | null> {
     const processes = await this.processNames();
+    try {
+      this.deps.onProcesses?.(processes);
+    } catch (e) {
+      log(`onProcesses: ${(e as Error).message}`);
+    }
     const settings = this.deps.settings();
     const steam = await this.steamGame();
 
@@ -181,10 +188,8 @@ export class GameWatcher {
     return 0;
   }
 
-  private async steamName(appId: number): Promise<string | null> {
-    const cached = this.steamNames.get(appId);
-    if (cached) return cached;
-
+  /** Kde je Steam (registr / obvyklé složky), nebo null. */
+  private async resolveSteamPath(): Promise<string | null> {
     if (this.steamPath === undefined) {
       if (process.platform === 'win32') {
         this.steamPath = parseSteamPath(await run('reg', ['query', 'HKCU\\Software\\Valve\\Steam', '/v', 'SteamPath']));
@@ -194,14 +199,28 @@ export class GameWatcher {
         this.steamPath = existsSync(linux) ? linux : existsSync(mac) ? mac : null;
       }
     }
-    if (!this.steamPath) return null;
+    return this.steamPath;
+  }
 
-    const libraries = [this.steamPath];
+  /** Všechny knihovny Steamu (hlavní složka + libraryfolders.vdf); prázdné bez Steamu. */
+  async steamLibraries(): Promise<string[]> {
+    const steamPath = await this.resolveSteamPath();
+    if (!steamPath) return [];
+    const libraries = [steamPath];
     try {
-      libraries.push(...parseLibraryFolders(readFileSync(join(this.steamPath, 'steamapps', 'libraryfolders.vdf'), 'utf8')));
+      libraries.push(...parseLibraryFolders(readFileSync(join(steamPath, 'steamapps', 'libraryfolders.vdf'), 'utf8')));
     } catch {
       // Bez seznamu knihoven se zkusí aspoň hlavní složka Steamu.
     }
+    return [...new Set(libraries)];
+  }
+
+  private async steamName(appId: number): Promise<string | null> {
+    const cached = this.steamNames.get(appId);
+    if (cached) return cached;
+
+    const libraries = await this.steamLibraries();
+    if (libraries.length === 0) return null;
     for (const lib of libraries) {
       const acf = join(lib, 'steamapps', `appmanifest_${appId}.acf`);
       if (!existsSync(acf)) continue;

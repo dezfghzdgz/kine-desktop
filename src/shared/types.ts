@@ -89,7 +89,20 @@ export type Settings = {
   onboarded: boolean;
   /** Barva Kine hráče (z jeho účtu na webu), např. "#a34ff7"; prázdné = výchozí. */
   brandColor: string;
+  /**
+   * Klipy samy z herních událostí (zabití, multikill, ace) - u her, které
+   * je hlásí ven: Counter-Strike 2 (Game State Integration), League of
+   * Legends (Live Client Data API). 'off' = jen zkratkou, 'multi' = od dvou
+   * zabití v jednom kole / v řadě, 'every' = každé zabití.
+   */
+  autoClips: AutoClipMode;
+  /** Tajný klíč, který CS2 posílá s každou zprávou (vygeneruje se jednou). */
+  gsiToken: string;
+  /** Adresa webhooku Discordu - tlačítko "Poslat na Discord" u nahraného klipu. Prázdné = tlačítko není. */
+  discordWebhook: string;
 };
+
+export type AutoClipMode = 'off' | 'multi' | 'every';
 
 export type ClipUpload =
   | { state: 'queued' }
@@ -166,6 +179,8 @@ export type Status = {
   version: string;
   /** Která appka to je ("Kine" nebo "Kine Clipper"). */
   variant: Variant;
+  /** Hra, která právě posílá události pro automatické klipy (CS2 / LoL), nebo null. */
+  autoClipsLive: 'cs2' | 'lol' | null;
 };
 
 export type GameSource = 'steam' | 'custom' | 'known' | 'fullscreen';

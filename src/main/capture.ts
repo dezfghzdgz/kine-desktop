@@ -1,5 +1,5 @@
-import { mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { BrowserWindow, app } from 'electron';
 import type { CaptureCommand, CaptureEvent, CaptureState, Settings } from '../shared/types';
@@ -68,7 +68,9 @@ export class CaptureManager {
   private building = 0;
   private csvTimer: ReturnType<typeof setInterval> | null = null;
   private waiters = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
-  private readonly bufferDir: string;
+  /** Složka se zásobníkem (kousky videa). Každá appka svou; když je zamčená, vezme se jiná. */
+  private bufferDir: string;
+  private readonly bufferName: string;
 
   constructor(
     private deps: {
@@ -77,9 +79,47 @@ export class CaptureManager {
       rendererDir: string;
       onState: (state: CaptureState, error: string | null) => void;
       onWarning?: (kind: 'microphone', message: string) => void;
+      /** Název složky v %TEMP% - Kine a Kine Clipper mají každá svou, ať si nesahají na kousky. */
+      bufferName?: string;
     }
   ) {
-    this.bufferDir = join(app.getPath('temp'), 'kine-buffer');
+    this.bufferName = deps.bufferName ?? 'kine-buffer';
+    this.bufferDir = join(app.getPath('temp'), this.bufferName);
+  }
+
+  /**
+   * Prázdná složka pro zásobník. Obvykle %TEMP%\<název>; když ji nejde
+   * vyčistit (drží ji jiný běžící Kine, spadlý ffmpeg z minula - EPERM /
+   * EBUSY), vezme se %TEMP%\<název>-<pid> místo toho, aby nahrávání
+   * spadlo. Staré složky s pid se při té příležitosti zkusí uklidit.
+   */
+  private prepareBufferDir(): void {
+    const temp = app.getPath('temp');
+    const main = join(temp, this.bufferName);
+    try {
+      for (const name of readdirSync(temp)) {
+        if (name.startsWith(`${this.bufferName}-`) && name !== basename(this.bufferDir)) {
+          try {
+            rmSync(join(temp, name), { recursive: true, force: true });
+          } catch {
+            // ještě běží jiná appka - nechat
+          }
+        }
+      }
+    } catch {
+      // %TEMP% nejde přečíst - nevadí
+    }
+    try {
+      rmSync(main, { recursive: true, force: true });
+      mkdirSync(main, { recursive: true });
+      this.bufferDir = main;
+    } catch (e) {
+      const alt = join(temp, `${this.bufferName}-${process.pid}`);
+      log(`složku zásobníku ${main} nejde vyčistit (${(e as Error).message.split('\n')[0]}) - beru ${alt}`);
+      rmSync(alt, { recursive: true, force: true });
+      mkdirSync(alt, { recursive: true });
+      this.bufferDir = alt;
+    }
   }
 
   get state(): CaptureState {
@@ -108,8 +148,7 @@ export class CaptureManager {
     if (this._state === 'on' || this._state === 'starting') return;
     this.setState('starting');
     try {
-      rmSync(this.bufferDir, { recursive: true, force: true });
-      mkdirSync(this.bufferDir, { recursive: true });
+      this.prepareBufferDir();
       await this.ensureWindow();
       const gen = this.newGeneration('');
       const started = this.waitFor(`started:${gen.id}`, 20000);
@@ -147,7 +186,11 @@ export class CaptureManager {
     if (this.window && !this.window.isDestroyed()) this.window.destroy();
     this.window = null;
     this.windowReady = null;
-    rmSync(this.bufferDir, { recursive: true, force: true });
+    try {
+      rmSync(this.bufferDir, { recursive: true, force: true });
+    } catch (e) {
+      log(`úklid zásobníku: ${(e as Error).message.split('\n')[0]}`);
+    }
   }
 
   /** Změna nastavení, která vyžaduje nový start (rozlišení, kodek, zvuk...). */

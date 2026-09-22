@@ -3,7 +3,7 @@ import type { Clip, DisplayInfo, GameSource, Lang, ProcessInfo, Settings, Status
 import { LANGS } from '../shared/types';
 import { LANG_NAMES, makeT, type Key } from '../shared/i18n';
 import { HotkeyRecorder, formatHotkey, hotkeyLabel } from '../shared/hotkeys';
-import { suggestedMbps } from '../shared/settingsSchema';
+import { isDiscordWebhook, suggestedMbps } from '../shared/settingsSchema';
 import { applyBrandColor, clipOptionsFor, maxClipSecondsFor } from '../shared/plan';
 import { clear, clipMeta, errorText, fileUrl, formatDate, formatDuration, h } from './ui';
 import { closePlayer, openPlayer, openPlayerId, type PlayerHandle } from './player';
@@ -55,6 +55,10 @@ let editingGame: string | null = null;
 let addGameOpen = false;
 let namingGame = false;
 let player: PlayerHandle | null = null;
+let discordInvalid = false;
+/** Krátká zpětná vazba u tlačítek karty: "Odkaz zkopírován", "Posláno na Discord". */
+let shareNote: { id: string; text: string; kind: 'ok' | 'error' } | null = null;
+let shareNoteTimer: ReturnType<typeof setTimeout> | null = null;
 const filters: { game: string; date: DateFilter; query: string } = { game: 'all', date: 'all', query: '' };
 let focusSearch = false;
 let colorPickerOpen = false;
@@ -164,6 +168,40 @@ function update(patch: Partial<Settings>) {
 /** Štítek "Clipper" u loga - ať je hned vidět, která z obou appek to je. */
 function brandTag() {
   return status.variant === 'clipper' ? h('span', { class: 'brand-tag' }, 'Clipper') : null;
+}
+
+/**
+ * Značka appky vykreslená v barvě Kine hráče (--brand), ne z obrázku -
+ * obrázek by zůstal tyrkysový, i když má hráč vybranou jinou barvu.
+ * Kine: trojúhelník; Kine Clipper: trojúhelník mezi svorkami ořezu.
+ */
+function appIconSvg(clipper: boolean, size: number): SVGElement {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 64 64');
+  svg.setAttribute('width', String(size));
+  svg.setAttribute('height', String(size));
+  svg.setAttribute('aria-hidden', 'true');
+  const el = (tag: string, attrs: Record<string, string>) => {
+    const node = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+    svg.append(node);
+  };
+  el('rect', { width: '64', height: '64', rx: '14', fill: '#0a0a0b' });
+  el('rect', { width: '64', height: '64', rx: '14', fill: 'var(--brand)', 'fill-opacity': '0.15' });
+  if (clipper) {
+    const stroke = { fill: 'none', stroke: 'var(--brand)', 'stroke-width': '3.2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
+    el('path', { d: 'M19.5 17 H13 V47 H19.5', ...stroke });
+    el('path', { d: 'M44.5 17 H51 V47 H44.5', ...stroke });
+    el('path', { d: 'M26.5 23 L42.5 32 L26.5 41 Z', fill: 'var(--brand)' });
+  } else {
+    el('path', { d: 'M24 18 L46 32 L24 46 Z', fill: 'var(--brand)' });
+  }
+  return svg;
+}
+
+function brandMark() {
+  return h('span', { class: 'mark' }, appIconSvg(status.variant === 'clipper', 28));
 }
 
 /** Záložky podle appky: web Kine jen v Kine do PC (režim 'full'). */
@@ -419,7 +457,7 @@ function renderSide() {
     h(
       'div',
       { class: 'brand-wrap' },
-      h('div', { class: 'brand', role: 'button', tabindex: '0', title: t('brandColorHint'), onclick: onBrandClick }, h('span', { class: `mark ${status.variant === 'clipper' ? 'clipper' : ''}` }), 'Kine', brandTag()),
+      h('div', { class: 'brand', role: 'button', tabindex: '0', title: t('brandColorHint'), onclick: onBrandClick }, brandMark(), 'Kine', brandTag()),
       colorPickerOpen ? colorPicker() : null
     ),
     ...visibleTabs().map((name) =>
@@ -644,7 +682,7 @@ function variantPanel() {
     h(
       'div',
       { class: 'row', style: 'gap:12px;align-items:flex-start' },
-      h('span', { class: `app-icon ${clipper ? 'clipper' : ''}` }),
+      h('span', { class: 'app-icon' }, appIconSvg(clipper, 44)),
       h(
         'div',
         { class: 'grow' },
@@ -833,6 +871,26 @@ function radio<K extends keyof Settings>(field: K, value: Settings[K], label: st
 
 // ---- hry ----------------------------------------------------------------------------
 
+/** Klipy samy z herních událostí (CS2 GSI, LoL Live Client API) - viz main/gameEvents.ts. */
+function autoClipsPanel() {
+  const live = status.autoClipsLive;
+  return h(
+    'div',
+    { class: 'panel stack' },
+    h('h2', { style: 'margin:0' }, '⚡ ' + t('autoClipsTitle')),
+    h('p', { class: 'hint', style: 'margin:0' }, t('autoClipsHint')),
+    h(
+      'div',
+      { class: 'radio-group' },
+      radio('autoClips', 'multi', t('autoClipsMulti')),
+      radio('autoClips', 'every', t('autoClipsEvery')),
+      radio('autoClips', 'off', t('autoClipsOff'))
+    ),
+    settings.autoClips !== 'off' ? h('p', { class: 'hint' }, t('autoClipsCs2Note')) : null,
+    live ? h('p', { class: 'ok', style: 'margin:0' }, '● ' + t('autoClipsLive', { game: live === 'cs2' ? 'Counter-Strike 2' : 'League of Legends' })) : null
+  );
+}
+
 function renderGames() {
   const custom = Object.entries(settings.customGames);
   const exeInput = h('input', { type: 'text', placeholder: 'game.exe' }) as HTMLInputElement;
@@ -946,6 +1004,7 @@ function renderGames() {
       checkbox('detectFullscreen', t('detectFullscreen'), t('detectFullscreenHint'), !win),
       win && !status.chordsSupported ? h('p', { class: 'hint warn' }, t('gamesHelperMissing')) : null
     ),
+    autoClipsPanel(),
     h(
       'div',
       { class: 'panel stack' },
@@ -1023,7 +1082,46 @@ function renderUpload() {
       )
     ),
     h('div', { class: 'panel' }, h('h2', {}, t('onlyWhenNotPlayingTitle')), h('p', { class: 'dim', style: 'margin:0' }, t('onlyWhenNotPlayingHint'))),
+    discordPanel(),
     h('div', { class: 'panel' }, checkbox('startWithSystem', t('startWithSystem')))
+  );
+}
+
+/** Webhook Discordu: nahraný klip jedním klikem na server hráče. */
+function discordPanel() {
+  const input = h('input', {
+    type: 'url',
+    value: settings.discordWebhook,
+    placeholder: 'https://discord.com/api/webhooks/…',
+    spellcheck: 'false',
+  }) as HTMLInputElement;
+  const commit = () => {
+    const value = input.value.trim();
+    if (value === settings.discordWebhook) return;
+    if (value && !isDiscordWebhook(value)) {
+      discordInvalid = true;
+      render();
+      return;
+    }
+    discordInvalid = false;
+    update({ discordWebhook: value });
+  };
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') commit();
+  });
+  input.addEventListener('input', () => {
+    if (discordInvalid && (!input.value.trim() || isDiscordWebhook(input.value))) {
+      discordInvalid = false;
+      render();
+    }
+  });
+  return h(
+    'div',
+    { class: 'panel stack' },
+    h('label', {}, t('discordWebhookLabel'), input),
+    discordInvalid ? h('p', { class: 'error', style: 'margin:0' }, t('discordWebhookInvalid')) : null,
+    h('p', { class: 'hint', style: 'margin:0' }, t('discordWebhookHint'))
   );
 }
 
@@ -1057,6 +1155,16 @@ function filteredClips(): Clip[] {
     if (q && !`${c.title} ${c.game ?? ''}`.toLowerCase().includes(q)) return false;
     return true;
   });
+}
+
+function showShareNote(id: string, text: string, kind: 'ok' | 'error') {
+  shareNote = { id, text, kind };
+  if (shareNoteTimer) clearTimeout(shareNoteTimer);
+  shareNoteTimer = setTimeout(() => {
+    shareNote = null;
+    render();
+  }, kind === 'ok' ? 2500 : 6000);
+  render();
 }
 
 /** Přehrávač jako vrstva přes okno (player.ts); mřížka pod ním zůstává, jak je. */
@@ -1209,7 +1317,40 @@ function renderClips() {
         )
       );
     }
-    if (clip.upload?.state === 'done') actions.append(h('button', { class: 'small', onclick: () => void kine.openOnKine(clip.id) }, t('libraryOpenOnKine')));
+    if (clip.upload?.state === 'done') {
+      const url = clip.upload.url;
+      actions.append(
+        h('button', { class: 'small', onclick: () => void kine.openOnKine(clip.id) }, t('libraryOpenOnKine')),
+        h(
+          'button',
+          {
+            class: 'small quiet',
+            onclick: () => {
+              void kine.copyText(url);
+              showShareNote(clip.id, t('linkCopied'), 'ok');
+            },
+          },
+          '🔗 ' + t('libraryCopyLink')
+        )
+      );
+      if (settings.discordWebhook) {
+        actions.append(
+          h(
+            'button',
+            {
+              class: 'small quiet',
+              onclick: () => {
+                void kine
+                  .shareToDiscord(clip.id)
+                  .then(() => showShareNote(clip.id, t('discordSent'), 'ok'))
+                  .catch((e: unknown) => showShareNote(clip.id, t('discordFailed', { message: errorText(e, t) }), 'error'));
+              },
+            },
+            t('libraryDiscord')
+          )
+        );
+      }
+    }
     actions.append(h('button', { class: 'small quiet', onclick: () => void kine.revealClip(clip.id) }, t('libraryReveal')));
     actions.append(
       h('button', { class: 'small quiet', onclick: () => { renaming = clip.id; render(); } }, t('libraryRename')),
@@ -1250,7 +1391,8 @@ function renderClips() {
       titleEl,
       h('div', { class: 'row', style: 'gap:8px' }, gameChip(clip), h('span', { class: 'meta' }, clipMeta(clip, settings.lang))),
       uploadState(clip),
-      actions
+      actions,
+      shareNote?.id === clip.id ? h('div', { class: `state ${shareNote.kind === 'ok' ? 'done' : 'error'}` }, shareNote.text) : null
     );
 
     grid.append(
@@ -1339,7 +1481,7 @@ function renderWizard() {
 
   if (step === 0) {
     box.append(
-      h('div', { class: 'brand', style: 'padding:0 0 6px' }, h('span', { class: `mark ${status.variant === 'clipper' ? 'clipper' : ''}` }), 'Kine', brandTag()),
+      h('div', { class: 'brand', style: 'padding:0 0 6px' }, brandMark(), 'Kine', brandTag()),
       h('h1', {}, t('wizardWelcome')),
       h('p', { class: 'dim' }, t('wizardIntro', { seconds: settings.clipSeconds })),
       h('h2', {}, t('wizardChooseLanguage')),

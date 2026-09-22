@@ -46,8 +46,6 @@ for (const f of ['settings.html', 'review.html', 'toast.html', 'capture.html', '
   cpSync(`src/renderer/${f}`, `dist/renderer/${f}`);
 }
 cpSync('src/renderer/fonts', 'dist/renderer/fonts', { recursive: true });
-// Ikony obou appek pro stránku nastavení (logo v panelu, "Tahle appka").
-for (const f of ['icon.png', 'icon-clipper.png']) cpSync(`build/${f}`, `dist/renderer/${f}`);
 
 // Čisté moduly (bez electronu) zvlášť jako ESM pro testy.
 await build({
@@ -56,6 +54,7 @@ await build({
   entryPoints: {
     segments: 'src/main/segments.ts',
     gamesParse: 'src/main/gamesParse.ts',
+    gameEventsParse: 'src/main/gameEventsParse.ts',
     tus: 'src/main/tus.ts',
     uploader: 'src/main/uploader.ts',
     clips: 'src/main/clips.ts',

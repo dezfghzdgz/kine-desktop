@@ -214,17 +214,15 @@ kbd {
   background: transparent; border: 1px dashed var(--border); color: var(--text-faint); font-size: 14px;
 }
 .color-picker .swatch.custom .color-input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; min-height: 0; padding: 0; }
-.brand .mark { width: 28px; height: 28px; border-radius: var(--radius-sm); background: #0a0a0b; display: grid; place-items: center; box-shadow: inset 0 0 0 1px var(--brand-soft); }
-.brand .mark::after { content: ''; width: 0; height: 0; border-left: 11px solid var(--brand); border-top: 6.5px solid transparent; border-bottom: 6.5px solid transparent; margin-left: 3px; }
-/* Kine Clipper: ikona s úchyty ořezu místo samotného trojúhelníku + štítek u názvu. */
-.brand .mark.clipper { background: url('./icon-clipper.png') center / 100% no-repeat; box-shadow: none; }
-.brand .mark.clipper::after { display: none; }
+/* Značka appky: SVG v barvě Kine hráče (settings.ts appIconSvg) - Kine trojúhelník, Clipper se svorkami. */
+.brand .mark { width: 28px; height: 28px; border-radius: var(--radius-sm); display: grid; place-items: center; }
+.brand .mark svg { display: block; border-radius: var(--radius-sm); }
 .brand-tag {
   margin-left: 2px; padding: 1px 7px; border-radius: var(--radius-pill); font-size: var(--fs-2xs); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
   color: var(--brand); background: var(--brand-soft); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.35); align-self: center;
 }
-.app-icon { display: inline-block; width: 44px; height: 44px; flex: none; border-radius: 10px; background: url('./icon.png') center / 100% no-repeat; }
-.app-icon.clipper { background-image: url('./icon-clipper.png'); }
+.app-icon { display: inline-block; width: 44px; height: 44px; flex: none; border-radius: 10px; }
+.app-icon svg { display: block; border-radius: 10px; }
 .tab {
   display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
   padding: 11px 14px; border-radius: var(--radius-md);
@@ -347,6 +345,10 @@ kbd {
 .trim .hint { margin: 0; }
 .trim-actions { gap: 10px; }
 .trim-progress { width: 160px; }
+/* Přepínače formátu / výřezu v úpravách. */
+button.seg.active { color: var(--brand); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.55); background-color: var(--brand-soft); }
+/* Stínování mimo výřez 9:16 nad videem. */
+.crop-shade { position: absolute; background: rgba(0, 0, 0, 0.62); pointer-events: none; z-index: 2; box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.6); }
 .chip {
   min-height: 26px; padding: 2px 10px; border-radius: var(--radius-pill); font-size: var(--fs-xs);
   background: var(--panel-raised); background-image: none; box-shadow: inset 0 0 0 1px var(--border); color: var(--text-dim);

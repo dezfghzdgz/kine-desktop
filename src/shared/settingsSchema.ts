@@ -37,6 +37,9 @@ export const DEFAULT_SETTINGS: Settings = {
   siteUrl: 'https://kine-lac.vercel.app',
   onboarded: false,
   brandColor: '',
+  autoClips: 'multi',
+  gsiToken: '',
+  discordWebhook: '',
 };
 
 export const CLIP_SECONDS_OPTIONS = [15, 30, 60, 90, 120] as const;
@@ -107,7 +110,15 @@ export function sanitizeSettings(input: unknown): Settings {
     siteUrl,
     onboarded: bool(raw.onboarded, d.onboarded),
     brandColor: typeof raw.brandColor === 'string' && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(raw.brandColor.trim()) ? raw.brandColor.trim() : '',
+    autoClips: oneOf(raw.autoClips, ['off', 'multi', 'every'] as const, d.autoClips),
+    gsiToken: /^[a-z0-9]{16,64}$/i.test(String(raw.gsiToken ?? '')) ? String(raw.gsiToken) : '',
+    discordWebhook: isDiscordWebhook(raw.discordWebhook) ? (raw.discordWebhook as string).trim() : '',
   };
+}
+
+/** Webhook Discordu: jen adresy discord.com/discordapp.com /api/webhooks/<id>/<token>. */
+export function isDiscordWebhook(value: unknown): boolean {
+  return typeof value === 'string' && /^https:\/\/(?:[a-z0-9-]+\.)?(?:discord|discordapp)\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]+$/.test(value.trim());
 }
 
 /** Kvůli starším částem kódu a testům: platná zkratka (viz hotkeys.ts). */

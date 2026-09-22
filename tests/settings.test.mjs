@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizeSettings, DEFAULT_SETTINGS, isAccelerator, suggestedMbps } from '../dist/esm/settingsSchema.js';
+import { sanitizeSettings, DEFAULT_SETTINGS, isAccelerator, isDiscordWebhook, suggestedMbps } from '../dist/esm/settingsSchema.js';
 import { parseHotkey, formatHotkey, isSimpleHotkey, toAccelerator, hotkeyVks, hotkeyLabel, partFromCode, HotkeyRecorder } from '../dist/esm/hotkeys.js';
 import { clipFileBase, defaultClipTitle, gameHashtag, safeFilePart, formatDuration } from '../dist/esm/clipNaming.js';
 import { translate, langFromLocale, DICTS, LANG_NAMES } from '../dist/esm/i18n.js';
@@ -111,4 +111,20 @@ test('všech osm jazyků má stejné klíče a stejné {proměnné}', () => {
     }
     assert.ok(LANG_NAMES[lang]);
   }
+});
+
+test('nové volby 0.6: automatické klipy, token pro CS2, webhook Discordu', () => {
+  const d = sanitizeSettings({});
+  assert.equal(d.autoClips, 'multi');
+  assert.equal(d.gsiToken, '');
+  assert.equal(d.discordWebhook, '');
+  assert.equal(sanitizeSettings({ autoClips: 'every' }).autoClips, 'every');
+  assert.equal(sanitizeSettings({ autoClips: 'nesmysl' }).autoClips, 'multi');
+  assert.equal(sanitizeSettings({ gsiToken: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6' }).gsiToken, 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6');
+  assert.equal(sanitizeSettings({ gsiToken: 'kr' }).gsiToken, '', 'moc krátký token se zahodí');
+  const hook = 'https://discord.com/api/webhooks/123456789/AbC-def_GHI';
+  assert.equal(sanitizeSettings({ discordWebhook: ` ${hook} ` }).discordWebhook, hook);
+  assert.equal(sanitizeSettings({ discordWebhook: 'https://example.com/api/webhooks/1/x' }).discordWebhook, '', 'jen Discord');
+  assert.equal(isDiscordWebhook('https://discordapp.com/api/webhooks/1/x_y'), true);
+  assert.equal(isDiscordWebhook('http://discord.com/api/webhooks/1/x'), false, 'jen https');
 });

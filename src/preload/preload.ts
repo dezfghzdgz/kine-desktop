@@ -36,7 +36,11 @@ const kine = {
   pickClipsDir: (): Promise<string | null> => ipcRenderer.invoke('clips:pickDir'),
   clipNow: (): Promise<Clip | null> => ipcRenderer.invoke('clips:clipNow'),
   /** Zkrácení / ztlumení klipu; 'new' = nový klip vedle, 'replace' = přepsat původní. */
-  trimClip: (id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace' }): Promise<Clip> => ipcRenderer.invoke('clips:trim', id, opts),
+  trimClip: (id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' }): Promise<Clip> => ipcRenderer.invoke('clips:trim', id, opts),
+  /** Text do schránky (odkaz na klip). */
+  copyText: (text: string): Promise<void> => ipcRenderer.invoke('app:copy', text),
+  /** Nahraný klip na Discord (webhook z nastavení). */
+  shareToDiscord: (id: string): Promise<void> => ipcRenderer.invoke('clips:discord', id),
   onTrimProgress: (cb: (p: { id: string; percent: number }) => void) => on<{ id: string; percent: number }>('clips:trimProgress', cb),
   toggleCapture: (): Promise<void> => ipcRenderer.invoke('capture:toggle'),
 

@@ -104,6 +104,35 @@ export class HotkeyManager {
     this.problems = problems;
   }
 
+  /**
+   * Zkratku držel jiný program (typicky druhá appka Kine, než se vypnula) -
+   * zkusit ji zaregistrovat znovu. True, když se něco změnilo.
+   */
+  retry(): boolean {
+    let changed = false;
+    for (const id of ['clip', 'toggle'] as HotkeyId[]) {
+      const text = this.wanted[id];
+      if (!text || this.registered.has(text)) continue;
+      const parsed = parseHotkey(text);
+      if (!parsed || !isSimpleHotkey(parsed)) continue;
+      const acc = toAccelerator(parsed)!;
+      try {
+        if (globalShortcut.register(acc, () => this.deps.onFire(id))) {
+          this.registered.add(text);
+          changed = true;
+          log(`zkratka ${acc} se uvolnila - zaregistrovaná`);
+        }
+      } catch {
+        // pořád drží někdo jiný
+      }
+    }
+    if (changed) {
+      this.recomputeProblems();
+      this.deps.onProblemsChanged();
+    }
+    return changed;
+  }
+
   /** Půjde tahle zkratka? (pro pole v nastavení, ještě před uložením) */
   available(text: string): HotkeyReason | 'ok' {
     const parsed = parseHotkey(text);

@@ -27,12 +27,19 @@ type ExportFormat = 'original' | 'vertical' | 'gif';
 export const GIF_MAX_SECONDS = 15;
 const GIF_WIDTH = 480;
 
+/** Sousedé otevřeného klipu v seznamu (pro šipky po stranách). */
+export type Neighbors = { prev: Clip | null; next: Clip | null; index: number; total: number };
+
 export type PlayerOptions = {
   clip: Clip;
   t: T;
   onOpenExternal: (clip: Clip) => void;
   onLog?: (message: string) => void;
   onClose?: () => void;
+  /** Kdo je před a za tímhle klipem v seznamu - bez toho žádné šipky. */
+  neighbors?: (clipId: string) => Neighbors;
+  /** Odkaz na nahraný klip do schránky (tlačítko v hlavičce). */
+  onCopyLink?: (clip: Clip) => void;
   /** Rovnou otevřít úpravy (tlačítko Upravit na kartě). */
   startEditing?: boolean;
   /** Bez tohohle se klip jen přehrává (žádné tlačítko Upravit). */
@@ -51,7 +58,30 @@ export type PlayerHandle = {
   /** Klip zvenku změněn (název, hra) - jen se překreslí titulek; když zmizel, vrstva se zavře. */
   sync: (clips: Clip[]) => void;
   clipId: () => string;
+  /** Přepnout na jiný klip ve stejné vrstvě (šipky po stranách). */
+  show: (clip: Clip) => void;
 };
+
+/** Hlasitost a ztlumení přehrávače si okno pamatuje (jen pro tohle PC). */
+const VOLUME_KEY = 'kine.player.volume';
+function loadVolume(): { volume: number; muted: boolean } | null {
+  try {
+    const raw = localStorage.getItem(VOLUME_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw) as { volume?: unknown; muted?: unknown };
+    const volume = typeof v.volume === 'number' && v.volume >= 0 && v.volume <= 1 ? v.volume : 1;
+    return { volume, muted: v.muted === true };
+  } catch {
+    return null;
+  }
+}
+function saveVolume(volume: number, muted: boolean): void {
+  try {
+    localStorage.setItem(VOLUME_KEY, JSON.stringify({ volume, muted }));
+  } catch {
+    // bez úložiště se hlasitost jen nepamatuje
+  }
+}
 
 /** Nejmenší délka výřezu (s) - stejná hranice jako v hlavním procesu. */
 const MIN_LENGTH = 0.2;
@@ -107,7 +137,10 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const shadeRight = h('div', { class: 'crop-shade hidden' });
   const stage = h('div', { class: 'player-stage' }, video, shadeLeft, shadeRight);
   const titleEl = h('div', { class: 'title' });
+  /** "3 / 24" - kde v seznamu klip je (jen se sousedy). */
+  const positionEl = h('span', { class: 'player-pos faint hidden' });
   const editBtn = h('button', { class: 'small quiet', onclick: () => toggleEdit() }, t('libraryEdit'));
+  const copyBtn = h('button', { class: 'small quiet player-copy hidden', onclick: () => { if (options.onCopyLink) { options.onCopyLink(clip); showNote(t('linkCopied'), 'ok'); } } }, '🔗 ' + t('libraryCopyLink'));
   const note = h('div', { class: 'player-note hidden' });
   const trim = h('div', { class: 'trim hidden' });
   const box = h(
@@ -116,10 +149,11 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     h(
       'div',
       { class: 'player-head' },
-      titleEl,
+      h('div', { class: 'row', style: 'flex-wrap:nowrap;min-width:0;gap:10px' }, titleEl, positionEl),
       h(
         'div',
         { class: 'row', style: 'flex-wrap:nowrap' },
+        options.onCopyLink ? copyBtn : null,
         edit ? editBtn : null,
         h('button', { class: 'small quiet', onclick: () => options.onOpenExternal(clip) }, t('playerOpenExternal')),
         h('button', { class: 'small quiet player-close', title: t('playerClose'), onclick: () => close() }, '✕')
@@ -129,10 +163,53 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     trim,
     note
   );
-  const overlay = h('div', { class: 'overlay' }, box);
+  // Šipky po stranách: předchozí / další klip v seznamu (i klávesy ↑ ↓).
+  const prevBtn = h('button', { class: 'player-nav prev hidden', title: `${t('playerPrev')} (↑)`, onclick: () => go(-1) }, '‹');
+  const nextBtn = h('button', { class: 'player-nav next hidden', title: `${t('playerNext')} (↓)`, onclick: () => go(1) }, '›');
+  const overlay = h('div', { class: 'overlay' }, prevBtn, box, nextBtn);
   overlay.addEventListener('mousedown', (e) => {
     if (e.target === overlay) close();
   });
+  function refreshNav() {
+    const n = options.neighbors?.(clip.id);
+    const show = !!n && n.total > 1;
+    prevBtn.classList.toggle('hidden', !show);
+    nextBtn.classList.toggle('hidden', !show);
+    positionEl.classList.toggle('hidden', !show);
+    if (!n || !show) return;
+    prevBtn.disabled = !n.prev;
+    nextBtn.disabled = !n.next;
+    positionEl.textContent = `${n.index + 1} / ${n.total}`;
+  }
+  function go(direction: -1 | 1) {
+    const n = options.neighbors?.(clip.id);
+    const target = direction < 0 ? n?.prev : n?.next;
+    if (target && !saving) show(target);
+  }
+  /** Jiný klip ve stejné vrstvě: úpravy se zavřou, video se vymění, titulek a šipky se srovnají. */
+  function show(next: Clip) {
+    if (closed) return;
+    clip = { ...next };
+    duration = clip.durationSeconds > 0 ? clip.durationSeconds : 0;
+    start = 0;
+    end = duration;
+    confirmReplace = false;
+    if (editing) toggleEdit(false);
+    titleEl.textContent = clip.title;
+    titleEl.title = clip.title;
+    copyBtn.classList.toggle('hidden', clip.upload?.state !== 'done');
+    note.classList.add('hidden');
+    loadVideo(false);
+    layout();
+    refreshNav();
+  }
+  // Hlasitost jako minule; každá změna se uloží.
+  const remembered = loadVolume();
+  if (remembered) {
+    video.volume = remembered.volume;
+    video.muted = remembered.muted;
+  }
+  video.addEventListener('volumechange', () => saveVolume(video.volume, video.muted));
 
   // Časová osa se staví jednou - při tažení se jen posouvají styly.
   const track = h('div', { class: 'tl-track' });
@@ -545,6 +622,19 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       e.preventDefault();
       const step = (e.shiftKey ? 5 : 1) * (e.key === 'ArrowLeft' ? -1 : 1);
       video.currentTime = clamp(video.currentTime + step, 0, duration || video.duration || 0);
+    } else if (e.key === 'ArrowUp' || e.key === 'PageUp') {
+      e.preventDefault();
+      go(-1);
+    } else if (e.key === 'ArrowDown' || e.key === 'PageDown') {
+      e.preventDefault();
+      go(1);
+    } else if (e.key === 'm' || e.key === 'M') {
+      e.preventDefault();
+      video.muted = !video.muted;
+    } else if (e.key === 'f' || e.key === 'F') {
+      e.preventDefault();
+      if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
+      else void video.requestFullscreen().catch(() => undefined);
     } else if (editing && (e.key === 'i' || e.key === 'I')) {
       e.preventDefault();
       setStart(video.currentTime);
@@ -580,6 +670,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const handle: PlayerHandle = {
     close,
     clipId: () => clip.id,
+    show,
     sync: (clips) => {
       const fresh = clips.find((c) => c.id === clip.id);
       if (!fresh) {
@@ -591,15 +682,19 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       titleEl.textContent = clip.title;
       titleEl.title = clip.title;
       uploadedNote.classList.toggle('hidden', clip.upload?.state !== 'done');
+      copyBtn.classList.toggle('hidden', clip.upload?.state !== 'done');
+      refreshNav();
     },
   };
   current = handle;
 
   titleEl.textContent = clip.title;
   titleEl.title = clip.title;
+  copyBtn.classList.toggle('hidden', clip.upload?.state !== 'done');
   document.body.append(overlay);
   loadVideo(false);
   if (options.startEditing && edit) toggleEdit(true);
   layout();
+  refreshNav();
   return handle;
 }

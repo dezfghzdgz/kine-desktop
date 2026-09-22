@@ -23,6 +23,7 @@ import { makeT, type Key } from '../shared/i18n';
 import { hotkeyLabel } from '../shared/hotkeys';
 import { clipFileBase, defaultClipTitle, safeFilePart } from '../shared/clipNaming';
 import { maxClipSecondsFor } from '../shared/plan';
+import { performanceProfile } from '../shared/performance';
 import { initLog, log, logDir } from './log';
 import { SettingsStore } from './settings';
 import { ClipLibrary } from './clips';
@@ -129,6 +130,17 @@ class KineApp {
     return wanted === 'auto' && !this.hasClipsPlus() ? 'review' : wanted;
   }
 
+  /** Kolik výkonu smí appka brát - intervaly hlídání apod. (shared/performance.ts). */
+  profile() {
+    return performanceProfile(this.settings.get().performance);
+  }
+
+  /** Pomocník pro Windows dostane časování podle nastavení výkonu (změna = restart skriptu). */
+  private applyHelperTiming(): void {
+    const p = this.profile();
+    this.helper?.setTiming({ fastMs: p.helperFastMs, foregroundMs: p.helperForegroundMs, processesS: p.helperProcessesS });
+  }
+
   /** Délka klipu podle nastavení, oříznutá stropem plánu (zdarma 60 s). */
   effectiveClipSeconds(): number {
     return Math.min(this.settings.get().clipSeconds, maxClipSecondsFor(this.auth.current()));
@@ -187,6 +199,7 @@ class KineApp {
       helper: this.helper,
       onChange: (game, prev) => void this.onGameChange(game, prev),
       onProcesses: (names) => this.onProcesses(names),
+      pollMs: () => this.profile().gamePollMs,
     });
 
     // Klipy samy z herních událostí (CS2 GSI, LoL Live Client API).
@@ -196,6 +209,7 @@ class KineApp {
       steamLibraries: () => this.games.steamLibraries(),
       onClip: (_count, labelKey) => void this.onClipHotkey({ auto: true, label: this.t(labelKey) }),
       onStateChange: () => this.pushStatus(),
+      lolPollMs: () => this.profile().lolPollMs,
     });
 
     this.hotkeys = new HotkeyManager({
@@ -241,12 +255,14 @@ class KineApp {
     this.registerIpc();
     // Nejdřív zkratky (pomocník si je vezme při startu), pak pomocník - ať se nespouští dvakrát.
     this.registerHotkeys();
+    this.applyHelperTiming();
     this.helper?.start();
     this.createTray();
     this.applyLoginItem();
-    initUpdater({ variant: VARIANT, siteUrl: () => this.settings.get().siteUrl, gameRunning: () => !!this.games.current() });
+    initUpdater({ variant: VARIANT, siteUrl: () => this.settings.get().siteUrl, gameRunning: () => !!this.games.current(), checkHours: () => this.profile().updateCheckHours });
 
     this.settings.onChange((s, prev) => this.onSettingsChanged(s, prev));
+    this.announceVersion();
 
     await this.auth.init();
     this.games.start();
@@ -323,6 +339,18 @@ class KineApp {
       if (win && !win.isDestroyed()) win.setIcon(icon);
     }
     this.tray?.setImage(trayIcon(icon));
+  }
+
+  /** Po aktualizaci jednou řekne, že běží nová verze (poprvé po instalaci nic). */
+  private announceVersion(): void {
+    const s = this.settings.get();
+    const version = app.getVersion();
+    if (s.lastVersion === version) return;
+    if (s.lastVersion && s.onboarded) {
+      log(`aktualizováno z ${s.lastVersion} na ${version}`);
+      setTimeout(() => void this.toast.show(this.t('toastUpdated', { version }), 'ok', { notification: true, onClick: () => this.openSettings('about') }), 4000);
+    }
+    this.settings.update({ lastVersion: version });
   }
 
   // ---- hry ---------------------------------------------------------------------
@@ -465,6 +493,11 @@ class KineApp {
     if (s.appMode !== prev.appMode && s.appMode === 'clipper') this.destroyKineView();
     if (s.siteUrl !== prev.siteUrl) this.destroyKineView();
     if (s.brandColor !== prev.brandColor) this.applyBrandIcons();
+    if (s.performance !== prev.performance) {
+      log(`výkon appky: ${s.performance}`);
+      this.applyHelperTiming();
+      this.games.restart();
+    }
     void this.gameEvents.onSettingsChanged(prev, s);
     this.rebuildTray();
     this.pushStatus();

@@ -125,7 +125,7 @@ export async function runTestDriver(kine: {
       // Úpravy: tlačítko Upravit rozbalí osu, I/O nastaví začátek a konec
       // podle přehrávání, "Uložit jako nový klip" vyrobí další klip.
       const countBefore = kine.library.list().length;
-      await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head button')].find((x) => !x.disabled && x.textContent && !x.classList.contains('player-close')); if (b) b.click(); return !!b; })()`);
+      await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head button')].find((x) => !x.disabled && x.textContent && !x.classList.contains('player-close') && !x.classList.contains('hidden')); if (b) b.click(); return !!b; })()`);
       await sleep(400);
       result.trimPanel = await win.webContents.executeJavaScript(`!!document.querySelector('.player-box.editing .trim:not(.hidden) .tl-handle.start')`);
       await win.webContents.executeJavaScript(
@@ -225,6 +225,38 @@ export async function runTestDriver(kine: {
       );
       await shot(win, 'settings-sidebar');
 
+      // Šipky v přehrávači: další / předchozí klip podle mřížky, "1 / N" v hlavičce, klávesy ↑ ↓.
+      {
+        const shown = await win.webContents.executeJavaScript(`[...document.querySelectorAll('.clips .clip')].map((c) => c.dataset.id)`);
+        await win.webContents.executeJavaScript(`(() => { const t = document.querySelector('.clip .thumb'); if (t) t.click(); return !!t; })()`);
+        await sleep(600);
+        const first = await win.webContents.executeJavaScript(`(() => { const n = document.querySelector('.player-nav.next'); const p = document.querySelector('.player-nav.prev'); return { next: !!n && !n.classList.contains('hidden') && !n.disabled, prevDisabled: !!p && p.disabled, pos: document.querySelector('.player-pos')?.textContent, title: document.querySelector('.player-head .title')?.textContent }; })()`);
+        await win.webContents.executeJavaScript(`(() => { const n = document.querySelector('.player-nav.next'); if (n) n.click(); return !!n; })()`);
+        await sleep(600);
+        const second = await win.webContents.executeJavaScript(`(() => ({ pos: document.querySelector('.player-pos')?.textContent, title: document.querySelector('.player-head .title')?.textContent, overlay: document.querySelectorAll('.overlay').length }))()`);
+        await shot(win, 'settings-clips-next');
+        await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }))`);
+        await sleep(500);
+        const back = await win.webContents.executeJavaScript(`document.querySelector('.player-pos')?.textContent`);
+        const secondClip = kine.library.list().find((c) => c.id === shown[1]);
+        result.playerNav = first.next && first.prevDisabled && first.pos === `1 / ${shown.length}` && second.pos === `2 / ${shown.length}` && second.overlay === 1 && !!secondClip && second.title === secondClip.title && back === `1 / ${shown.length}`;
+        result.playerNavDebug = { first, second, back };
+        await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        await sleep(300);
+      }
+
+      // Řazení knihovny: "nejdelší první" dá nahoru nejdelší klip.
+      {
+        await win.webContents.executeJavaScript(`(() => { const s = document.querySelector('.clips-sort'); s.value = 'longest'; s.dispatchEvent(new Event('change')); return true; })()`);
+        await sleep(500);
+        const firstId = await win.webContents.executeJavaScript(`document.querySelector('.clips .clip')?.dataset.id`);
+        const visible = kine.library.list().filter((c) => !c.game);
+        const longest = [...visible].sort((a, b) => b.durationSeconds - a.durationSeconds)[0];
+        result.clipsSort = !!longest && firstId === longest.id && kine.settings.get().clipsSort === 'longest';
+        await win.webContents.executeJavaScript(`(() => { const s = document.querySelector('.clips-sort'); s.value = 'newest'; s.dispatchEvent(new Event('change')); return true; })()`);
+        await sleep(400);
+      }
+
       // Oblíbené: hvězdička na kartě, filtr "Oblíbené" ukáže jen ty.
       if (clip1) {
         await win.webContents.executeJavaScript(`(() => { const s = document.querySelector('.clip[data-id="${clip1.id}"] .star'); if (s) s.click(); return !!s; })()`);
@@ -303,7 +335,7 @@ export async function runTestDriver(kine: {
         result.gifLimit = guarded;
         await win.webContents.executeJavaScript(`(() => { const t = document.querySelector('.clip[data-id="${clip1.id}"] .thumb'); if (t) t.click(); return !!t; })()`);
         await sleep(600);
-        await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head button')].find((x) => !x.disabled && x.textContent && !x.classList.contains('player-close')); if (b) b.click(); return !!b; })()`);
+        await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head button')].find((x) => !x.disabled && x.textContent && !x.classList.contains('player-close') && !x.classList.contains('hidden')); if (b) b.click(); return !!b; })()`);
         await sleep(400);
         await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.trim button.seg')].find((x) => /GIF/.test(x.textContent)); if (b) b.click(); return !!b; })()`);
         await sleep(300);
@@ -398,6 +430,30 @@ export async function runTestDriver(kine: {
       result.brandMarkSvg = await colorWin.webContents.executeJavaScript(`!!document.querySelector('.brand .mark svg') && getComputedStyle(document.documentElement).getPropertyValue('--brand').trim() === '#a34ff7'`);
     }
 
+    // Výkon appky: tři volby v Záznamu; "Úsporný" vypne náhledy při najetí, uloží se do nastavení.
+    kine.openSettings('settings');
+    await sleep(700);
+    const perfWin = kine.settingsWindow;
+    if (perfWin && !perfWin.isDestroyed()) {
+      const panel = await perfWin.webContents.executeJavaScript(`(() => { const p = document.querySelector('.panel.performance'); return !!p && p.querySelectorAll('input[type=radio][name=performance]').length === 3 && !!p.querySelector('.perf-now'); })()`);
+      await perfWin.webContents.executeJavaScript(`(() => { const r = document.querySelector('.panel.performance input[value=low]'); r.click(); return true; })()`);
+      let low = false;
+      for (let i = 0; i < 10 && !low; i++) {
+        await sleep(200);
+        low = kine.settings.get().performance === 'low';
+      }
+      await perfWin.webContents.executeJavaScript(`(() => { document.querySelector('.panel.performance').scrollIntoView({ block: 'start' }); return true; })()`);
+      await shot(perfWin, 'settings-performance');
+      kine.openSettings('clips');
+      await sleep(600);
+      await perfWin.webContents.executeJavaScript(`(() => { const t = document.querySelector('.clip .thumb'); t.dispatchEvent(new Event('mouseenter')); return true; })()`);
+      await sleep(800);
+      const noPreview = !(await perfWin.webContents.executeJavaScript(`!!document.querySelector('video.preview')`));
+      kine.settings.update({ performance: 'balanced' });
+      await sleep(300);
+      result.performance = panel && low && noPreview && kine.settings.get().performance === 'balanced';
+    }
+
     // O appce: "Zkontrolovat aktualizace" ukáže stav (při vývoji "dev"), ne jen chybu.
     kine.openSettings('about');
     await sleep(700);
@@ -425,6 +481,7 @@ export async function runTestDriver(kine: {
     const common = [
       'inlinePlayer', 'gridUntouched', 'trimPanel', 'trimNewClip', 'trimReplace', 'vertical', 'verticalUi', 'autoClip', 'overlayClosed', 'filters',
       'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks', 'reviewMerge', 'updateUi',
+      'playerNav', 'clipsSort', 'performance',
       'colorPicker', 'brandIcon', 'brandMarkSvg',
     ];
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];

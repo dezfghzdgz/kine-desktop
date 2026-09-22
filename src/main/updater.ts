@@ -46,6 +46,8 @@ type Deps = {
   siteUrl: () => string;
   /** Běží hra? Během hry se nestahuje. */
   gameRunning: () => boolean;
+  /** Jak často kontrolovat (h) - podle nastavení výkonu; bez toho 6 h. */
+  checkHours?: () => number;
 };
 
 let updater: typeof import('electron-updater').autoUpdater | null = null;
@@ -95,9 +97,16 @@ export function initUpdater(d: Deps): void {
       log(`aktualizace: ${e.message}`);
     });
     updater = autoUpdater;
-    // Kontrola po startu a pak každých 6 hodin.
+    // Kontrola po startu a pak každých N hodin (N podle nastavení výkonu, základ 6).
     setTimeout(() => void checkForUpdates(), 30000);
-    setInterval(() => void checkForUpdates(), 6 * 60 * 60 * 1000);
+    const schedule = () => {
+      const hours = Math.max(1, deps?.checkHours?.() ?? 6);
+      setTimeout(() => {
+        void checkForUpdates();
+        schedule();
+      }, hours * 60 * 60 * 1000);
+    };
+    schedule();
   } catch (e) {
     log(`aktualizace nejdou zapnout: ${(e as Error).message}`);
   }

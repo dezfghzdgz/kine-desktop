@@ -92,7 +92,13 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   **GIF** (třetí formát): úsek do 15 s, 480 px, 15 fps, paleta +
   dithering (`editPlan.gifArgs`), bez zvuku, soubor `.gif` vedle klipu
   (do knihovny nepatří - tam jsou jen videa), tlačítko „Ukázat ve složce“.
-- **Knihovna klipů** (`src/renderer/settings.ts`): najetí myší na kartu
+  **Šipky po stranách** přepnou na předchozí / další klip podle mřížky,
+  jak ji hráč vidí (filtry, řazení), stejně klávesy ↑ ↓; v hlavičce je
+  „3 / 24“, u nahraného klipu „Kopírovat odkaz“. Klávesy: mezerník,
+  ← → (±1 s, se Shiftem 5 s), M ztlumí, F celá obrazovka, I/O v úpravách.
+  Hlasitost si přehrávač pamatuje.
+- **Knihovna klipů** (`src/renderer/settings.ts`): řazení (nejnovější,
+  nejstarší, nejdelší, největší), `/` skočí do hledání; najetí myší na kartu
   tiše přehrává klip (jeden náhled naráz, po odjetí se pustí z ruky);
   hvězdička = oblíbený (`Clip.favorite`) a filtr „Oblíbené“; zaškrtávátka
   na kartách vyberou víc klipů a lišta nad mřížkou je **spojí do jednoho
@@ -156,6 +162,16 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   (sestřih z celého hraní) - spojený klip zůstane vybraný k nahrání,
   původní se odškrtnou. Popis nahraného videa je v jazyce appky a končí
   odkazem na stažení appky (`uploadDescription*`).
+- **Výkon appky** (`src/shared/performance.ts`): jedna volba v Záznamu -
+  Úsporný / Vyvážený / Výkon - řídí, jak často se appka na co ptá: hlídání
+  her (10 / 5 / 2 s), smyčka pomocníka pro kombinace kláves a ovladač
+  (50 / 30 / 15 ms), popředí a seznam procesů, dotazy na LoL (4 / 2 / 1 s),
+  náhledy při najetí (v úsporném vypnuté) a kontrola aktualizací (1× denně
+  / 6 h). Změna se projeví hned (restart smyčky pomocníka a hlídání her).
+  Kvalitu klipů to nemění - ta je zvlášť; v úsporném režimu se nabídne
+  tlačítko Nízká zátěž (720p).
+- **Po aktualizaci** appka jednou řekne, že běží nová verze
+  (`toastUpdated`, klik otevře O appce); pamatuje si `lastVersion`.
 - **Zátěž při hraní** je záměrně malá: pomocník pro Windows se bez
   složených zkratek ptá jen jednou za sekundu (s nimi každých 30 ms, aby
   neušel stisk), programy a okna čte přes Win32 API (`EnumProcesses`,
@@ -234,7 +250,7 @@ src/renderer/    stránky oken: settings (postranní panel s kartou stavu, zálo
                  player (přehrávač + úpravy klipu ve vrstvě: řez, 9:16, GIF), review
                  (okýnko po hře), toast, capture (skrytá snímací)
 src/preload/     most window.kine / window.kineCapture
-src/shared/      typy, překlady (i18n/: en cs sk de pl es fr uk), názvy klipů, zkratky, plány
+src/shared/      typy, překlady (i18n/: en cs sk de pl es fr uk), názvy klipů, zkratky, plány, výkon (performance.ts)
 ```
 
 ## Předplatné

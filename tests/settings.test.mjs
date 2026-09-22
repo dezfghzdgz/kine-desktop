@@ -4,6 +4,7 @@ import { sanitizeSettings, DEFAULT_SETTINGS, isAccelerator, isDiscordWebhook, su
 import { parseHotkey, formatHotkey, isSimpleHotkey, toAccelerator, hotkeyVks, hotkeyLabel, partFromCode, partFromGamepadButton, HotkeyRecorder, PAD_VK_BASE } from '../dist/esm/hotkeys.js';
 import { clipFileBase, defaultClipTitle, gameHashtag, safeFilePart, formatDuration } from '../dist/esm/clipNaming.js';
 import { translate, langFromLocale, DICTS, LANG_NAMES } from '../dist/esm/i18n.js';
+import { PERFORMANCE, performanceProfile } from '../dist/esm/performance.js';
 
 test('rozbité nastavení se srovná na výchozí', () => {
   const s = sanitizeSettings({ clipSeconds: 'abc', fps: 45, codec: 'av1', clipHotkey: 'Ctrl+', detection: 'x', customGames: { ' CS2.EXE ': 'CS' }, siteUrl: 'ftp://x' });
@@ -153,4 +154,19 @@ test('zkratky na ovladači: části Pad*, kódy pro pomocníka, záznam z Gamepa
   r.padState([0]);
   r.keyUp('ShiftLeft');
   assert.equal(formatHotkey(r.padState([])), 'PadA');
+});
+
+test('výkon appky: tři profily, neplatná hodnota = vyvážený, řazení knihovny', () => {
+  assert.equal(sanitizeSettings({}).performance, 'balanced');
+  assert.equal(sanitizeSettings({ performance: 'low' }).performance, 'low');
+  assert.equal(sanitizeSettings({ performance: 'turbo' }).performance, 'balanced');
+  assert.equal(performanceProfile('nesmysl'), PERFORMANCE.balanced);
+  assert.ok(PERFORMANCE.low.gamePollMs > PERFORMANCE.balanced.gamePollMs && PERFORMANCE.balanced.gamePollMs > PERFORMANCE.high.gamePollMs, 'úsporný se ptá nejméně často');
+  assert.ok(PERFORMANCE.low.helperFastMs > PERFORMANCE.high.helperFastMs);
+  assert.equal(PERFORMANCE.low.hoverPreview, false);
+  assert.equal(PERFORMANCE.balanced.hoverPreview, true);
+  assert.equal(sanitizeSettings({ clipsSort: 'longest' }).clipsSort, 'longest');
+  assert.equal(sanitizeSettings({ clipsSort: 'x' }).clipsSort, 'newest');
+  assert.equal(sanitizeSettings({ lastVersion: '0.7.0' }).lastVersion, '0.7.0');
+  assert.equal(sanitizeSettings({ lastVersion: 'abc' }).lastVersion, '');
 });

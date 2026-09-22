@@ -66,6 +66,7 @@ await build({
     clipNaming: 'src/shared/clipNaming.ts',
     i18n: 'src/shared/i18n/index.ts',
     plan: 'src/shared/plan.ts',
+    performance: 'src/shared/performance.ts',
   },
   outdir: 'dist/esm',
   platform: 'node',

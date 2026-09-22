@@ -21,6 +21,7 @@ import { log } from './log';
 
 export type { DetectedGame } from './gamesParse';
 
+/** Výchozí, když se nedá odvodit z nastavení výkonu (shared/performance.ts). */
 const POLL_MS = 5000;
 
 function run(cmd: string, args: string[], timeout = 8000): Promise<string> {
@@ -61,6 +62,8 @@ export class GameWatcher {
       onChange: (game: DetectedGame | null, previous: DetectedGame | null) => void;
       /** Každé kolo: seznam běžících programů (pro hlídání druhé appky Kine). */
       onProcesses?: (names: Set<string>) => void;
+      /** Jak často se ptát (ms) - podle nastavení výkonu; bez toho 5 s. */
+      pollMs?: () => number;
     }
   ) {
     deps.helper?.on({
@@ -77,7 +80,14 @@ export class GameWatcher {
   start(): void {
     if (this.timer) return;
     void this.poll();
-    this.timer = setInterval(() => void this.poll(), POLL_MS);
+    this.timer = setInterval(() => void this.poll(), this.deps.pollMs?.() ?? POLL_MS);
+  }
+
+  /** Změna nastavení výkonu: nový interval (běží-li hlídání). */
+  restart(): void {
+    if (!this.timer) return;
+    this.stop();
+    this.start();
   }
 
   stop(): void {

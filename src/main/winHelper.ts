@@ -153,14 +153,18 @@ if ($env:KINE_HOTKEYS) {
 $wasDown = New-Object bool[] ([Math]::Max(1, $chords.Count))
 $pad = 0
 
-# Rychla smycka (30 ms) jen kdyz je co hlidat - kombinace klaves nebo tlacitka
-# mysi. Bez nich staci jedno kolo za sekundu; popredi se hlasi kazdou
-# sekundu, seznam procesu kazdych ~5 s. Setri to procesor pri hrani.
+# Rychla smycka jen kdyz je co hlidat - kombinace klaves, tlacitka mysi nebo
+# ovladac (KINE_FAST_MS, zakladne 30 ms). Bez nich staci jedno kolo na
+# hlaseni popredi (KINE_FG_MS, zakladne 1 s); seznam procesu se posila
+# kazdych KINE_PROC_S sekund (zakladne 5). Casy dava nastaveni vykonu appky.
 $fast = $chords.Count -gt 0
-$sleepMs = 1000
-$fgEvery = 1
-$procEvery = 5
-if ($fast) { $sleepMs = 30; $fgEvery = 33; $procEvery = 166 }
+$fastMs = 30; if ($env:KINE_FAST_MS) { $fastMs = [Math]::Max(5, [int]$env:KINE_FAST_MS) }
+$fgMs = 1000; if ($env:KINE_FG_MS) { $fgMs = [Math]::Max(100, [int]$env:KINE_FG_MS) }
+$procS = 5; if ($env:KINE_PROC_S) { $procS = [Math]::Max(1, [int]$env:KINE_PROC_S) }
+$sleepMs = $fgMs
+if ($fast) { $sleepMs = $fastMs }
+$fgEvery = [Math]::Max(1, [int][Math]::Round($fgMs / $sleepMs))
+$procEvery = [Math]::Max(1, [int][Math]::Round(($procS * 1000) / $sleepMs))
 $tick = 0
 $lastPid = [uint32]0
 $lastExe = ''
@@ -266,6 +270,8 @@ export class WinHelper {
   private proc: ChildProcess | null = null;
   private running = false;
   private chords: number[][] = [];
+  /** Časování smyčky (ms / s) podle nastavení výkonu; null = základ ve skriptu. */
+  private timing: { fastMs: number; foregroundMs: number; processesS: number } | null = null;
   private listeners = new Set<Listener>();
   private lastForeground: ForegroundInfo | null = null;
   private windowed = new Set<string>();
@@ -330,6 +336,16 @@ export class WinHelper {
     this.kill();
   }
 
+  /** Jak často se pomocník ptá (nastavení výkonu); změna = restart skriptu. */
+  setTiming(timing: { fastMs: number; foregroundMs: number; processesS: number }): void {
+    const same = JSON.stringify(timing) === JSON.stringify(this.timing);
+    this.timing = timing;
+    if (!WinHelper.supported() || this.stopped || same) return;
+    this.failures = [];
+    this.kill();
+    this.spawn();
+  }
+
   /** Zkratky pro pomocníka (virtual-key kódy); změna = restart skriptu (trvá ~1 s). */
   setHotkeys(chords: number[][]): void {
     const same = JSON.stringify(chords) === JSON.stringify(this.chords);
@@ -363,7 +379,13 @@ export class WinHelper {
     const proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', file], {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, KINE_HOTKEYS: hotkeys },
+      env: {
+        ...process.env,
+        KINE_HOTKEYS: hotkeys,
+        ...(this.timing
+          ? { KINE_FAST_MS: String(this.timing.fastMs), KINE_FG_MS: String(this.timing.foregroundMs), KINE_PROC_S: String(this.timing.processesS) }
+          : {}),
+      },
     });
     this.proc = proc;
     this.buffer = '';

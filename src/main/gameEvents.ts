@@ -27,6 +27,7 @@ import { KillStreak, cs2Events, cs2GsiConfig, lolEvents, streakLabelKey, type Cs
 const GSI_PORTS = [27381, 27382, 27383, 27384, 27385];
 const CS2_CFG_NAME = 'gamestate_integration_kine.cfg';
 const CS2_CFG_DIR = ['steamapps', 'common', 'Counter-Strike Global Offensive', 'game', 'csgo', 'cfg'];
+/** Výchozí interval dotazů na LoL, když ho nastavení výkonu neurčí. */
 const LOL_POLL_MS = 2000;
 
 export type AutoClipLabelKey = ReturnType<typeof streakLabelKey>;
@@ -52,6 +53,8 @@ export class GameEvents {
       /** Udělat klip; count = délka série. */
       onClip: (count: number, labelKey: AutoClipLabelKey, game: 'cs2' | 'lol') => void;
       onStateChange?: () => void;
+      /** Jak často se ptát LoL (ms) - podle nastavení výkonu. */
+      lolPollMs?: () => number;
     }
   ) {
     let lastGame: 'cs2' | 'lol' = 'cs2';
@@ -92,6 +95,11 @@ export class GameEvents {
 
   /** Změna nastavení: zapnout/vypnout (u vypnutí se cfg z CS2 zase odebere). */
   async onSettingsChanged(prev: Settings, next: Settings): Promise<void> {
+    // Jiný výkon = jiný interval dotazů na LoL (běží-li).
+    if (prev.performance !== next.performance && this.lolTimer) {
+      clearInterval(this.lolTimer);
+      this.lolTimer = setInterval(() => void this.pollLol(), this.deps.lolPollMs?.() ?? LOL_POLL_MS);
+    }
     if (prev.autoClips === next.autoClips) return;
     if (next.autoClips === 'off') {
       await this.stop();
@@ -210,7 +218,7 @@ export class GameEvents {
   private startLol(): void {
     this.lolLastId = -1;
     this.lolPlayer = null;
-    this.lolTimer = setInterval(() => void this.pollLol(), LOL_POLL_MS);
+    this.lolTimer = setInterval(() => void this.pollLol(), this.deps.lolPollMs?.() ?? LOL_POLL_MS);
     log('herní události: League of Legends běží - sleduju Live Client API');
   }
 

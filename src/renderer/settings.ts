@@ -5,8 +5,9 @@ import { LANG_NAMES, makeT, type Key } from '../shared/i18n';
 import { HotkeyRecorder, formatHotkey, hotkeyLabel } from '../shared/hotkeys';
 import { isDiscordWebhook, suggestedMbps } from '../shared/settingsSchema';
 import { applyBrandColor, clipOptionsFor, maxClipSecondsFor } from '../shared/plan';
+import { performanceProfile } from '../shared/performance';
 import { clear, clipMeta, errorText, fileUrl, formatBytes, formatDate, formatDuration, h } from './ui';
-import { closePlayer, openPlayer, openPlayerId, type PlayerHandle } from './player';
+import { closePlayer, openPlayer, openPlayerId, type Neighbors, type PlayerHandle } from './player';
 
 /**
  * Hlavní okno: v režimu "Kine + klipy" první záložka Kine - web Kine přes
@@ -303,6 +304,19 @@ function colorPicker() {
 // ---- zkratky ---------------------------------------------------------------------
 
 function onKeyDown(e: KeyboardEvent) {
+  // "/" v knihovně skočí do hledání (jako na webu), když se právě nepíše jinam.
+  if (!hotkeyRecording && e.key === '/' && tab === 'clips' && wizardStep === null && !openPlayerId()) {
+    const target = e.target as HTMLElement | null;
+    if (!target || !/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) {
+      const input = app.querySelector('.clips-search') as HTMLInputElement | null;
+      if (input) {
+        e.preventDefault();
+        input.focus();
+        input.select();
+      }
+    }
+    return;
+  }
   if (!hotkeyRecording) return;
   e.preventDefault();
   e.stopPropagation();
@@ -861,6 +875,7 @@ function renderSettings() {
         clipsPlus() ? null : h('div', {}, plusLink())
       )
     ),
+    performancePanel(),
     h(
       'div',
       { class: 'panel stack' },
@@ -980,6 +995,37 @@ function renderSettings() {
   );
 }
 
+/**
+ * Kolik výkonu smí appka brát (shared/performance.ts): jak často hlídá
+ * hry, jak rychle čte ovladač a kombinace kláves, jak často se ptá LoL,
+ * jestli karty při najetí přehrávají. Kvalita klipů je zvlášť výš.
+ */
+function performancePanel() {
+  const p = performanceProfile(settings.performance);
+  const seconds = (ms: number) => `${Math.round(ms / 1000)} s`;
+  return h(
+    'div',
+    { class: 'panel stack performance' },
+    h('h2', { style: 'margin:0' }, '⚙ ' + t('performanceTitle')),
+    h('p', { class: 'hint', style: 'margin:0' }, t('performanceHint')),
+    h(
+      'div',
+      { class: 'radio-group' },
+      radio('performance', 'low', '🍃 ' + t('performanceLow'), t('performanceLowHint')),
+      radio('performance', 'balanced', t('performanceBalanced'), t('performanceBalancedHint')),
+      radio('performance', 'high', '⚡ ' + t('performanceHigh'), t('performanceHighHint'))
+    ),
+    h(
+      'p',
+      { class: 'faint perf-now', style: 'margin:0' },
+      t('performanceNow', { game: seconds(p.gamePollMs), pad: `${p.helperFastMs} ms`, lol: seconds(p.lolPollMs) })
+    ),
+    settings.performance === 'low' && !lowLoadActive()
+      ? h('div', {}, h('button', { class: 'small', onclick: () => update({ maxHeight: 720, fps: 30, videoMbps: 5 }) }, '🍃 ' + t('lowLoadPreset')))
+      : null
+  );
+}
+
 function checkbox(field: keyof Settings, label: string, hint?: string, disabled = false) {
   return h(
     'label',
@@ -993,7 +1039,7 @@ function radio<K extends keyof Settings>(field: K, value: Settings[K], label: st
   return h(
     'label',
     { class: 'check' },
-    h('input', { type: 'radio', name: String(field), checked: settings[field] === value, onchange: () => update({ [field]: value } as Partial<Settings>) }),
+    h('input', { type: 'radio', name: String(field), value: String(value), checked: settings[field] === value, onchange: () => update({ [field]: value } as Partial<Settings>) }),
     h('span', {}, label, hint ? h('span', { class: 'sub' }, hint) : null)
   );
 }
@@ -1276,7 +1322,7 @@ function dateFrom(filter: DateFilter): number {
 function filteredClips(): Clip[] {
   const since = dateFrom(filters.date);
   const q = filters.query.trim().toLowerCase();
-  return clips.filter((c) => {
+  const list = clips.filter((c) => {
     if (filters.favorites && !c.favorite) return false;
     if (filters.game === 'none' && c.game) return false;
     if (filters.game !== 'all' && filters.game !== 'none' && c.game !== filters.game) return false;
@@ -1284,6 +1330,25 @@ function filteredClips(): Clip[] {
     if (q && !`${c.title} ${c.game ?? ''}`.toLowerCase().includes(q)) return false;
     return true;
   });
+  // Knihovna chodí nejnovější první; ostatní řazení tady.
+  switch (settings.clipsSort) {
+    case 'oldest':
+      return list.reverse();
+    case 'longest':
+      return list.sort((a, b) => b.durationSeconds - a.durationSeconds);
+    case 'largest':
+      return list.sort((a, b) => b.sizeBytes - a.sizeBytes);
+    default:
+      return list;
+  }
+}
+
+/** Sousedé klipu v právě zobrazeném seznamu (šipky v přehrávači jdou po mřížce, jak ji hráč vidí). */
+function neighborsOf(id: string): Neighbors {
+  const list = filteredClips();
+  const index = list.findIndex((c) => c.id === id);
+  if (index < 0) return { prev: null, next: null, index: 0, total: list.length };
+  return { prev: list[index - 1] ?? null, next: list[index + 1] ?? null, index, total: list.length };
 }
 
 function showShareNote(id: string, text: string, kind: 'ok' | 'error') {
@@ -1318,6 +1383,10 @@ function showClip(clip: Clip, edit = false) {
     onClose: () => {
       player = null;
     },
+    neighbors: neighborsOf,
+    onCopyLink: (c) => {
+      if (c.upload?.state === 'done') void kine.copyText(c.upload.url);
+    },
     edit: {
       run: (c, request) => kine.trimClip(c.id, request),
       onProgress: (cb) => kine.onTrimProgress(cb),
@@ -1335,6 +1404,8 @@ function showClip(clip: Clip, edit = false) {
  * po odjetí se video hned pustí z ruky.
  */
 function startPreview(host: HTMLElement, clip: Clip) {
+  // V úsporném režimu se karty při najetí nepřehrávají.
+  if (!performanceProfile(settings.performance).hoverPreview) return;
   if (preview?.host === host) return;
   stopPreview();
   const video = h('video', { class: 'preview', muted: true, loop: true, playsinline: true, preload: 'auto' }) as HTMLVideoElement;
@@ -1596,6 +1667,19 @@ function renderClips() {
             render();
           },
         })
+      ),
+      h(
+        'label',
+        {},
+        t('clipsSort'),
+        h(
+          'select',
+          { class: 'clips-sort', onchange: (e: Event) => update({ clipsSort: (e.target as HTMLSelectElement).value as Settings['clipsSort'] }) },
+          h('option', { value: 'newest', selected: settings.clipsSort === 'newest' }, t('sortNewest')),
+          h('option', { value: 'oldest', selected: settings.clipsSort === 'oldest' }, t('sortOldest')),
+          h('option', { value: 'longest', selected: settings.clipsSort === 'longest' }, t('sortLongest')),
+          h('option', { value: 'largest', selected: settings.clipsSort === 'largest' }, t('sortLargest'))
+        )
       ),
       favoritesBtn,
       filtersActive

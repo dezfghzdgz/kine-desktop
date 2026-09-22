@@ -100,7 +100,16 @@ export type Settings = {
   gsiToken: string;
   /** Adresa webhooku Discordu - tlačítko "Poslat na Discord" u nahraného klipu. Prázdné = tlačítko není. */
   discordWebhook: string;
+  /** Kolik výkonu smí appka brát (jak často hlídá hry, pomocník, náhledy…) - viz shared/performance.ts. */
+  performance: PerformanceMode;
+  /** Verze, kterou hráč naposledy viděl běžet - po aktualizaci se jednou řekne "aktualizováno na X". */
+  lastVersion: string;
+  /** Řazení knihovny klipů. */
+  clipsSort: ClipsSort;
 };
+
+export type PerformanceMode = 'low' | 'balanced' | 'high';
+export type ClipsSort = 'newest' | 'oldest' | 'longest' | 'largest';
 
 export type AutoClipMode = 'off' | 'multi' | 'every';
 

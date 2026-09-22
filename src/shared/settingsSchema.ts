@@ -40,6 +40,9 @@ export const DEFAULT_SETTINGS: Settings = {
   autoClips: 'multi',
   gsiToken: '',
   discordWebhook: '',
+  performance: 'balanced',
+  lastVersion: '',
+  clipsSort: 'newest',
 };
 
 export const CLIP_SECONDS_OPTIONS = [15, 30, 60, 90, 120] as const;
@@ -113,6 +116,9 @@ export function sanitizeSettings(input: unknown): Settings {
     autoClips: oneOf(raw.autoClips, ['off', 'multi', 'every'] as const, d.autoClips),
     gsiToken: /^[a-z0-9]{16,64}$/i.test(String(raw.gsiToken ?? '')) ? String(raw.gsiToken) : '',
     discordWebhook: isDiscordWebhook(raw.discordWebhook) ? (raw.discordWebhook as string).trim() : '',
+    performance: oneOf(raw.performance, ['low', 'balanced', 'high'] as const, d.performance),
+    lastVersion: /^\d+\.\d+\.\d+$/.test(String(raw.lastVersion ?? '')) ? String(raw.lastVersion) : '',
+    clipsSort: oneOf(raw.clipsSort, ['newest', 'oldest', 'longest', 'largest'] as const, d.clipsSort),
   };
 }
 

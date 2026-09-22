@@ -353,6 +353,23 @@ export const en = {
   uploadDescriptionGame: 'Clip from {game}, saved with Kine for PC. Get the app: {url}',
   reviewMerge: 'Merge selected into one clip',
   reviewMergeHint: 'One video from the whole session - the merged clip replaces the selected ones in the upload.',
+  playerPrev: 'Previous clip',
+  playerNext: 'Next clip',
+  toastUpdated: 'Kine updated to version {version} - click for what is new',
+  performanceTitle: 'App performance',
+  performanceHint: 'How much of the PC the app may use: how often it looks for games, reads the controller and game events, and whether cards play on hover. Clip quality is set separately in Quality below.',
+  performanceLow: 'Power saver',
+  performanceLowHint: 'For weaker PCs or when every frame counts. Game detected within ~10 s, no hover previews, updates checked once a day.',
+  performanceBalanced: 'Balanced (recommended)',
+  performanceBalancedHint: 'Game detected within ~5 s, controller read every 30 ms, hover previews on.',
+  performanceHigh: 'Performance',
+  performanceHighHint: 'Fastest reactions: game within ~2 s, controller every 15 ms, LoL kills every second. Fine on a strong PC.',
+  performanceNow: 'Now: games checked every {game} · controller and key combos every {pad} · League of Legends every {lol}',
+  clipsSort: 'Sort',
+  sortNewest: 'Newest first',
+  sortOldest: 'Oldest first',
+  sortLongest: 'Longest first',
+  sortLargest: 'Largest first',
 } as const;
 
 export type Key = keyof typeof en;

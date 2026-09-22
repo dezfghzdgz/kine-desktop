@@ -61,6 +61,10 @@ function showClip(clip: Clip, edit = false) {
     onClose: () => {
       player = null;
     },
+    neighbors: (id) => {
+      const index = clips.findIndex((c) => c.id === id);
+      return { prev: clips[index - 1] ?? null, next: clips[index + 1] ?? null, index: Math.max(0, index), total: clips.length };
+    },
     edit: {
       run: (c, request) => kine.trimClip(c.id, request),
       onProgress: (cb) => kine.onTrimProgress(cb),

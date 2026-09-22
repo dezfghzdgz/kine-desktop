@@ -139,6 +139,23 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   se přebarví podle zvolené barvy Kine (tyrkys v PNG se nahradí, tmavý
   podklad zůstane); značka v panelu je SVG v `--brand`. Ikona .exe a
   zástupce zůstává tyrkysová (za běhu se měnit nedá).
+- **Aktualizace** (`src/main/updater.ts`, čistá část `updaterParse.ts`):
+  kontrola po startu a každých 6 h. Zkouší postupně zdroj z
+  `app-update.yml` (naše úložiště R2, nebo GitHub), pak GitHub Releases
+  přímo a nakonec web Kine (`/api/desktop/latest`) - když automatické
+  stažení nejde, řekne aspoň „je venku verze X“ s tlačítkem ke stažení,
+  a v záložce O appce je vidět i důvod (např. `404 latest.yml`). Stahuje
+  se **jen když se nehraje** (vyšla-li verze během hry, stáhne se po
+  ní), instaluje po ukončení appky.
+- **Web Kine v okně spí**, když ho nikdo nevidí: při přepnutí na jinou
+  záložku, zmenšení okna a hlavně **po celou dobu, co běží hra** se
+  zastaví přehrávání, ztlumí zvuk a omezí běh na pozadí
+  (`sleepKineView`) - procesor, grafika i síť patří hře. Při návratu
+  na záložku (a bez hry) se probere.
+- **Po hře** umí okýnko s klipy **spojit vybrané do jednoho klipu**
+  (sestřih z celého hraní) - spojený klip zůstane vybraný k nahrání,
+  původní se odškrtnou. Popis nahraného videa je v jazyce appky a končí
+  odkazem na stažení appky (`uploadDescription*`).
 - **Zátěž při hraní** je záměrně malá: pomocník pro Windows se bez
   složených zkratek ptá jen jednou za sekundu (s nimi každých 30 ms, aby
   neušel stisk), programy a okna čte přes Win32 API (`EnumProcesses`,
@@ -206,6 +223,7 @@ src/main/        hlavní proces (Electron, Node)
   winHelper.ts   pomocník pro Windows (PowerShell + C# přes Add-Type): okno v popředí, procesy, okna, Steam, stav kláves
   hotkeys.ts     zkratky: systémové (Electron) + složené přes pomocníka
   clips.ts       knihovna klipů (index.json ve složce s klipy)
+  updater.ts     aktualizace: R2 / GitHub / web Kine jako záloha, stahování až po hře; updaterParse.ts čistá část (test)
   uploader.ts    fronta nahrávání, pauza při hře (test), tus.ts klient (test)
   auth.ts        přihlášení, lokální server pro /connect, kine:// odkazy
   kineApi.ts     volání Kine (create-upload-url, confirm)

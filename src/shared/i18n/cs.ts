@@ -329,4 +329,13 @@ export const cs: Record<Key, string> = {
   gifReveal: 'Ukázat ve složce',
   hotkeyPadHint: 'Funguje i s ovladačem Xbox (PlayStation přes Steam): když je pole aktivní, podrž tlačítka na ovladači. Jen Windows.',
   generalTitle: 'Obecné',
+  aboutUpdateErrorReason: 'Aktualizace se nepodařilo zkontrolovat: {message}',
+  aboutUpdateManual: 'Je venku verze {version}. Automatické stažení teď nejde - stáhni ji z Kine.',
+  aboutDownloadUpdate: 'Stáhnout verzi {version}',
+  aboutUpdateSource: 'Aktualizace z: {source}',
+  aboutUpdateWaitsGame: 'Je k dispozici verze {version} - stáhne se, až dohraješ, a nainstaluje po ukončení appky.',
+  uploadDescription: 'Klip ze hry uložený v Kine do PC. Appka ke stažení: {url}',
+  uploadDescriptionGame: 'Klip ze hry {game}, uložený v Kine do PC. Appka ke stažení: {url}',
+  reviewMerge: 'Spojit vybrané do jednoho klipu',
+  reviewMergeHint: 'Jedno video z celého hraní - spojený klip nahradí ve výběru k nahrání ty vybrané.',
 };

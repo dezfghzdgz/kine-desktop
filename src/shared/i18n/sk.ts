@@ -329,4 +329,13 @@ export const sk: Record<Key, string> = {
   gifReveal: 'Ukázať v priečinku',
   hotkeyPadHint: 'Funguje aj s ovládačom Xbox (PlayStation cez Steam): keď je pole aktívne, podrž tlačidlá na ovládači. Len Windows.',
   generalTitle: 'Všeobecné',
+  aboutUpdateErrorReason: 'Aktualizácie sa nepodarilo skontrolovať: {message}',
+  aboutUpdateManual: 'Vonku je verzia {version}. Automatické stiahnutie teraz nejde - stiahni ju z Kine.',
+  aboutDownloadUpdate: 'Stiahnuť verziu {version}',
+  aboutUpdateSource: 'Aktualizácie z: {source}',
+  aboutUpdateWaitsGame: 'Je k dispozícii verzia {version} - stiahne sa, keď dohráš, a nainštaluje po ukončení appky.',
+  uploadDescription: 'Klip z hry uložený v Kine do PC. Appka na stiahnutie: {url}',
+  uploadDescriptionGame: 'Klip z hry {game}, uložený v Kine do PC. Appka na stiahnutie: {url}',
+  reviewMerge: 'Spojiť vybrané do jedného klipu',
+  reviewMergeHint: 'Jedno video z celého hrania - spojený klip nahradí vo výbere na nahranie tie vybrané.',
 };

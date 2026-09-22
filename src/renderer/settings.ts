@@ -48,7 +48,7 @@ let authError: string | null = null;
 let hotkeyRecording: 'clipHotkey' | 'toggleHotkey' | null = null;
 let hotkeyError: string | null = null;
 const recorder = new HotkeyRecorder();
-let updateResult: { status: string; version?: string } | null = null;
+let updateResult: { status: string; version?: string; url?: string; message?: string; source?: string; waitingForGame?: boolean } | null = null;
 let confirmDelete: string | null = null;
 let renaming: string | null = null;
 let editingGame: string | null = null;
@@ -1715,7 +1715,8 @@ function renderClips() {
     const thumb = h(
       'div',
       { class: 'thumb', onclick: () => showClip(clip) },
-      clip.thumb ? h('img', { src: fileUrl(clip.thumb), alt: '' }) : null,
+      // Náhledy se načítají, až když se karta dostane na obrazovku - u stovek klipů to šetří paměť i disk.
+      clip.thumb ? h('img', { src: fileUrl(clip.thumb), alt: '', loading: 'lazy', decoding: 'async' }) : null,
       h('span', { class: 'play-badge' }, '▶'),
       h('span', { class: 'dur' }, formatDuration(clip.durationSeconds))
     );
@@ -1755,6 +1756,30 @@ function renderClips() {
 
 // ---- o appce -------------------------------------------------------------------------------
 
+/** Výsledek kontroly aktualizací: stav, důvod chyby, odkud se berou, u ručního stažení tlačítko. */
+function updateStatus(r: NonNullable<typeof updateResult>) {
+  const version = r.version ?? '';
+  if (r.status === 'checking') return h('p', { class: 'ok' }, t('loading'));
+  const box = h('div', { class: 'stack update-status', style: 'gap:6px' });
+  if (r.status === 'available') {
+    box.append(h('p', { class: 'ok', style: 'margin:0' }, r.waitingForGame ? t('aboutUpdateWaitsGame', { version }) : t('aboutUpdateAvailable', { version })));
+  } else if (r.status === 'available-manual') {
+    box.append(
+      h('p', { class: 'ok', style: 'margin:0' }, t('aboutUpdateManual', { version })),
+      h('div', {}, h('button', { class: 'small primary', onclick: () => void kine.openExternal(r.url ?? settings.siteUrl + '/download') }, '⬇ ' + t('aboutDownloadUpdate', { version })))
+    );
+  } else if (r.status === 'error') {
+    box.append(h('p', { class: 'error', style: 'margin:0' }, t('aboutUpdateErrorReason', { message: r.message ?? '' })));
+  } else if (r.status === 'disabled') {
+    box.append(h('p', { class: 'faint', style: 'margin:0' }, 'dev'));
+  } else {
+    box.append(h('p', { class: 'ok', style: 'margin:0' }, t('aboutUpToDate')));
+  }
+  if (r.source) box.append(h('p', { class: 'faint', style: 'margin:0' }, t('aboutUpdateSource', { source: r.source })));
+  if (r.message && r.status !== 'error') box.append(h('p', { class: 'faint', style: 'margin:0' }, r.message));
+  return box;
+}
+
 function renderAbout() {
   return h(
     'div',
@@ -1786,19 +1811,7 @@ function renderAbout() {
         h('button', { class: 'small quiet', onclick: () => void kine.openLogs() }, t('aboutLogs')),
         h('button', { class: 'small quiet', onclick: () => void kine.openKine() }, t('trayOpenKine'))
       ),
-      updateResult
-        ? h(
-            'p',
-            { class: updateResult.status === 'error' ? 'error' : 'ok' },
-            updateResult.status === 'checking'
-              ? t('loading')
-              : updateResult.status === 'available'
-                ? t('aboutUpdateAvailable', { version: updateResult.version ?? '' })
-                : updateResult.status === 'error'
-                  ? t('aboutUpdateError')
-                  : t('aboutUpToDate')
-          )
-        : null
+      updateResult ? updateStatus(updateResult) : null
     ),
     h('div', { class: 'row' }, h('button', { class: 'quiet danger', onclick: () => void kine.quit() }, t('trayQuit')))
   );

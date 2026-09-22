@@ -329,4 +329,13 @@ export const es: Record<Key, string> = {
   gifReveal: 'Mostrar en la carpeta',
   hotkeyPadHint: 'También funciona con un mando de Xbox (PlayStation a través de Steam): con el campo activo, mantén pulsados los botones del mando. Solo Windows.',
   generalTitle: 'General',
+  aboutUpdateErrorReason: 'No se pudieron comprobar las actualizaciones: {message}',
+  aboutUpdateManual: 'Ya está la versión {version}. La descarga automática no funciona ahora - descárgala desde Kine.',
+  aboutDownloadUpdate: 'Descargar la versión {version}',
+  aboutUpdateSource: 'Actualizaciones desde: {source}',
+  aboutUpdateWaitsGame: 'Hay una versión {version} disponible - se descargará cuando dejes de jugar y se instalará al salir.',
+  uploadDescription: 'Clip de juego guardado con Kine para PC. Consigue la app: {url}',
+  uploadDescriptionGame: 'Clip de {game}, guardado con Kine para PC. Consigue la app: {url}',
+  reviewMerge: 'Unir los seleccionados en un clip',
+  reviewMergeHint: 'Un solo vídeo de toda la sesión - el clip unido sustituye a los seleccionados en la subida.',
 };

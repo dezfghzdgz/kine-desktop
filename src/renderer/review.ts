@@ -23,6 +23,9 @@ let selected = new Set<string>();
 const titles = new Map<string, string>();
 let visibility: Visibility = 'private';
 let player: PlayerHandle | null = null;
+/** Sestřih všech vybraných klipů z tohohle hraní do jednoho (běží / hotovo / chyba). */
+let merging: { percent: number } | null = null;
+let mergeNote: { text: string; kind: 'ok' | 'error' } | null = null;
 
 async function load(id: string) {
   sessionId = id;
@@ -61,8 +64,48 @@ function showClip(clip: Clip, edit = false) {
     edit: {
       run: (c, request) => kine.trimClip(c.id, request),
       onProgress: (cb) => kine.onTrimProgress(cb),
+      gif: (c, range) => kine.makeGif(c.id, range),
+      reveal: (file) => void kine.revealFile(file),
     },
   });
+}
+
+/**
+ * Sestřih z celého hraní: vybrané klipy (od nejstaršího) do jednoho
+ * klipu. Ten se objeví v seznamu vybraný k nahrání, původní klipy se
+ * odškrtnou - na Kine tak jde jedním klikem celý večer v jednom videu.
+ */
+async function mergeSelected() {
+  const t = makeT(settings.lang);
+  const ids = clips.filter((c) => selected.has(c.id)).map((c) => c.id);
+  if (merging || ids.length < 2) return;
+  merging = { percent: 0 };
+  mergeNote = null;
+  render();
+  const unsubscribe = kine.onTrimProgress((p) => {
+    if (merging && p.id === 'merge') {
+      merging.percent = p.percent;
+      const bar = app.querySelector('.merge-progress > span') as HTMLElement | null;
+      const text = app.querySelector('.merge-text');
+      if (bar) bar.style.width = `${p.percent}%`;
+      if (text) text.textContent = t('mergeWorking', { percent: p.percent });
+    }
+  });
+  try {
+    const clip = await kine.mergeClips(ids);
+    for (const id of ids) selected.delete(id);
+    selected.add(clip.id);
+    merging = null;
+    mergeNote = { text: t('mergeDone', { title: clip.title }), kind: 'ok' };
+    await refresh();
+  } catch (e) {
+    merging = null;
+    void kine.log(`sestřih po hře: ${(e as Error).message}`);
+    mergeNote = { text: t('mergeFailed', { message: (e as Error).message }), kind: 'error' };
+    render();
+  } finally {
+    unsubscribe();
+  }
 }
 
 function render() {
@@ -74,6 +117,7 @@ function render() {
   const game = games.size === 1 ? [...games][0] : null;
   const count = clips.length;
 
+  const selectedCount = selected.size;
   const grid = h('div', { class: 'clips' });
   for (const clip of clips) {
     const isSelected = selected.has(clip.id);
@@ -119,7 +163,6 @@ function render() {
     grid.append(h('div', { class: `clip ${isSelected ? 'selected' : ''}` }, thumb, body));
   }
 
-  const selectedCount = selected.size;
   const visSelect = h(
     'select',
     { style: 'width:auto;min-width:220px', onchange: (e: Event) => (visibility = (e.target as HTMLSelectElement).value as Visibility) },
@@ -136,9 +179,13 @@ function render() {
         'div',
         { class: 'row' },
         h('button', { class: 'small quiet', onclick: () => { selected = new Set(clips.map((c) => c.id)); render(); } }, t('reviewSelectAll')),
-        h('button', { class: 'small quiet', onclick: () => { selected = new Set(); render(); } }, t('reviewSelectNone'))
+        h('button', { class: 'small quiet', onclick: () => { selected = new Set(); render(); } }, t('reviewSelectNone')),
+        merging
+          ? h('span', { class: 'row', style: 'gap:8px' }, h('span', { class: 'progress trim-progress merge-progress' }, h('span', { style: `width:${merging.percent}%` })), h('span', { class: 'faint merge-text' }, t('mergeWorking', { percent: merging.percent })))
+          : h('button', { class: 'small review-merge', disabled: selectedCount < 2, title: t('reviewMergeHint'), onclick: () => void mergeSelected() }, '🎬 ' + t('reviewMerge'))
       )
     ),
+    ...(mergeNote ? [h('p', { class: `state ${mergeNote.kind === 'ok' ? 'done' : 'error'}`, style: 'margin:-6px 0 0' }, mergeNote.text)] : []),
     count === 0 ? h('div', { class: 'empty' }, t('reviewNone')) : grid,
     h(
       'div',

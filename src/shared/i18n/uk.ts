@@ -329,4 +329,13 @@ export const uk: Record<Key, string> = {
   gifReveal: 'Показати в папці',
   hotkeyPadHint: 'Працює і з контролером Xbox (PlayStation через Steam): коли поле активне, затисни кнопки на контролері. Лише Windows.',
   generalTitle: 'Загальне',
+  aboutUpdateErrorReason: 'Не вдалося перевірити оновлення: {message}',
+  aboutUpdateManual: 'Вийшла версія {version}. Автоматичне завантаження зараз недоступне - завантаж її з Kine.',
+  aboutDownloadUpdate: 'Завантажити версію {version}',
+  aboutUpdateSource: 'Оновлення з: {source}',
+  aboutUpdateWaitsGame: 'Доступна версія {version} - завантажиться, коли перестанеш грати, і встановиться після виходу.',
+  uploadDescription: 'Ігровий кліп, збережений у Kine для ПК. Завантажити застосунок: {url}',
+  uploadDescriptionGame: 'Кліп із {game}, збережений у Kine для ПК. Завантажити застосунок: {url}',
+  reviewMerge: 'Об’єднати вибрані в один кліп',
+  reviewMergeHint: 'Одне відео з усієї сесії - об’єднаний кліп замінить вибрані у завантаженні.',
 };

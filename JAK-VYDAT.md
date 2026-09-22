@@ -23,8 +23,26 @@ antiviru/SmartScreenu.
    `latest.yml` a `clipper.yml`.
 
 Každá další verze: v `package.json` zvedni `"version"`, nahraj soubory,
-Run workflow. Nainstalovaným appkám se nová verze stáhne na pozadí a
-nainstaluje po ukončení.
+Run workflow. Nainstalovaným appkám se nová verze stáhne na pozadí (až
+když se nehraje) a nainstaluje po ukončení.
+
+**Jak workflow vydává (od 0.7.0).** Instalátory se jen postaví
+(`--publish never`) a na GitHub je nahraje `gh release upload --clobber`
+(až třikrát, přepíše staré). Dřív to dělal electron-builder sám a při
+opakovaném běhu stejné verze soubor smazal a nový už nenahrál – tak
+zůstalo vydání 0.6.0 bez `Kine-Setup.exe` a `latest.yml` a appka hlásila
+„Aktualizace se nepodařilo zkontrolovat“. Krok „Kontrola souborů“ navíc
+hlídá, že všech pět souborů existuje, a v **Summary** běhu je seznam
+toho, co ve vydání leží. Workflow se nespouští dvakrát naráz
+(`concurrency`). Když je `DESKTOP_DOWNLOAD_BASE` nastavené, ale chybí
+klíče k R2, krok R2 se přeskočí s varováním – vydání na GitHubu tím
+nepadá.
+
+**Kontrola aktualizací v appce** zkouší postupně: odkud byla appka
+postavená (R2, nebo GitHub), pak GitHub Releases přímo, a nakonec se
+zeptá webu Kine (`/api/desktop/latest`) – když ani automatické stažení
+nejde, ukáže aspoň „Je venku verze X“ s tlačítkem ke stažení. Důvod
+neúspěchu je vidět v záložce O appce i v protokolu (`kine.log`).
 
 **Dvě appky z jednoho kódu.** Workflow staví instalátor dvakrát:
 `scripts/publish-config.mjs` vyrobí `electron-builder.generated.yml`
@@ -121,7 +139,12 @@ Podepsaný instalátor to skoro vždy vyřeší samo.
 ## Když něco nejde
 
 - **Actions červené** – klikni na běh, otevři krok, který spadl, a pošli
-  mi text chyby.
+  mi text chyby. Stejnou verzi jde pustit znovu (Run workflow) – soubory ve
+  vydání se přepíšou.
+- **„Aktualizace se nepodařilo zkontrolovat: …“** – v hlášce je důvod:
+  `404` u `latest.yml` = ve vydání na GitHubu (nebo v R2 složce `full/`,
+  `clipper/`) soubor chybí → spusť workflow znovu; `ENOTFOUND` /
+  `ECONNREFUSED` = bez internetu nebo blokuje firewall.
 - **Tlačítko na webu vede na 404** – R2: špatná adresa v
   `NEXT_PUBLIC_DESKTOP_DOWNLOAD_BASE` nebo bucket bez veřejného přístupu;
   GitHub: repo soukromé nebo jinak pojmenované (`NEXT_PUBLIC_DESKTOP_REPO`).

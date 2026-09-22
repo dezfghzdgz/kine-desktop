@@ -443,7 +443,9 @@ button.seg.active { color: var(--brand); box-shadow: inset 0 0 0 1px rgba(var(--
 
 /* ---------- Okýnko po hře ---------- */
 .review { padding: 22px 24px 20px; height: 100vh; display: flex; flex-direction: column; gap: 14px; }
-.review .clips { overflow: auto; flex: 1; align-content: start; padding-bottom: 6px; }
+/* Řádky mřížky drží přirozenou výšku (grid-auto-rows) - jinak se karty při 3+ klipech
+   zmáčkly, aby se vešly do okna, místo aby okno rolovalo. */
+.review .clips { overflow: auto; flex: 1; align-content: start; grid-auto-rows: max-content; padding-bottom: 6px; }
 .review .foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; border-top: 1px solid var(--border); padding-top: 14px; }
 
 /* ---------- Toast (sklo nad hrou) ---------- */

@@ -75,7 +75,8 @@ const kine = {
   reviewClips: (sessionId: string): Promise<Clip[]> => ipcRenderer.invoke('review:clips', sessionId),
   reviewDone: (requests: UploadRequest[]): Promise<void> => ipcRenderer.invoke('review:done', requests),
 
-  checkUpdate: (): Promise<{ status: string; version?: string }> => ipcRenderer.invoke('app:checkUpdate'),
+  /** Kontrola aktualizací: stav, verze, odkud, důvod chyby, odkaz na ruční stažení (viz main/updater.ts). */
+  checkUpdate: (): Promise<{ status: string; version?: string; url?: string; message?: string; source?: string; waitingForGame?: boolean }> => ipcRenderer.invoke('app:checkUpdate'),
   openLogs: (): Promise<string> => ipcRenderer.invoke('app:openLogs'),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
   /** Otevře Kine: v režimu "Kine + klipy" jako záložku hlavního okna, jinak v prohlížeči. */

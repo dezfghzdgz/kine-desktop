@@ -38,6 +38,8 @@ export class Uploader {
       settings: () => Settings;
       fetchImpl?: typeof fetch;
       log: (message: string) => void;
+      /** Popis videa na Kine (v jazyce appky, s odkazem na appku); bez něj krátký výchozí. */
+      describe?: (clip: Clip) => string;
     }
   ) {}
 
@@ -212,7 +214,7 @@ export class Uploader {
     if (clip.game) hashtags.push(gameHashtag(clip.game));
     const { id } = await api.confirm({
       title: (request.title ?? clip.title).trim().slice(0, 150) || clip.title,
-      description: clip.game ? `Klip ze hry ${clip.game} · Kine do PC` : 'Klip · Kine do PC',
+      description: this.deps.describe ? this.deps.describe(clip) : clip.game ? `Clip from ${clip.game} · Kine` : 'Clip · Kine',
       cloudflareVideoId: videoId,
       language: settings.videoLanguage,
       visibility: request.visibility,

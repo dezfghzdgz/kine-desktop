@@ -344,6 +344,15 @@ export const en = {
   gifReveal: 'Show in folder',
   hotkeyPadHint: 'Works with an Xbox controller too (PlayStation via Steam): while the field is active, hold the buttons on the controller. Windows only.',
   generalTitle: 'General',
+  aboutUpdateErrorReason: 'Could not check for updates: {message}',
+  aboutUpdateManual: 'Version {version} is out. Automatic download is not available right now - get it from Kine.',
+  aboutDownloadUpdate: 'Download version {version}',
+  aboutUpdateSource: 'Updates from: {source}',
+  aboutUpdateWaitsGame: 'Version {version} is available - it downloads once you stop playing and installs when you quit.',
+  uploadDescription: 'Game clip saved with Kine for PC. Get the app: {url}',
+  uploadDescriptionGame: 'Clip from {game}, saved with Kine for PC. Get the app: {url}',
+  reviewMerge: 'Merge selected into one clip',
+  reviewMergeHint: 'One video from the whole session - the merged clip replaces the selected ones in the upload.',
 } as const;
 
 export type Key = keyof typeof en;

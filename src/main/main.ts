@@ -34,7 +34,7 @@ import { Auth } from './auth';
 import { createKineApi } from './kineApi';
 import { Uploader } from './uploader';
 import { Toast } from './toast';
-import { checkForUpdates, initUpdater } from './updater';
+import { checkForUpdates, initUpdater, onGameEnded as updaterGameEnded } from './updater';
 import { runTestDriver } from './testDriver';
 import { WinHelper } from './winHelper';
 import { makeGif, makeThumbnail, mergeClips, trimClip } from './edit';
@@ -210,9 +210,17 @@ class KineApp {
       blocked: () => (this.games.current() ? 'game' : net.isOnline() ? null : 'offline'),
       settings: () => this.settings.get(),
       log,
+      // Popis pod videem: odkud klip je a kde se appka bere - diváci klipu se tak dostanou k appce.
+      describe: (clip) => {
+        const download = `${this.settings.get().siteUrl}/download`;
+        return clip.game ? this.t('uploadDescriptionGame', { game: clip.game, url: download }) : this.t('uploadDescription', { url: download });
+      },
     });
     this.uploader.on((e) => {
-      if (e.type === 'done') void this.toast.show(this.t('toastUploaded', { title: e.clip.title }), 'ok', { notification: true });
+      if (e.type === 'done') {
+        const id = e.clip.id;
+        void this.toast.show(this.t('toastUploaded', { title: e.clip.title }), 'ok', { notification: true, onClick: () => this.openClipOnKine(id) });
+      }
       if (e.type === 'error') void this.toast.show(this.t('toastUploadFailed', { title: e.clip.title }) + ` (${e.message})`, 'error', { notification: true });
       this.pushStatus();
       this.pushClips();
@@ -236,7 +244,7 @@ class KineApp {
     this.helper?.start();
     this.createTray();
     this.applyLoginItem();
-    initUpdater();
+    initUpdater({ variant: VARIANT, siteUrl: () => this.settings.get().siteUrl, gameRunning: () => !!this.games.current() });
 
     this.settings.onChange((s, prev) => this.onSettingsChanged(s, prev));
 
@@ -328,6 +336,8 @@ class KineApp {
 
     if (game && !prev) {
       this.sessionId = randomUUID();
+      // Web Kine v okně během hry spí (nehraje video, nežere procesor ani síť).
+      this.sleepKineView(true);
       if (s.detection === 'games' && !this.paused) {
         await this.capture.start().catch(() => undefined);
         announce(game);
@@ -340,6 +350,9 @@ class KineApp {
 
     if (!game && prev) {
       if (s.detection === 'games') await this.capture.stop().catch(() => undefined);
+      this.sleepKineView(false);
+      // Aktualizace, která vyšla během hry, se stáhne teď.
+      updaterGameEnded();
       await this.afterGame();
     }
     this.rebuildTray();
@@ -606,6 +619,11 @@ class KineApp {
       this.settingsWindow = null;
       this.destroyKineView();
     });
+    // Zmenšené okno = web Kine v něm nikdo nevidí - uspat (video, zvuk, běh na pozadí); po obnovení probrat.
+    win.on('minimize', () => this.sleepKineView(true));
+    win.on('hide', () => this.sleepKineView(true));
+    win.on('restore', () => this.sleepKineView(false));
+    win.on('show', () => this.sleepKineView(false));
     win.webContents.setWindowOpenHandler(({ url }) => {
       if (/^https?:/.test(url)) void shell.openExternal(url);
       return { action: 'deny' };
@@ -811,6 +829,7 @@ class KineApp {
     if (!this.kineViewShown && !this.kineViewFailed) {
       view.setVisible(true);
       this.kineViewShown = true;
+      this.sleepKineView(false);
     }
   }
 
@@ -818,6 +837,36 @@ class KineApp {
     this.kineViewWanted = false;
     if (this.kineView && !this.kineView.webContents.isDestroyed() && this.kineViewShown) this.kineView.setVisible(false);
     this.kineViewShown = false;
+    this.sleepKineView(true);
+  }
+
+  /** Nahraný klip na Kine: v Kine do PC v záložce Kine, v Kine Clipperu v prohlížeči. */
+  openClipOnKine(id: string): void {
+    const clip = this.library.get(id);
+    if (clip?.upload?.state === 'done') this.openKine(clip.upload.url.replace(this.settings.get().siteUrl, '') || '/');
+  }
+
+  /**
+   * Web Kine v okně, když ho nikdo nevidí (jiná záložka) nebo když běží
+   * hra: zastaví přehrávání a ztlumí se, ať nežere procesor, grafiku ani
+   * síť, které patří hře. Při návratu na záložku (a bez hry) se zas
+   * probere - video si hráč pustí sám.
+   */
+  private sleepKineView(sleep: boolean): void {
+    const view = this.kineView;
+    if (!view || view.webContents.isDestroyed()) return;
+    const wc = view.webContents;
+    // Během hry spí i viditelný web; bez hry se řídí tím, jestli je záložka Kine vidět.
+    const shouldSleep = sleep || !!this.games.current() || !this.kineViewShown;
+    try {
+      wc.setBackgroundThrottling(shouldSleep);
+      wc.setAudioMuted(shouldSleep);
+      if (shouldSleep && !wc.isLoading()) {
+        void wc.executeJavaScript(`document.querySelectorAll('video, audio').forEach((m) => { try { m.pause(); } catch (e) {} })`, true).catch(() => undefined);
+      }
+    } catch (e) {
+      log(`uspání webu v okně: ${(e as Error).message}`);
+    }
   }
 
   reloadKineView(): void {
@@ -1143,10 +1192,7 @@ class KineApp {
       this.uploader.enqueue(requests);
       this.pushStatus();
     });
-    ipcMain.handle('clips:openOnKine', (_e, id: string) => {
-      const clip = this.library.get(id);
-      if (clip?.upload?.state === 'done') this.openKine(clip.upload.url.replace(this.settings.get().siteUrl, '') || '/');
-    });
+    ipcMain.handle('clips:openOnKine', (_e, id: string) => this.openClipOnKine(id));
     ipcMain.handle('clips:openDir', () => shell.openPath(this.settings.clipsDir()));
     ipcMain.handle('clips:pickDir', async () => {
       const result = await dialog.showOpenDialog(this.settingsWindow ?? undefined!, {

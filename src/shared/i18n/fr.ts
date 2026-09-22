@@ -329,4 +329,13 @@ export const fr: Record<Key, string> = {
   gifReveal: 'Afficher dans le dossier',
   hotkeyPadHint: 'Marche aussi avec une manette Xbox (PlayStation via Steam) : le champ actif, maintiens les boutons de la manette. Windows seulement.',
   generalTitle: 'Général',
+  aboutUpdateErrorReason: 'Impossible de vérifier les mises à jour : {message}',
+  aboutUpdateManual: "La version {version} est sortie. Le téléchargement automatique n'est pas disponible pour l'instant - récupère-la sur Kine.",
+  aboutDownloadUpdate: 'Télécharger la version {version}',
+  aboutUpdateSource: 'Mises à jour depuis : {source}',
+  aboutUpdateWaitsGame: "La version {version} est disponible - elle se télécharge dès que tu arrêtes de jouer et s'installe à la fermeture.",
+  uploadDescription: "Clip de jeu enregistré avec Kine pour PC. L'appli : {url}",
+  uploadDescriptionGame: "Clip de {game}, enregistré avec Kine pour PC. L'appli : {url}",
+  reviewMerge: 'Fusionner la sélection en un clip',
+  reviewMergeHint: 'Une seule vidéo pour toute la session - le clip fusionné remplace les clips sélectionnés dans l’envoi.',
 };

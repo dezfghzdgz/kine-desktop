@@ -58,11 +58,18 @@ export class Toast {
    * Ukáže zprávu. `kind` řídí barvu proužku: ok = barva Kine, warn = žlutá,
    * error = červená. Systémové oznámení jde jen u zpráv, kde na tom záleží.
    */
-  async show(message: string, kind: 'ok' | 'warn' | 'error' = 'ok', options: { notification?: boolean; title?: string } = {}): Promise<void> {
+  async show(
+    message: string,
+    kind: 'ok' | 'warn' | 'error' = 'ok',
+    options: { notification?: boolean; title?: string; onClick?: () => void } = {}
+  ): Promise<void> {
     log(`toast: ${message}`);
     if (options.notification && Notification.isSupported()) {
       try {
-        new Notification({ title: options.title ?? 'Kine', body: message, silent: true }).show();
+        const n = new Notification({ title: options.title ?? 'Kine', body: message, silent: true });
+        // Klik na oznámení (třeba "Nahráno na Kine") otevře klip.
+        if (options.onClick) n.on('click', options.onClick);
+        n.show();
       } catch (e) {
         log(`oznámení: ${(e as Error).message}`);
       }

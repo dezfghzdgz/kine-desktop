@@ -329,4 +329,13 @@ export const pl: Record<Key, string> = {
   gifReveal: 'Pokaż w folderze',
   hotkeyPadHint: 'Działa też z kontrolerem Xbox (PlayStation przez Steam): gdy pole jest aktywne, przytrzymaj przyciski na kontrolerze. Tylko Windows.',
   generalTitle: 'Ogólne',
+  aboutUpdateErrorReason: 'Nie udało się sprawdzić aktualizacji: {message}',
+  aboutUpdateManual: 'Jest wersja {version}. Automatyczne pobranie teraz nie działa - pobierz ją z Kine.',
+  aboutDownloadUpdate: 'Pobierz wersję {version}',
+  aboutUpdateSource: 'Aktualizacje z: {source}',
+  aboutUpdateWaitsGame: 'Dostępna jest wersja {version} - pobierze się, gdy skończysz grać, i zainstaluje po zamknięciu aplikacji.',
+  uploadDescription: 'Klip z gry zapisany w Kine na PC. Pobierz aplikację: {url}',
+  uploadDescriptionGame: 'Klip z gry {game}, zapisany w Kine na PC. Pobierz aplikację: {url}',
+  reviewMerge: 'Połącz wybrane w jeden klip',
+  reviewMergeHint: 'Jedno wideo z całej sesji - połączony klip zastąpi wybrane w wysyłce.',
 };

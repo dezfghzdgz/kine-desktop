@@ -329,4 +329,13 @@ export const de: Record<Key, string> = {
   gifReveal: 'Im Ordner zeigen',
   hotkeyPadHint: 'Geht auch mit einem Xbox-Controller (PlayStation über Steam): Feld aktiv lassen und die Tasten am Controller halten. Nur Windows.',
   generalTitle: 'Allgemein',
+  aboutUpdateErrorReason: 'Updates konnten nicht geprüft werden: {message}',
+  aboutUpdateManual: 'Version {version} ist da. Der automatische Download geht gerade nicht - hol sie dir von Kine.',
+  aboutDownloadUpdate: 'Version {version} herunterladen',
+  aboutUpdateSource: 'Updates von: {source}',
+  aboutUpdateWaitsGame: 'Version {version} ist verfügbar - sie wird geladen, sobald du nicht mehr spielst, und beim Beenden installiert.',
+  uploadDescription: 'Spiel-Clip, gespeichert mit Kine für PC. App holen: {url}',
+  uploadDescriptionGame: 'Clip aus {game}, gespeichert mit Kine für PC. App holen: {url}',
+  reviewMerge: 'Ausgewählte zu einem Clip zusammenfügen',
+  reviewMergeHint: 'Ein Video aus der ganzen Session - der zusammengefügte Clip ersetzt die ausgewählten im Upload.',
 };

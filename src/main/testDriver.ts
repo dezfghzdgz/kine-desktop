@@ -79,6 +79,21 @@ export async function runTestDriver(kine: {
         result.reviewPicks = await rw.webContents.executeJavaScript(
           `(() => { const picks = [...document.querySelectorAll('.clip .thumb .pick')]; return picks.length > 0 && picks.every((p) => getComputedStyle(p).opacity === '1'); })()`
         );
+        // Sestřih z celého hraní: tlačítko spojí vybrané (oba klipy) do jednoho, ten zůstane vybraný k nahrání sám.
+        const knownIds = new Set(kine.library.list().map((c) => c.id));
+        const clicked = await rw.webContents.executeJavaScript(`(() => { const b = document.querySelector('.review-merge'); if (!b || b.disabled) return false; b.click(); return true; })()`);
+        let montage: any = null;
+        for (let i = 0; i < 120 && clicked && !montage; i++) {
+          await sleep(500);
+          montage = kine.library.list().find((c) => !knownIds.has(c.id) && /montage/i.test(c.title));
+        }
+        await sleep(800);
+        // Vybraný zůstane jen sestřih; karty drží výšku (3 klipy = 2 řádky, mřížka roluje, nemačká se).
+        const onlyMontageSelected = await rw.webContents.executeJavaScript(
+          `(() => { const sel = [...document.querySelectorAll('.clip.selected')]; const cards = [...document.querySelectorAll('.clip')]; return sel.length === 1 && !!document.querySelector('.state.done') && cards.length >= 3 && cards.every((c) => c.getBoundingClientRect().height > 250 && c.querySelector('.body .title-edit')); })()`
+        );
+        result.reviewMerge = clicked && !!montage && montage.sessionId === clip1.sessionId && onlyMontageSelected;
+        await shot(rw, 'review-merged');
       }
     }
     for (const tab of ['clips', 'settings', 'games', 'upload', 'account', 'about']) {
@@ -325,6 +340,8 @@ export async function runTestDriver(kine: {
       await sleep(1500);
       await shot(kine.settingsWindow, 'settings-kine');
       result.kineViewShown = (kine as any).kineViewShown === true && !!(kine as any).kineView;
+      // Web v okně je vidět a nehraje se → není uspaný (zvuk není ztlumený).
+      result.kineViewAwake = !!(kine as any).kineView && (kine as any).kineView.webContents.isAudioMuted() === false;
       // Záložka Kine je bez postranního panelu, jen s lištou dole (stav + Klipy + Nastavení).
       const kineWin = kine.settingsWindow;
       if (kineWin && !kineWin.isDestroyed()) {
@@ -339,6 +356,8 @@ export async function runTestDriver(kine: {
       kine.openSettings('clips');
       await sleep(600);
       result.kineViewHidden = (kine as any).kineViewShown === false;
+      // Schovaný web spí: ztlumený a s omezeným během na pozadí.
+      result.kineViewAsleep = !!(kine as any).kineView && (kine as any).kineView.webContents.isAudioMuted() === true;
     } else {
       // Kine Clipper: žádná záložka Kine, štítek "Clipper" u loga, v nastavení
       // panel "Tahle appka" s ikonou klipovače a odkazem na Kine do PC.
@@ -379,6 +398,20 @@ export async function runTestDriver(kine: {
       result.brandMarkSvg = await colorWin.webContents.executeJavaScript(`!!document.querySelector('.brand .mark svg') && getComputedStyle(document.documentElement).getPropertyValue('--brand').trim() === '#a34ff7'`);
     }
 
+    // O appce: "Zkontrolovat aktualizace" ukáže stav (při vývoji "dev"), ne jen chybu.
+    kine.openSettings('about');
+    await sleep(700);
+    const aboutWin = kine.settingsWindow;
+    if (aboutWin && !aboutWin.isDestroyed()) {
+      await aboutWin.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.panel button')].find((x) => /update/i.test(x.textContent)); if (b) b.click(); return !!b; })()`);
+      let shown = false;
+      for (let i = 0; i < 20 && !shown; i++) {
+        await sleep(250);
+        shown = await aboutWin.webContents.executeJavaScript(`!!document.querySelector('.update-status')`);
+      }
+      result.updateUi = shown;
+    }
+
     // Průvodce: výběr jazyka a režimu.
     kine.openSettings('wizard');
     await sleep(800);
@@ -391,10 +424,10 @@ export async function runTestDriver(kine: {
     }
     const common = [
       'inlinePlayer', 'gridUntouched', 'trimPanel', 'trimNewClip', 'trimReplace', 'vertical', 'verticalUi', 'autoClip', 'overlayClosed', 'filters',
-      'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks',
+      'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks', 'reviewMerge', 'updateUi',
       'colorPicker', 'brandIcon', 'brandMarkSvg',
     ];
-    const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineBar', 'kineBarBack', 'kineViewHidden'];
+    const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];
     result.failed = checks.filter((k) => result[k] !== true);
     result.ok = !!clip1 && !!clip2 && kine.capture.state === 'on' && (result.failed as string[]).length === 0 && result.brandColor === '#a34ff7';
   } catch (e) {

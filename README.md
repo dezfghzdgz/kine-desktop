@@ -17,7 +17,7 @@ Samostatný projekt vedle webu Kine (repo `Kine`). Web potřebuje
 ## Jak to funguje
 
 ```
-hra běží  ──►  GameWatcher (tasklist + okno v popředí + Steam + seznam her)
+hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v popředí + Steam + seznam her)
                     │
                     ▼
    skrytá stránka (Chromium getDisplayMedia + MediaRecorder, H.264)
@@ -61,7 +61,25 @@ hra běží  ──►  GameWatcher (tasklist + okno v popředí + Steam + sezna
   `http://127.0.0.1:<port>/link` nebo `kine://link?…`), nebo e-mail +
   heslo. Relace se ukládá zašifrovaná (`safeStorage`, na Windows DPAPI).
   Klíče k Supabase si appka bere z `/api/desktop/config` – nic není
-  zadrátované.
+  zadrátované. V režimu „Kine + klipy“ je přihlášení **společné s webem
+  v okně**: přihlásíš se v appce → web v okně dostane vlastní relaci
+  (`/connect/app?th=…`, stejný jednorázový token jako u `/connect`, jen
+  obráceně); přihlásíš se ve webu → appka si z jeho tokenu udělá svou
+  relaci. Odhlášení na jedné straně odhlásí i druhou. Obnovovací tokeny
+  se nesdílí (jsou jednorázové, sdílení by jednu stranu odhlásilo).
+- **Přehrávač a úpravy** (`src/renderer/player.ts`): klip se přehrává ve
+  vrstvě přes okno (mřížka pod ním se nehýbe). „Upravit“ rozbalí časovou
+  osu se dvěma úchyty, klávesy I/O nastaví začátek a konec, jde odstranit
+  zvuk; „Uložit jako nový klip“ nebo „Nahradit původní“ – řez dělá
+  `src/main/edit.ts` (ffmpeg, libx264 veryfast / libvpx u WebM), průběh
+  chodí do okna.
+- **Zátěž při hraní** je záměrně malá: pomocník pro Windows se bez
+  složených zkratek ptá jen jednou za sekundu (s nimi každých 30 ms, aby
+  neušel stisk), programy a okna čte přes Win32 API (`EnumProcesses`,
+  `QueryFullProcessImageName`, `EnumWindows`) místo `Get-Process`, a
+  appka díky tomu nespouští každých pár sekund `tasklist` ani `reg`.
+  Hlídání her jede jednou za 5 s. V nastavení kvality je tlačítko **Nízká
+  zátěž (720p)** – 720p / 30 fps / 5 Mb/s jedním klikem.
 
 ## Vývoj
 
@@ -110,8 +128,9 @@ src/main/        hlavní proces (Electron, Node)
   main.ts        tray, okna (nastavení/klipy, okýnko po hře, okno Kine), IPC, režimy
   capture.ts     zásobník: skrytá stránka → ffmpeg segmenty → klip
   segments.ts    čistá logika výběru kousků (test)
-  games.ts       hlídání her (tasklist, Steam, popředí), gamesParse.ts čistá část (test)
-  winHelper.ts   pomocník pro Windows (PowerShell): okno v popředí, okna procesů, stav kláves
+  games.ts       hlídání her (procesy, Steam, popředí), gamesParse.ts čistá část (test)
+  edit.ts        zkrácení / ztlumení klipu (ffmpeg), náhled k upravenému klipu
+  winHelper.ts   pomocník pro Windows (PowerShell + C# přes Add-Type): okno v popředí, procesy, okna, Steam, stav kláves
   hotkeys.ts     zkratky: systémové (Electron) + složené přes pomocníka
   clips.ts       knihovna klipů (index.json ve složce s klipy)
   uploader.ts    fronta nahrávání, pauza při hře (test), tus.ts klient (test)
@@ -119,8 +138,9 @@ src/main/        hlavní proces (Electron, Node)
   kineApi.ts     volání Kine (create-upload-url, confirm)
   settings.ts    nastavení (userData/settings.json), shared/settingsSchema.ts (test)
   toast.ts       okénko „Klip uložen“ v rohu
-src/renderer/    stránky oken: settings (klipy s přehrávačem a filtry, nastavení,
-                 průvodce), review (okýnko po hře), toast, capture (skrytá snímací)
+src/renderer/    stránky oken: settings (záložka Kine s lištou, klipy s filtry, nastavení,
+                 průvodce), player (přehrávač + úpravy klipu ve vrstvě), review
+                 (okýnko po hře), toast, capture (skrytá snímací)
 src/preload/     most window.kine / window.kineCapture
 src/shared/      typy, překlady (i18n/: en cs sk de pl es fr uk), názvy klipů, zkratky, plány
 ```

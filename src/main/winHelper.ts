@@ -42,6 +42,8 @@ type Listener = {
 const SCRIPT = String.raw`
 $ErrorActionPreference = 'SilentlyContinue'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+# Vsechno, co se pta Windows, je v C# (zkompiluje se jednou pri startu):
+# levne volani API misto Get-Process, ktery pro kazdy proces stavi objekty.
 Add-Type -Namespace KineWin -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
@@ -51,8 +53,50 @@ Add-Type -Namespace KineWin -Name Native -MemberDefinition @'
 [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
 [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr hWnd, System.Text.StringBuilder text, int count);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+[DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+[DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool QueryFullProcessImageNameW(IntPtr handle, uint flags, System.Text.StringBuilder name, ref uint size);
+[DllImport("psapi.dll")] public static extern bool EnumProcesses([Out] uint[] pids, uint size, out uint needed);
+public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 [StructLayout(LayoutKind.Sequential)] public struct MONITORINFO { public uint cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags; }
+
+/* Nazev programu (jen soubor, napr. "cs2.exe") - PROCESS_QUERY_LIMITED_INFORMATION staci i na procesy bezici jako spravce. */
+public static string ExeName(uint pid) {
+  if (pid == 0) return "";
+  IntPtr h = OpenProcess(0x1000, false, pid);
+  if (h == IntPtr.Zero) return "";
+  try {
+    System.Text.StringBuilder sb = new System.Text.StringBuilder(1024);
+    uint size = 1024;
+    if (!QueryFullProcessImageNameW(h, 0, sb, ref size)) return "";
+    string path = sb.ToString();
+    int i = path.LastIndexOfAny(new char[] { '\\', '/' });
+    return i >= 0 ? path.Substring(i + 1) : path;
+  } finally { CloseHandle(h); }
+}
+public static uint[] Pids() {
+  uint[] buf = new uint[8192];
+  uint needed = 0;
+  if (!EnumProcesses(buf, (uint)(buf.Length * 4), out needed)) return new uint[0];
+  int count = (int)(needed / 4);
+  uint[] result = new uint[count];
+  Array.Copy(buf, result, count);
+  return result;
+}
+/* Procesy, ktere maji viditelne okno nahore (misto MainWindowHandle, ktery prochazi okna pro kazdy proces zvlast). */
+public static uint[] WindowedPids() {
+  System.Collections.Generic.HashSet<uint> pids = new System.Collections.Generic.HashSet<uint>();
+  EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
+    if (IsWindowVisible(hWnd)) { uint p = 0; GetWindowThreadProcessId(hWnd, out p); if (p != 0) pids.Add(p); }
+    return true;
+  }, IntPtr.Zero);
+  uint[] result = new uint[pids.Count];
+  pids.CopyTo(result);
+  return result;
+}
 '@
 
 # Zkratky: "119;17,120" = F8 a Ctrl+F9 (virtual-key kody).
@@ -63,7 +107,19 @@ if ($env:KINE_HOTKEYS) {
   }
 }
 $wasDown = New-Object bool[] ([Math]::Max(1, $chords.Count))
+
+# Rychla smycka (30 ms) jen kdyz je co hlidat - kombinace klaves nebo tlacitka
+# mysi. Bez nich staci jedno kolo za sekundu; popredi se hlasi kazdou
+# sekundu, seznam procesu kazdych ~5 s. Setri to procesor pri hrani.
+$fast = $chords.Count -gt 0
+$sleepMs = 1000
+$fgEvery = 1
+$procEvery = 5
+if ($fast) { $sleepMs = 30; $fgEvery = 33; $procEvery = 166 }
 $tick = 0
+$lastPid = [uint32]0
+$lastExe = ''
+$names = @{}
 Write-Output '{"t":"ready"}'
 
 function KeyDown($vk) {
@@ -75,7 +131,7 @@ function KeyDown($vk) {
 
 while ($true) {
   try {
-    if ($chords.Count -gt 0) {
+    if ($fast) {
       $down = New-Object bool[] $chords.Count
       for ($i = 0; $i -lt $chords.Count; $i++) {
         $all = $true
@@ -100,12 +156,12 @@ while ($true) {
     }
 
     $tick++
-    if ($tick % 33 -eq 0) {
+    if ($tick % $fgEvery -eq 0) {
       $h = [KineWin.Native]::GetForegroundWindow()
       $fpid = [uint32]0
       [void][KineWin.Native]::GetWindowThreadProcessId($h, [ref]$fpid)
-      $exe = ''
-      try { $p = Get-Process -Id $fpid -ErrorAction Stop; $exe = $p.ProcessName } catch {}
+      # Nazev programu jen kdyz se zmenil proces v popredi - jinak z minula.
+      if ($fpid -ne $lastPid) { $lastPid = $fpid; $lastExe = [KineWin.Native]::ExeName($fpid) }
       $rect = New-Object KineWin.Native+RECT
       [void][KineWin.Native]::GetWindowRect($h, [ref]$rect)
       $mi = New-Object KineWin.Native+MONITORINFO
@@ -121,19 +177,37 @@ while ($true) {
       $fs = ($mw -gt 0) -and ($w -ge $mw) -and ($hh -ge $mh) -and (-not $caption)
       $sb = New-Object System.Text.StringBuilder 256
       [void][KineWin.Native]::GetWindowTextW($h, $sb, 256)
-      $o = @{ t = 'fg'; pid = [int]$fpid; exe = [string]$exe; title = $sb.ToString(); w = [int]$w; h = [int]$hh; fs = [bool]$fs }
+      $o = @{ t = 'fg'; pid = [int]$fpid; exe = [string]$lastExe; title = $sb.ToString(); w = [int]$w; h = [int]$hh; fs = [bool]$fs }
       Write-Output ($o | ConvertTo-Json -Compress)
     }
-    if ($tick % 500 -eq 1) {
-      # Seznam procesu s oknem je drazsi (stovky ms) - jen obcas, at neujde stisk klavesy.
-      $names = @(Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -ExpandProperty ProcessName -Unique)
-      $o = @{ t = 'win'; exes = [string[]]$names }
+    if ($tick % $procEvery -eq 1) {
+      # Bezici programy + ty s oknem + hra podle Steamu - jednou za ~5 s, vsechno
+      # z API (zadny tasklist ani Get-Process). Nazvy se pamatuji podle PID.
+      $pids = [KineWin.Native]::Pids()
+      $seen = @{}
+      $exes = New-Object System.Collections.Generic.HashSet[string]
+      foreach ($p in $pids) {
+        $seen[$p] = $true
+        if (-not $names.ContainsKey($p)) { $names[$p] = [KineWin.Native]::ExeName($p) }
+        $n = $names[$p]
+        if ($n) { [void]$exes.Add($n.ToLowerInvariant()) }
+      }
+      foreach ($k in @($names.Keys)) { if (-not $seen.ContainsKey($k)) { $names.Remove($k) } }
+      $win = New-Object System.Collections.Generic.HashSet[string]
+      foreach ($p in [KineWin.Native]::WindowedPids()) {
+        $n = $names[$p]
+        if (-not $n) { $n = [KineWin.Native]::ExeName($p) }
+        if ($n) { [void]$win.Add($n.ToLowerInvariant()) }
+      }
+      $steam = 0
+      try { $steam = [int](Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -Name RunningAppID -ErrorAction Stop).RunningAppID } catch {}
+      $o = @{ t = 'procs'; exes = [string[]]@($exes); win = [string[]]@($win); steam = $steam }
       Write-Output ($o | ConvertTo-Json -Compress)
     }
   } catch {
     Write-Output ('{"t":"err","m":' + (ConvertTo-Json ([string]$_)) + '}')
   }
-  Start-Sleep -Milliseconds 30
+  Start-Sleep -Milliseconds $sleepMs
 }
 `;
 
@@ -144,6 +218,10 @@ export class WinHelper {
   private listeners = new Set<Listener>();
   private lastForeground: ForegroundInfo | null = null;
   private windowed = new Set<string>();
+  /** Běžící programy a hra podle Steamu z pomocníka (jednou za ~5 s) - appka pak nemusí spouštět tasklist ani reg. */
+  private procs: Set<string> | null = null;
+  private procsAt = 0;
+  private steam = 0;
   private failures: number[] = [];
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = true;
@@ -174,6 +252,18 @@ export class WinHelper {
   /** Programy, které mají vlastní okno (malými písmeny s .exe). */
   windowedProcesses(): Set<string> {
     return this.windowed;
+  }
+
+  /** Všechny běžící programy podle pomocníka, nebo null, když je seznam starý či podezřele krátký (pak se ptá tasklist). */
+  processes(): Set<string> | null {
+    if (!this.procs || Date.now() - this.procsAt > 15000 || this.procs.size < 5) return null;
+    return this.procs;
+  }
+
+  /** RunningAppID Steamu z pomocníka (0 = žádná hra), nebo null, když pomocník nic čerstvého nemá. */
+  steamAppId(): number | null {
+    if (!this.procs || Date.now() - this.procsAt > 15000) return null;
+    return this.steam;
   }
 
   start(): void {
@@ -276,6 +366,11 @@ export class WinHelper {
   private setRunning(value: boolean): void {
     if (this.running === value) return;
     this.running = value;
+    if (!value) {
+      // Bez pomocníka se seznam procesů zase bere z tasklist.
+      this.procs = null;
+      this.lastForeground = null;
+    }
     for (const l of this.listeners) l.state?.(value);
   }
 
@@ -322,6 +417,16 @@ export class WinHelper {
       case 'win': {
         const list = Array.isArray(msg.exes) ? msg.exes : typeof msg.exes === 'string' ? [msg.exes] : [];
         this.windowed = new Set(list.map((x: unknown) => normalizeExe(x)).filter(Boolean));
+        for (const l of this.listeners) l.windows?.(this.windowed);
+        break;
+      }
+      case 'procs': {
+        // ConvertTo-Json dělá z jednoprvkového pole holý řetězec - proto obojí.
+        const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : typeof v === 'string' ? [v] : []);
+        this.procs = new Set(arr(msg.exes).map((x) => normalizeExe(x)).filter(Boolean));
+        this.procsAt = Date.now();
+        this.steam = Number.isInteger(msg.steam) ? Number(msg.steam) : 0;
+        this.windowed = new Set(arr(msg.win).map((x) => normalizeExe(x)).filter(Boolean));
         for (const l of this.listeners) l.windows?.(this.windowed);
         break;
       }

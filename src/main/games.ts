@@ -21,7 +21,7 @@ import { log } from './log';
 
 export type { DetectedGame } from './gamesParse';
 
-const POLL_MS = 4000;
+const POLL_MS = 5000;
 
 function run(cmd: string, args: string[], timeout = 8000): Promise<string> {
   return new Promise((resolve) => {
@@ -32,10 +32,15 @@ function run(cmd: string, args: string[], timeout = 8000): Promise<string> {
 }
 
 /**
- * Hlídá, jestli běží hra. Ptá se každé 4 sekundy - seznam procesů je
- * levný (desítky ms) a rychlejší reakce není potřeba: zásobník se
- * rozjede pár sekund po startu hry, hra sama nabíhá delší dobu. Když
- * se změní okno v popředí (pomocník na Windows), podívá se hned.
+ * Hlídá, jestli běží hra. Ptá se každých 5 sekund - rychlejší reakce
+ * není potřeba: zásobník se rozjede pár sekund po startu hry, hra sama
+ * nabíhá delší dobu. Když se změní okno v popředí (pomocník na Windows),
+ * podívá se hned.
+ *
+ * Na Windows s běžícím pomocníkem se seznam procesů i hra podle Steamu
+ * berou od něj (čte je levně přes API) - appka nespouští každé kolo
+ * tasklist a reg, což při hraní šetří procesor. Bez pomocníka (Linux,
+ * macOS, nebo když spadl) se spouští jako dřív.
  *
  * Běží vždycky, i když je zásobník na "pořád" nebo "ručně": podle něj se
  * pozastavuje nahrávání na Kine a pojmenovávají klipy.
@@ -133,6 +138,8 @@ export class GameWatcher {
 
   async processNames(): Promise<Set<string>> {
     if (process.platform === 'win32') {
+      const fromHelper = this.deps.helper?.processes();
+      if (fromHelper) return fromHelper;
       return parseTasklistCsv(await run('tasklist', ['/FO', 'CSV', '/NH']));
     }
     return parsePsList(await run('ps', ['-eo', 'comm=']));
@@ -156,6 +163,8 @@ export class GameWatcher {
 
   private async steamRunningAppId(): Promise<number> {
     if (process.platform === 'win32') {
+      const fromHelper = this.deps.helper?.steamAppId();
+      if (fromHelper !== null && fromHelper !== undefined) return fromHelper;
       return parseSteamRunningAppId(await run('reg', ['query', 'HKCU\\Software\\Valve\\Steam', '/v', 'RunningAppID']));
     }
     // Linux/macOS: registry.vdf u uživatele.

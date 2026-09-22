@@ -35,6 +35,9 @@ const kine = {
   openClipsDir: (): Promise<string> => ipcRenderer.invoke('clips:openDir'),
   pickClipsDir: (): Promise<string | null> => ipcRenderer.invoke('clips:pickDir'),
   clipNow: (): Promise<Clip | null> => ipcRenderer.invoke('clips:clipNow'),
+  /** Zkrácení / ztlumení klipu; 'new' = nový klip vedle, 'replace' = přepsat původní. */
+  trimClip: (id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace' }): Promise<Clip> => ipcRenderer.invoke('clips:trim', id, opts),
+  onTrimProgress: (cb: (p: { id: string; percent: number }) => void) => on<{ id: string; percent: number }>('clips:trimProgress', cb),
   toggleCapture: (): Promise<void> => ipcRenderer.invoke('capture:toggle'),
 
   loginBrowser: (): Promise<void> => ipcRenderer.invoke('auth:loginBrowser'),

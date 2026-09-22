@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
+import { basename, dirname, extname, join } from 'node:path';
 import {
   BrowserWindow,
   Menu,
@@ -36,6 +37,7 @@ import { Toast } from './toast';
 import { checkForUpdates, initUpdater } from './updater';
 import { runTestDriver } from './testDriver';
 import { WinHelper } from './winHelper';
+import { makeThumbnail, trimClip } from './edit';
 import { HotkeyManager, type HotkeyId, type HotkeyReason } from './hotkeys';
 
 /**
@@ -90,6 +92,11 @@ class KineApp {
   /** Web se nenačetl (bez internetu) - pod ním zůstane náš text s tlačítkem Obnovit. */
   kineViewFailed = false;
   pendingKinePath: string | null = null;
+  /** Srovnávání přihlášení appka <-> web v okně (jen jedno naráz, s odstupem po neúspěchu). */
+  loginSyncBusy = false;
+  loginSyncNextAt = 0;
+  /** Kdo byl naposledy přihlášený ve webu v okně (id uživatele) - podle toho se pozná odhlášení nebo změna účtu. */
+  lastWebUser: string | null | undefined = undefined;
   /** Aktuální "hraní": všechny klipy z něj se po hře nabídnou naráz. */
   sessionId = randomUUID();
   paused = false;
@@ -195,6 +202,8 @@ class KineApp {
       if (color && color !== this.settings.get().brandColor) this.settings.update({ brandColor: color });
       this.pushStatus();
       this.rebuildTray();
+      // Přihlásil se v appce -> ať je přihlášený i web v okně.
+      if (account && this.kineView && !this.kineView.webContents.isDestroyed()) void this.syncLogin(this.kineView);
     });
 
     this.installDisplayMediaHandler();
@@ -218,6 +227,11 @@ class KineApp {
     setInterval(() => {
       if (this.uploader.pending() > 0) this.uploader.kick();
     }, 30000);
+    // Pojistka pro sdílené přihlášení: web v okně se občas zkontroluje, i když
+    // žádný přechod stránky nepřišel (přihlášení přes okno třetí strany apod.).
+    setInterval(() => {
+      if (this.kineViewShown && this.kineView && !this.kineView.webContents.isDestroyed()) void this.syncLogin(this.kineView);
+    }, 15000);
     // Plán (předplatné) a barva se občas srovnají podle Kine - když Klipy
     // Plus vyprší, automatické nahrávání se samo vrátí na ruční.
     setInterval(() => void this.auth.refresh(), 6 * 60 * 60 * 1000);
@@ -643,6 +657,11 @@ class KineApp {
         view.setVisible(true);
         this.kineViewShown = true;
       }
+      void this.syncLogin(view);
+    });
+    // Přihlášení/odhlášení na webu je přechod uvnitř stránky (Next.js), ne nové načtení.
+    view.webContents.on('did-navigate-in-page', (_e, _url, isMainFrame) => {
+      if (isMainFrame) void this.syncLogin(view);
     });
     win.contentView.addChildView(view);
     view.setVisible(false);
@@ -652,6 +671,72 @@ class KineApp {
     void view.webContents.loadURL(s.siteUrl + (path ? (path.startsWith('/') ? path : `/${path}`) : ''));
     this.kineView = view;
     return view;
+  }
+
+  /**
+   * Jedno přihlášení pro appku i web v okně. Appka přihlášená, web ne ->
+   * web dostane jednorázový token a přihlásí se (/connect/app). Web
+   * přihlášený, appka ne -> appka si z jeho tokenu udělá vlastní relaci.
+   * Každá strana má svou relaci; nic se nesdílí, nic se navzájem neodhlašuje.
+   */
+  private async syncLogin(view: WebContentsView): Promise<void> {
+    if (this.loginSyncBusy || Date.now() < this.loginSyncNextAt) return;
+    if (view.webContents.isDestroyed() || view.webContents.isLoading() || !this.isKineUrl(view.webContents.getURL())) return;
+    // Stránka /connect/app se právě přihlašuje - nechat ji dokončit.
+    if (new URL(view.webContents.getURL()).pathname.startsWith('/connect/app')) return;
+    this.loginSyncBusy = true;
+    try {
+      const web = (await view.webContents.executeJavaScript(
+        `(() => { try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith('sb-') && k.endsWith('-auth-token')) { const v = JSON.parse(localStorage.getItem(k) || 'null'); return v && v.access_token ? { token: v.access_token, user: (v.user && v.user.id) || null } : null; } } } catch (e) {} return null; })()`,
+        true
+      )) as { token: string; user: string | null } | null;
+      const account = this.auth.current();
+      const webUser = web?.user ?? null;
+      const webBefore = this.lastWebUser;
+      this.lastWebUser = webUser;
+
+      if (account && !web) {
+        if (webBefore) {
+          // Web v okně se odhlásil (dřív tam relace byla) - odhlásí se i appka.
+          log('přihlášení: web v okně se odhlásil -> odhlašuje se i appka');
+          await this.auth.logout();
+        } else {
+          // Web relaci nikdy neměl - dostane ji od appky (jednorázový token, vlastní relace).
+          const th = await this.auth.webLinkToken();
+          if (!th) throw new Error('no web token');
+          const current = new URL(view.webContents.getURL());
+          const next = current.pathname.startsWith('/connect') || current.pathname.startsWith('/login') ? '/' : current.pathname + current.search;
+          log('přihlášení: appka -> web v okně');
+          // Kdyby se to z jakéhokoli důvodu nepovedlo, nezkoušet to dokola.
+          this.loginSyncNextAt = Date.now() + 120000;
+          await view.webContents.loadURL(`${this.settings.get().siteUrl}/connect/app?th=${encodeURIComponent(th)}&next=${encodeURIComponent(next)}`);
+        }
+      } else if (!account && web?.token) {
+        log('přihlášení: web v okně -> appka');
+        await this.auth.loginFromWebToken(web.token);
+      } else if (account && web?.token && webUser && webUser !== account.userId && webBefore === account.userId) {
+        // Hráč se ve webu přepnul na jiný účet - appka jde s ním.
+        log('přihlášení: web v okně změnil účet -> appka ho následuje');
+        await this.auth.logout();
+        await this.auth.loginFromWebToken(web.token);
+      }
+    } catch (e) {
+      log(`srovnání přihlášení: ${(e as Error).message}`);
+      this.loginSyncNextAt = Date.now() + 60000;
+    } finally {
+      this.loginSyncBusy = false;
+    }
+  }
+
+  /** Odhlášení v appce odhlásí i web v okně (jeho relace se smaže). */
+  private async clearWebLogin(): Promise<void> {
+    this.lastWebUser = null;
+    try {
+      await session.fromPartition('persist:kine-web').clearStorageData({ storages: ['localstorage', 'cookies', 'indexdb'] });
+      if (this.kineView && !this.kineView.webContents.isDestroyed()) void this.kineView.webContents.loadURL(this.settings.get().siteUrl);
+    } catch (e) {
+      log(`odhlášení webu: ${(e as Error).message}`);
+    }
   }
 
   /** Stránka řekne, kde má web ležet (obdélník obsahu v okně, v DIP). */
@@ -755,6 +840,105 @@ class KineApp {
     this.broadcast('clips', this.library.list());
   }
 
+  /**
+   * Zkrácení / ztlumení klipu (edit.ts). Buď nový klip vedle původního,
+   * nebo přepsání původního (ten se nejdřív zapíše bokem a pak přejmenuje,
+   * ať při chybě nezůstane rozbitý soubor). Průběh chodí oknům jako
+   * "clips:trimProgress".
+   */
+  async trimClip(id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace' }): Promise<Clip> {
+    const clip = this.library.get(id);
+    if (!clip) throw new Error('clip not found');
+    const s = this.settings.get();
+    const ext = extname(clip.file) || '.mp4';
+    const dir = dirname(clip.file);
+    const stem = basename(clip.file, ext);
+    const progress = (percent: number) => this.broadcast('clips:trimProgress', { id, percent });
+    // Konec nejdál na konci klipu (když délku neznáme, věří se stránce).
+    const total = clip.durationSeconds > 0 ? clip.durationSeconds : Infinity;
+    const options = {
+      start: Math.max(0, Number(opts.start) || 0),
+      end: Math.min(total, Number(opts.end) || total),
+      mute: Boolean(opts.mute),
+      videoMbps: s.videoMbps,
+    };
+    if (!Number.isFinite(options.end)) throw new Error('unknown length');
+    if (options.end - options.start < 0.2) throw new Error('too-short');
+    const thumbsDir = join(app.getPath('userData'), 'thumbs');
+
+    if (opts.mode === 'replace') {
+      const tmp = join(dir, `${stem}.upravuje-se${ext}`);
+      const result = await trimClip(clip.file, tmp, options, progress);
+      // Původní soubor může chvíli držet přehrávač - zkusit víckrát.
+      let lastError: Error | null = null;
+      for (let i = 0; i < 10; i++) {
+        try {
+          renameSync(tmp, clip.file);
+          lastError = null;
+          break;
+        } catch (e) {
+          lastError = e as Error;
+          await new Promise((r) => setTimeout(r, 300));
+        }
+      }
+      if (lastError) {
+        try {
+          unlinkSync(tmp);
+        } catch {
+          // nechat být
+        }
+        throw new Error(`replace failed: ${lastError.message}`);
+      }
+      // Nový název náhledu - stejný by okno drželo v mezipaměti a ukazovalo starý snímek.
+      mkdirSync(thumbsDir, { recursive: true });
+      const thumb = join(thumbsDir, `${stem}-${Date.now().toString(36)}.jpg`);
+      const thumbOk = await makeThumbnail(clip.file, thumb);
+      if (thumbOk && clip.thumb && clip.thumb !== thumb) {
+        try {
+          unlinkSync(clip.thumb);
+        } catch {
+          // starý náhled už není
+        }
+      }
+      const updated = this.library.update(id, {
+        thumb: thumbOk ? thumb : clip.thumb,
+        durationSeconds: result.durationSeconds,
+        sizeBytes: result.sizeBytes,
+        width: result.width,
+        height: result.height,
+        // Obsah je jiný než ten na Kine - nahrání začíná znovu.
+        upload: null,
+      });
+      log(`klip zkrácen (přepsán): ${clip.file} (${result.durationSeconds.toFixed(1)} s)`);
+      return updated!;
+    }
+
+    const suffix = this.t('clipEditedSuffix');
+    let out = join(dir, `${stem} (${suffix})${ext}`);
+    for (let n = 2; existsSync(out); n++) out = join(dir, `${stem} (${suffix} ${n})${ext}`);
+    const result = await trimClip(clip.file, out, options, progress);
+    mkdirSync(thumbsDir, { recursive: true });
+    const thumb = join(thumbsDir, `${basename(out, ext)}.jpg`);
+    const thumbOk = await makeThumbnail(out, thumb);
+    const created = new Date(new Date(clip.createdAt).getTime() + 1000);
+    const newClip: Clip = {
+      ...clip,
+      id: randomUUID(),
+      file: out,
+      thumb: thumbOk ? thumb : null,
+      title: `${clip.title} (${suffix})`.slice(0, 150),
+      createdAt: created.toISOString(),
+      durationSeconds: result.durationSeconds,
+      sizeBytes: result.sizeBytes,
+      width: result.width,
+      height: result.height,
+      upload: null,
+    };
+    this.library.add(newClip);
+    log(`klip zkrácen (nový): ${out} (${result.durationSeconds.toFixed(1)} s)`);
+    return newClip;
+  }
+
   // ---- IPC ---------------------------------------------------------------------
 
   private registerIpc(): void {
@@ -812,6 +996,7 @@ class KineApp {
       return result.filePaths[0];
     });
     ipcMain.handle('clips:clipNow', () => this.onClipHotkey());
+    ipcMain.handle('clips:trim', (_e, id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace' }) => this.trimClip(id, opts));
 
     ipcMain.handle('auth:loginBrowser', async () => {
       this.browserLoginWaiting = true;
@@ -825,7 +1010,10 @@ class KineApp {
     });
     ipcMain.handle('auth:cancelBrowser', () => this.auth.cancelBrowserLogin());
     ipcMain.handle('auth:loginPassword', (_e, email: string, password: string) => this.auth.loginWithPassword(email, password));
-    ipcMain.handle('auth:logout', () => this.auth.logout());
+    ipcMain.handle('auth:logout', async () => {
+      await this.auth.logout();
+      await this.clearWebLogin();
+    });
     ipcMain.handle('auth:refresh', () => this.auth.refresh());
 
     ipcMain.handle('games:listProcesses', () => this.games.listProcesses());

@@ -5,18 +5,22 @@ import { LANG_NAMES, makeT, type Key } from '../shared/i18n';
 import { HotkeyRecorder, formatHotkey, hotkeyLabel } from '../shared/hotkeys';
 import { suggestedMbps } from '../shared/settingsSchema';
 import { applyBrandColor, clipOptionsFor, maxClipSecondsFor } from '../shared/plan';
-import { clear, clipMeta, errorText, fileUrl, formatDate, formatDuration, h, inlinePlayer } from './ui';
+import { clear, clipMeta, errorText, fileUrl, formatDate, formatDuration, h } from './ui';
+import { closePlayer, openPlayer, openPlayerId, type PlayerHandle } from './player';
 
 /**
- * Hlavní okno: v režimu "Kine + klipy" první záložka Kine (web Kine
- * vložený do okna - hlavní proces ho položí přes plochu, kterou mu tahle
- * stránka nahlásí), pak klipy, nastavení, hry, nahrávání, účet, o appce
- * + průvodce při prvním spuštění.
+ * Hlavní okno: v režimu "Kine + klipy" první záložka Kine - web Kine přes
+ * celé okno (hlavní proces ho položí přes plochu, kterou mu tahle stránka
+ * nahlásí), bez postranního panelu, jen s úzkou lištou dole (stav
+ * nahrávání, tlačítka Klipy a Nastavení). Ostatní záložky (klipy,
+ * nastavení, hry, nahrávání, účet, o appce) mají postranní panel s Kine
+ * jako první položkou. Při prvním spuštění průvodce.
  *
  * Bez knihovny pro UI: stránka se po každé změně vykreslí znovu z dat
  * (settings, status, clips). Změny se ukládají hned, žádné "Uložit".
- * Přehrávač klipu žije ve stejném okně - karta se roztáhne a hraje.
- * Pětkrát klik na logo Kine = výběr barvy appky (jako na webu).
+ * Přehrávač klipu je vrstva přes okno (player.ts) - mřížka pod ním se
+ * nehýbe; tam se klip i zkracuje. Pětkrát klik na logo Kine = výběr
+ * barvy appky (jako na webu).
  */
 declare const window: Window & { kine: KineBridge };
 const kine = window.kine;
@@ -50,8 +54,7 @@ let renaming: string | null = null;
 let editingGame: string | null = null;
 let addGameOpen = false;
 let namingGame = false;
-let playing: string | null = null;
-const players = new Map<string, HTMLElement>();
+let player: PlayerHandle | null = null;
 const filters: { game: string; date: DateFilter; query: string } = { game: 'all', date: 'all', query: '' };
 let focusSearch = false;
 let colorPickerOpen = false;
@@ -90,7 +93,8 @@ async function init() {
   });
   kine.onClips((c) => {
     clips = c;
-    if (playing && !clips.some((x) => x.id === playing)) playing = null;
+    // Přehrávač je mimo mřížku - jen mu říct, co se s klipem stalo (název, smazání).
+    player?.sync(clips);
     scheduleRender();
     void refreshGameNames();
   });
@@ -353,11 +357,14 @@ function render() {
     syncKineView();
     return;
   }
+  // Záložka Kine: web přes celé okno + úzká lišta dole, žádný postranní panel
+  // (web má svůj vlastní - dva vedle sebe byly matoucí).
   const newMain =
     tab === 'kine'
-      ? h('div', { class: 'main kine' }, renderKineTab())
+      ? h('div', { class: 'main kine' }, renderKineTab(), renderKineBar())
       : h('div', { class: 'main' }, h('div', { class: `page ${tab === 'clips' ? 'wide' : ''}` }, renderTab()));
-  app.append(renderSide(), newMain);
+  if (tab !== 'kine') app.append(renderSide());
+  app.append(newMain);
   newMain.scrollTop = scrollTop;
   syncKineView();
   if (searchHadFocus && tab === 'clips') {
@@ -372,6 +379,11 @@ function render() {
 
 function clipsPlus(): boolean {
   return status.account?.clipsPlus === true;
+}
+
+/** Je zapnuté úsporné nastavení (720p / 30 fps / 5 Mb/s)? */
+function lowLoadActive(): boolean {
+  return settings.maxHeight === 720 && settings.fps === 30 && settings.videoMbps <= 5;
 }
 
 function maxClip(): number {
@@ -428,6 +440,31 @@ function renderSide() {
       ...status.hotkeyProblems.map((p) => h('div', { class: 'warn' }, p)),
       h('div', {}, status.account ? `@${status.account.username}` : t('trayNotLoggedIn'))
     )
+  );
+}
+
+/**
+ * Lišta pod webem Kine: stav nahrávání (tečka + text), nahrávání na Kine,
+ * potíže se zkratkami a dvě tlačítka zpátky do appky - Klipy (s počtem)
+ * a Nastavení. Nic víc; zbytek okna patří webu.
+ */
+function renderKineBar() {
+  const st = statusText();
+  const go = (target: Tab) => () => {
+    tab = target;
+    render();
+  };
+  return h(
+    'div',
+    { class: 'kine-bar' },
+    h('span', { class: 'bar-status' }, h('span', { class: `dot ${st.cls}` }), h('b', {}, st.text)),
+    status.uploadsPending > 0
+      ? h('span', { class: 'bar-item' }, status.uploadsPaused ? t('trayUploadsPaused', { count: status.uploadsPending }) : t('trayUploads', { count: status.uploadsPending }))
+      : null,
+    ...status.hotkeyProblems.map((p) => h('span', { class: 'bar-item warn', title: p }, '⚠ ', p)),
+    h('span', { class: 'grow' }),
+    h('button', { class: 'small quiet', onclick: go('clips') }, clips.length > 0 ? t('barClipsCount', { count: clips.length }) : t('tabClips')),
+    h('button', { class: 'small quiet', onclick: go('settings') }, t('tabSettings'))
   );
 }
 
@@ -644,7 +681,22 @@ function renderSettings() {
     h(
       'div',
       { class: 'panel stack' },
-      h('h2', {}, t('qualityTitle')),
+      h(
+        'div',
+        { class: 'spread' },
+        h('h2', { style: 'margin:0' }, t('qualityTitle')),
+        // Jedním klikem nejúspornější nastavení - pro slabší PC nebo když hra při nahrávání trhá.
+        h(
+          'button',
+          {
+            class: `small ${lowLoadActive() ? 'quiet' : ''}`,
+            disabled: lowLoadActive(),
+            onclick: () => update({ maxHeight: 720, fps: 30, videoMbps: 5 }),
+          },
+          '🍃 ' + t('lowLoadPreset')
+        )
+      ),
+      h('p', { class: 'hint', style: 'margin-top:-4px' }, t('lowLoadHint')),
       h(
         'div',
         { class: 'row' },
@@ -984,34 +1036,22 @@ function filteredClips(): Clip[] {
   });
 }
 
-function togglePlay(clip: Clip) {
-  if (playing === clip.id) {
-    playing = null;
-  } else {
-    playing = clip.id;
-    players.clear();
-  }
-  render();
-}
-
-function playerFor(clip: Clip): HTMLElement {
-  // Stejný prvek <video> přežije překreslení - jinak by se video po každé změně stavu rozjelo od začátku.
-  let el = players.get(clip.id);
-  if (!el) {
-    el = inlinePlayer(
-      clip,
-      { close: t('playerClose'), error: (m) => t('playerError', { message: m }), openExternal: t('playerOpenExternal') },
-      () => {
-        playing = null;
-        players.clear();
-        render();
-      },
-      () => void kine.openClip(clip.id),
-      (m) => void kine.log(m)
-    );
-    players.set(clip.id, el);
-  }
-  return el;
+/** Přehrávač jako vrstva přes okno (player.ts); mřížka pod ním zůstává, jak je. */
+function showClip(clip: Clip, edit = false) {
+  player = openPlayer({
+    clip,
+    t,
+    startEditing: edit,
+    onOpenExternal: (c) => void kine.openClip(c.id),
+    onLog: (m) => void kine.log(m),
+    onClose: () => {
+      player = null;
+    },
+    edit: {
+      run: (c, request) => kine.trimClip(c.id, request),
+      onProgress: (cb) => kine.onTrimProgress(cb),
+    },
+  });
 }
 
 function gameChip(clip: Clip) {
@@ -1129,9 +1169,9 @@ function renderClips() {
   const grid = h('div', { class: 'clips' });
   for (const clip of list) {
     const canUpload = !clip.upload || clip.upload.state === 'error';
-    const isPlaying = playing === clip.id;
     const actions = h('div', { class: 'actions' });
-    actions.append(h('button', { class: `small ${isPlaying ? 'quiet' : ''}`, onclick: () => togglePlay(clip) }, isPlaying ? t('playerClose') : '▶ ' + t('libraryOpen')));
+    actions.append(h('button', { class: 'small', onclick: () => showClip(clip) }, '▶ ' + t('libraryOpen')));
+    actions.append(h('button', { class: 'small quiet', onclick: () => showClip(clip, true) }, '✂ ' + t('libraryEdit')));
     if (canUpload) {
       actions.append(
         h(
@@ -1151,7 +1191,7 @@ function renderClips() {
     actions.append(
       h('button', { class: 'small quiet', onclick: () => { renaming = clip.id; render(); } }, t('libraryRename')),
       confirmDelete === clip.id
-        ? h('button', { class: 'small danger', onclick: () => { confirmDelete = null; if (playing === clip.id) playing = null; void kine.deleteClip(clip.id); } }, t('libraryDeleteConfirm'))
+        ? h('button', { class: 'small danger', onclick: () => { confirmDelete = null; if (openPlayerId() === clip.id) closePlayer(); void kine.deleteClip(clip.id); } }, t('libraryDeleteConfirm'))
         : h('button', { class: 'small quiet danger', onclick: () => { confirmDelete = clip.id; render(); setTimeout(() => { if (confirmDelete === clip.id) { confirmDelete = null; render(); } }, 4000); } }, t('libraryDelete'))
     );
 
@@ -1181,34 +1221,29 @@ function renderClips() {
           })
         : h('div', { class: 'title', title: clip.title }, clip.title);
 
-    // Při přehrávání je název v liště přehrávače - v těle karty by byl dvakrát.
     const body = h(
       'div',
       { class: 'body' },
-      isPlaying && renaming !== clip.id ? null : titleEl,
+      titleEl,
       h('div', { class: 'row', style: 'gap:8px' }, gameChip(clip), h('span', { class: 'meta' }, clipMeta(clip, settings.lang))),
       uploadState(clip),
       actions
     );
 
-    if (isPlaying) {
-      grid.append(h('div', { class: 'clip playing' }, playerFor(clip), body));
-    } else {
-      grid.append(
+    grid.append(
+      h(
+        'div',
+        { class: 'clip' },
         h(
           'div',
-          { class: 'clip' },
-          h(
-            'div',
-            { class: 'thumb', onclick: () => togglePlay(clip) },
-            clip.thumb ? h('img', { src: fileUrl(clip.thumb), alt: '' }) : null,
-            h('span', { class: 'play-badge' }, '▶'),
-            h('span', { class: 'dur' }, formatDuration(clip.durationSeconds))
-          ),
-          body
-        )
-      );
-    }
+          { class: 'thumb', onclick: () => showClip(clip) },
+          clip.thumb ? h('img', { src: fileUrl(clip.thumb), alt: '' }) : null,
+          h('span', { class: 'play-badge' }, '▶'),
+          h('span', { class: 'dur' }, formatDuration(clip.durationSeconds))
+        ),
+        body
+      )
+    );
     if (renaming === clip.id) setTimeout(() => (titleEl as HTMLInputElement).focus?.(), 0);
   }
   container.append(grid);

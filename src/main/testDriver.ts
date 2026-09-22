@@ -76,22 +76,70 @@ export async function runTestDriver(kine: {
       await shot(kine.settingsWindow, `settings-${tab}`);
     }
 
-    // Přehrávač přímo v okně: klik na náhled prvního klipu roztáhne kartu
-    // a <video> se musí načíst (žádné nové okno).
+    // Přehrávač jako vrstva přes okno: klik na náhled prvního klipu otevře
+    // .overlay s <video> (mřížka pod ním zůstává - žádná karta se neroztahuje).
     kine.openSettings('clips');
     await sleep(700);
     const win = kine.settingsWindow;
     if (win && !win.isDestroyed()) {
+      const gridBefore = await win.webContents.executeJavaScript(`[...document.querySelectorAll('.clips .clip')].map((c) => c.getBoundingClientRect().top + ':' + c.getBoundingClientRect().left).join('|')`);
       await win.webContents.executeJavaScript(`(() => { const t = document.querySelector('.clip .thumb'); if (t) t.click(); return !!t; })()`);
       let videoOk = false;
       for (let i = 0; i < 20 && !videoOk; i++) {
         await sleep(300);
         videoOk = await win.webContents.executeJavaScript(
-          `(() => { const v = document.querySelector('.clip.playing video'); return !!v && v.readyState >= 1 && v.videoWidth > 0; })()`
+          `(() => { const v = document.querySelector('.overlay .player-box video'); return !!v && v.readyState >= 1 && v.videoWidth > 0; })()`
         );
       }
       result.inlinePlayer = videoOk;
+      const gridAfter = await win.webContents.executeJavaScript(`[...document.querySelectorAll('.clips .clip')].map((c) => c.getBoundingClientRect().top + ':' + c.getBoundingClientRect().left).join('|')`);
+      result.gridUntouched = gridBefore === gridAfter && !(await win.webContents.executeJavaScript(`!!document.querySelector('.clip.playing')`));
       await shot(win, 'settings-clips-player');
+
+      // Úpravy: tlačítko Upravit rozbalí osu, I/O nastaví začátek a konec
+      // podle přehrávání, "Uložit jako nový klip" vyrobí další klip.
+      const countBefore = kine.library.list().length;
+      await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head button')].find((x) => !x.disabled && x.textContent && !x.classList.contains('player-close')); if (b) b.click(); return !!b; })()`);
+      await sleep(400);
+      result.trimPanel = await win.webContents.executeJavaScript(`!!document.querySelector('.player-box.editing .trim:not(.hidden) .tl-handle.start')`);
+      await win.webContents.executeJavaScript(
+        `(() => { const v = document.querySelector('.overlay video'); v.pause(); v.currentTime = 1; return true; })()`
+      );
+      await sleep(400);
+      await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'i', bubbles: true }))`);
+      await win.webContents.executeJavaScript(`(() => { const v = document.querySelector('.overlay video'); v.currentTime = Math.min(v.duration - 0.1, 3); return true; })()`);
+      await sleep(400);
+      await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'o', bubbles: true }))`);
+      await sleep(200);
+      result.trimValues = await win.webContents.executeJavaScript(`[...document.querySelectorAll('.trim-vals b')].map((b) => b.textContent).join(' ')`);
+      await shot(win, 'settings-clips-trim');
+      await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.trim-actions button')][0]; if (b && !b.disabled) b.click(); return !!b && !b.disabled; })()`);
+      let trimmed = false;
+      for (let i = 0; i < 60 && !trimmed; i++) {
+        await sleep(500);
+        trimmed = kine.library.list().length === countBefore + 1;
+      }
+      const trimmedClip = kine.library.list().find((c) => /\(edited\)/.test(c.title));
+      result.trimNewClip = trimmed && !!trimmedClip && trimmedClip.durationSeconds > 1 && trimmedClip.durationSeconds < 3.5;
+      result.trimDuration = trimmedClip?.durationSeconds;
+      await sleep(600);
+      await shot(win, 'settings-clips-trimmed');
+      // Escape zavře vrstvu.
+      await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await sleep(300);
+      result.overlayClosed = !(await win.webContents.executeJavaScript(`!!document.querySelector('.overlay')`));
+
+      // Přepsání původního klipu (bez zvuku): stejný soubor, kratší, nový náhled.
+      if (clip2) {
+        // Kopie - knihovna vrací živé objekty a update je mění na místě.
+        const found = kine.library.list().find((c) => c.id === clip2.id);
+        const before = found ? { ...found } : null;
+        const replaced = await (kine as any).trimClip(clip2.id, { start: 0.5, end: 2.5, mute: true, mode: 'replace' });
+        result.trimReplace =
+          !!before && replaced.file === before.file && replaced.durationSeconds > 1.5 && replaced.durationSeconds < 2.6 && !!replaced.thumb && replaced.thumb !== before.thumb && replaced.upload === null;
+        result.trimReplaceDuration = replaced.durationSeconds;
+      }
+
       // Filtr podle hry a hledání nerozbijí stránku.
       const filterOk = await win.webContents.executeJavaScript(
         `(() => { const s = document.querySelector('.filters select'); if (!s) return false; s.value = 'none'; s.dispatchEvent(new Event('change')); return document.querySelectorAll('.clips .clip').length > 0; })()`
@@ -104,6 +152,17 @@ export async function runTestDriver(kine: {
     await sleep(1500);
     await shot(kine.settingsWindow, 'settings-kine');
     result.kineViewShown = (kine as any).kineViewShown === true && !!(kine as any).kineView;
+    // Záložka Kine je bez postranního panelu, jen s lištou dole (stav + Klipy + Nastavení).
+    const kineWin = kine.settingsWindow;
+    if (kineWin && !kineWin.isDestroyed()) {
+      result.kineBar = await kineWin.webContents.executeJavaScript(
+        `(() => { const bar = document.querySelector('.kine-bar'); return !!bar && !document.querySelector('.side') && bar.querySelectorAll('button').length === 2 && document.querySelector('.kine-host').getBoundingClientRect().left === 0; })()`
+      );
+      // Tlačítko Klipy v liště vede zpátky na klipy (a panel se vrátí).
+      await kineWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.kine-bar button'); if (b) b.click(); return !!b; })()`);
+      await sleep(500);
+      result.kineBarBack = await kineWin.webContents.executeJavaScript(`!!document.querySelector('.side') && !!document.querySelector('.clips')`);
+    }
     kine.openSettings('clips');
     await sleep(600);
     result.kineViewHidden = (kine as any).kineViewShown === false;
@@ -130,7 +189,9 @@ export async function runTestDriver(kine: {
       await sleep(500);
       await shot(wiz, 'wizard-mode');
     }
-    result.ok = !!clip1 && !!clip2 && kine.capture.state === 'on' && result.inlinePlayer === true && result.filters === true && result.kineViewShown === true && result.kineViewHidden === true && result.colorPicker === true && result.brandColor === '#a34ff7';
+    const checks = ['inlinePlayer', 'gridUntouched', 'trimPanel', 'trimNewClip', 'trimReplace', 'overlayClosed', 'filters', 'kineViewShown', 'kineBar', 'kineBarBack', 'kineViewHidden', 'colorPicker'];
+    result.failed = checks.filter((k) => result[k] !== true);
+    result.ok = !!clip1 && !!clip2 && kine.capture.state === 'on' && (result.failed as string[]).length === 0 && result.brandColor === '#a34ff7';
   } catch (e) {
     result.error = (e as Error).stack ?? String(e);
   }

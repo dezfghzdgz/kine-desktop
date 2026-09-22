@@ -233,6 +233,41 @@ export class Auth {
     }
   }
 
+  /**
+   * Jednorázový přihlašovací token pro web Kine v okně appky: appka je
+   * přihlášená, web ne -> web dostane vlastní relaci (stejná cesta jako
+   * /connect, jen obráceně). Null bez přihlášení nebo když Kine neodpoví.
+   */
+  async webLinkToken(): Promise<string | null> {
+    const token = await this.getToken();
+    if (!token) return null;
+    try {
+      const res = await fetch(`${this.siteUrl()}/api/desktop/link`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) });
+      if (!res.ok) return null;
+      const data = (await res.json()) as { token_hash?: string };
+      return data.token_hash ?? null;
+    } catch (e) {
+      log(`token pro web: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Opačný směr: hráč se přihlásil ve webu v okně appky, appka ne. Z jeho
+   * přístupového tokenu si přes Kine vyžádá jednorázový token a udělá
+   * z něj vlastní relaci - obnovovací tokeny se nesdílí.
+   */
+  async loginFromWebToken(webAccessToken: string): Promise<void> {
+    const res = await fetch(`${this.siteUrl()}/api/desktop/link`, { method: 'POST', headers: { Authorization: `Bearer ${webAccessToken}` }, signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error(`link ${res.status}`);
+    const data = (await res.json()) as { token_hash?: string };
+    if (!data.token_hash) throw new Error('missing token');
+    const client = await this.getClient();
+    const { error } = await client.auth.verifyOtp({ type: 'magiclink', token_hash: data.token_hash });
+    if (error) throw new Error(translateAuthError(error.message));
+    await this.loadAccount();
+  }
+
   /** Znovu se zeptat na plán a barvu (po startu, po přihlášení, občas). */
   async refresh(): Promise<void> {
     if (!this.account) return;
@@ -260,7 +295,8 @@ export class Auth {
   async logout(): Promise<void> {
     try {
       const client = await this.getClient();
-      await client.auth.signOut();
+      // Jen tahle relace - "global" by odhlásil i prohlížeč a mobil hráče.
+      await client.auth.signOut({ scope: 'local' });
     } catch {
       // I když odhlášení na serveru neprojde, lokálně se relace zahodí.
     }

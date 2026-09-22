@@ -3,12 +3,17 @@
 Program do Windows, který běží v liště u hodin: když hraješ, drží
 posledních N sekund obrazu (a zvuku, včetně mikrofonu). Zmáčkneš klávesu
 a uloží se klip. Po dohrání se klipy nabídnou k nahrání na Kine – **nikdy
-během hry**, aby online hra na slabší wifi nelagovala. Ve dvou režimech:
-**jen klipovač**, nebo **Kine + klipy** – v tom je první záložka hlavního
-okna samotné Kine (web vložený do okna, `WebContentsView`, s trvalým
-přihlášením) a klipy s nastavením hned vedle. Anglicky v základu, osm
-jazyků (stejné jako web). Pětkrát klik na logo = barva appky (jako na
-webu, ukládá se i na účet).
+během hry**, aby online hra na slabší wifi nelagovala.
+
+Z jednoho kódu se staví **dvě appky** (`src/main/variant.ts`,
+`scripts/publish-config.mjs`): **Kine** („Kine do PC“) – první záložka
+hlavního okna je samotné Kine (web vložený do okna, `WebContentsView`,
+s přihlášením společným s appkou) a klipy s nastavením hned vedle; a
+**Kine Clipper** („Kine Klipovač“) – jen klipovač, Kine se otvírá
+v prohlížeči. Klipovač je součástí Kine do PC a funguje stejně; režim se
+v appce nepřepíná, je dán tím, kterou appku si člověk stáhl. Anglicky
+v základu, osm jazyků (stejné jako web). Pětkrát klik na logo = barva
+appky (jako na webu, ukládá se i na účet).
 
 Samostatný projekt vedle webu Kine (repo `Kine`). Web potřebuje
 `/api/desktop/config`, `/api/desktop/link`, `/api/desktop/me` a stránky
@@ -98,6 +103,7 @@ Užitečné proměnné prostředí:
 | `KINE_FFMPEG=…` | vlastní ffmpeg místo přibaleného |
 | `KINE_TEST=1` | samočinná zkouška: zásobník → dva klipy → přehrávač v okně → screenshoty → konec (`tests/e2e.sh`) |
 | `KINE_NO_HELPER=1` | nespouštět pomocníka pro Windows (hry jen podle seznamu a Steamu, jen jednoduché zkratky) |
+| `KINE_VARIANT=clipper` | při vývoji se chovat jako appka Kine Clipper (zabalená appka to má v package.json) |
 
 Adresu Kine jde v nastavení (Účet → Adresa Kine) přepnout třeba na
 `http://localhost:3000`.
@@ -108,14 +114,15 @@ Adresu Kine jde v nastavení (Účet → Adresa Kine) přepnout třeba na
 2. Nahraj soubory do repa (git, nebo přes web GitHubu) a spusť workflow
    **Vydání** (nebo pushni tag `v0.2.0`).
 3. GitHub Actions (`.github/workflows/release.yml`) na Windows sestaví
-   `Kine-Setup.exe`, nahraje ho pod dvěma názvy (`Kine-Setup.exe` = Kine
-   + klipy, `Kine-Clipper-Setup.exe` = jen klipovač; jeden a ten samý
-   soubor, appka si podle názvu předvyplní režim – `build/installer.nsh`)
-   do **Cloudflare R2** (odsud stahují lidi z `kine…/download` a odsud si
+   obě appky – `Kine-Setup.exe` (Kine do PC) a `Kine-Clipper-Setup.exe`
+   (Kine Clipper) – a nahraje je do **Cloudflare R2** do složek `full/`
+   a `clipper/` (odsud stahují lidi z `kine…/download` a odsud si
    nainstalované appky berou aktualizace podle `latest.yml`) a záložně do
    GitHub Releases. `scripts/publish-config.mjs` k tomu z proměnných
-   prostředí sestaví `electron-builder.generated.yml` (adresa aktualizací,
-   podpis). Krok za krokem včetně R2 a podpisu: **JAK-VYDAT.md**.
+   prostředí sestaví `electron-builder.generated.yml` (Kine) a
+   `electron-builder.clipper.yml` (Kine Clipper): název, ikona, appId,
+   složka s aktualizacemi, podpis. Instalátor je jen anglicky. Krok za
+   krokem včetně R2 a podpisu: **JAK-VYDAT.md**.
 
 **Podpis:** bez certifikátu Windows ukáže „Neznámý vydavatel“ a SmartScreen
 varuje. S Azure Trusted Signing (tajemství `AZURE_*` v GitHubu) workflow
@@ -125,7 +132,8 @@ podepisuje sám.
 
 ```
 src/main/        hlavní proces (Electron, Node)
-  main.ts        tray, okna (nastavení/klipy, okýnko po hře, okno Kine), IPC, režimy
+  main.ts        tray, okna (nastavení/klipy, okýnko po hře, okno Kine), IPC
+  variant.ts     která ze dvou appek běží (Kine / Kine Clipper) - název, ikona, režim
   capture.ts     zásobník: skrytá stránka → ffmpeg segmenty → klip
   segments.ts    čistá logika výběru kousků (test)
   games.ts       hlídání her (procesy, Steam, popředí), gamesParse.ts čistá část (test)

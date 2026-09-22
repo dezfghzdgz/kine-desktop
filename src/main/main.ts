@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
@@ -38,6 +37,7 @@ import { checkForUpdates, initUpdater } from './updater';
 import { runTestDriver } from './testDriver';
 import { WinHelper } from './winHelper';
 import { makeThumbnail, trimClip } from './edit';
+import { APP_USER_MODEL_IDS, PRODUCT_NAMES, detectVariant, modeForVariant, siblingExe } from './variant';
 import { HotkeyManager, type HotkeyId, type HotkeyReason } from './hotkeys';
 
 /**
@@ -49,15 +49,18 @@ import { HotkeyManager, type HotkeyId, type HotkeyReason } from './hotkeys';
  * (hotkeys.ts) uloží klip (clips.ts), po hře se klipy nabídnou k nahrání
  * nebo nahrají samy (uploader.ts) - ale nikdy během hraní.
  *
- * Dva režimy: "jen klipovač" (okno s klipy a nastavením) a "Kine +
- * klipy" (v tom samém okně je první záložka "Kine" - web Kine vložený
- * jako WebContentsView, s trvalým přihlášením; klipy a nastavení jsou
- * hned vedle).
+ * Dvě appky ze stejného kódu (variant.ts): "Kine" (Kine do PC - v okně
+ * je první záložka "Kine", web Kine vložený jako WebContentsView, klipy
+ * a nastavení hned vedle) a "Kine Clipper" (jen klipovač: okno s klipy
+ * a nastavením, Kine se otvírá v prohlížeči).
  */
 
 const PRELOAD = join(__dirname, '..', 'preload', 'preload.js');
 const RENDERER_DIR = join(__dirname, '..', 'renderer');
-const ICON_PNG = join(app.getAppPath(), 'build', 'icon.png');
+/** Která ze dvou appek běží (Kine do PC / Kine Clipper) - viz variant.ts. */
+const VARIANT = detectVariant();
+const PRODUCT = PRODUCT_NAMES[VARIANT];
+const ICON_PNG = join(app.getAppPath(), 'build', VARIANT === 'clipper' ? 'icon-clipper.png' : 'icon.png');
 
 // Pro zkoušky: vlastní složka s daty, ať se nesahá na skutečné nastavení.
 if (process.env.KINE_USER_DATA) app.setPath('userData', process.env.KINE_USER_DATA);
@@ -104,6 +107,9 @@ class KineApp {
   clipChain: Promise<unknown> = Promise.resolve();
   warnedOnce = new Set<string>();
 
+  /** Kine do PC ('full') nebo Kine Clipper ('clipper'). */
+  readonly variant = VARIANT;
+
   t(key: Key, vars?: Record<string, string | number>): string {
     return makeT(this.settings.get().lang)(key, vars);
   }
@@ -127,14 +133,15 @@ class KineApp {
   async start(): Promise<void> {
     // Windows: bez tohohle nejdou systémová oznámení a ikona v liště se
     // po aktualizaci "rozdvojí".
-    if (process.platform === 'win32') app.setAppUserModelId('cz.kine.desktop');
+    if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_IDS[VARIANT]);
     initLog(join(app.getPath('userData'), 'logs'));
-    log(`start Kine ${app.getVersion()} (${process.platform}, electron ${process.versions.electron})`);
+    log(`start ${PRODUCT} ${app.getVersion()} (${process.platform}, electron ${process.versions.electron})`);
 
     this.settings = new SettingsStore();
-    // Režim podle názvu instalátoru - při prvním spuštění i po aktualizaci
-    // ze starší verze, kde se ještě nevybíral.
-    if (!this.settings.get().onboarded || !this.settings.get().appModeChosen) await this.presetModeFromInstaller();
+    // Režim appky je dán tím, která appka to je - Kine do PC má Kine v okně,
+    // Kine Clipper jen klipuje. Starší nastavení (kde se režim volil) se srovná.
+    const mode = modeForVariant(VARIANT);
+    if (this.settings.get().appMode !== mode || !this.settings.get().appModeChosen) this.settings.update({ appMode: mode, appModeChosen: true });
     this.library = new ClipLibrary(this.settings.clipsDir());
     this.library.load();
 
@@ -220,6 +227,7 @@ class KineApp {
     await this.auth.init();
     this.games.start();
     this.uploader.restoreFromLibrary();
+    void this.checkSibling();
 
     if (this.settings.get().detection === 'always') void this.capture.start().catch(() => undefined);
 
@@ -249,21 +257,28 @@ class KineApp {
   }
 
   /**
-   * Instalátor si zapsal svůj název do registru (build/installer.nsh):
-   * "Kine-Clipper-Setup.exe" = hráč si na webu vybral jen klipovač,
-   * "Kine-Setup.exe" = Kine + klipy. Průvodce to jen předvyplní.
+   * Obě appky naráz nedávají smysl (dvakrát by se nahrávalo, dvakrát
+   * zkratky). Klipovač je součástí Kine do PC - když Kine běží, klipovač
+   * to řekne a vypne se. Kine do PC při běžícím klipovači jen upozorní.
    */
-  private async presetModeFromInstaller(): Promise<void> {
-    if (process.platform !== 'win32') return;
-    const out = await new Promise<string>((resolve) => {
-      execFile('reg', ['query', 'HKCU\\Software\\Kine', '/v', 'installer'], { windowsHide: true, timeout: 5000 }, (err, stdout) => resolve(err ? '' : String(stdout)));
-    });
-    const m = /installer\s+REG_SZ\s+(.+)$/im.exec(out);
-    if (!m) return;
-    const name = m[1].trim();
-    const mode: Settings['appMode'] = /clip|klip/i.test(name) ? 'clipper' : 'full';
-    log(`instalátor: ${name} -> režim ${mode}`);
-    this.settings.update({ appMode: mode, appModeChosen: true });
+  private async checkSibling(): Promise<void> {
+    if (process.platform !== 'win32' || process.env.KINE_TEST) return;
+    try {
+      // Chvíli počkat, ať má pomocník seznam procesů; jinak tasklist.
+      await new Promise((r) => setTimeout(r, 6000));
+      const names = await this.games.processNames();
+      if (!names.has(siblingExe(VARIANT))) return;
+      if (VARIANT === 'clipper') {
+        log('běží Kine do PC - klipovač je jeho součástí, vypíná se');
+        await this.toast.show(this.t('siblingFullRunning'), 'warn', { notification: true });
+        setTimeout(() => this.quit(), 4000);
+      } else {
+        log('běží i Kine Clipper - stačí jedna appka');
+        void this.toast.show(this.t('siblingClipperRunning'), 'warn', { notification: true });
+      }
+    } catch (e) {
+      log(`kontrola druhé appky: ${(e as Error).message}`);
+    }
   }
 
   // ---- hry ---------------------------------------------------------------------
@@ -490,7 +505,7 @@ class KineApp {
     const s = this.settings.get();
     const pending = this.uploader.pending();
     const items: Electron.MenuItemConstructorOptions[] = [
-      { label: `Kine · ${this.statusLine()}`, enabled: false },
+      { label: `${PRODUCT} · ${this.statusLine()}`, enabled: false },
     ];
     if (pending > 0) {
       items.push({ label: this.uploader.isPausedByGame() ? this.t('trayUploadsPaused', { count: pending }) : this.t('trayUploads', { count: pending }), enabled: false });
@@ -507,7 +522,7 @@ class KineApp {
       { label: this.t('trayQuit'), click: () => this.quit() }
     );
     this.tray.setContextMenu(Menu.buildFromTemplate(items));
-    this.tray.setToolTip(`Kine · ${this.statusLine()}`);
+    this.tray.setToolTip(`${PRODUCT} · ${this.statusLine()}`);
   }
 
   private async togglePause(): Promise<void> {
@@ -538,7 +553,7 @@ class KineApp {
       height: full ? 840 : 680,
       minWidth: full ? 1000 : 760,
       minHeight: full ? 620 : 540,
-      title: 'Kine',
+      title: PRODUCT,
       backgroundColor: '#050506',
       autoHideMenuBar: true,
       icon: ICON_PNG,
@@ -569,7 +584,7 @@ class KineApp {
       height: 620,
       minWidth: 540,
       minHeight: 440,
-      title: 'Kine',
+      title: PRODUCT,
       backgroundColor: '#050506',
       autoHideMenuBar: true,
       alwaysOnTop: true,
@@ -828,6 +843,7 @@ class KineApp {
       hotkeyProblems: this.hotkeys.currentProblems().map((p) => this.t('hotkeyProblem', { hotkey: hotkeyLabel(p.hotkey), reason: this.hotkeyReasonText(p.reason) })),
       chordsSupported: this.hotkeys.chordsSupported() && (this.helper?.isRunning() ?? false),
       version: app.getVersion(),
+      variant: VARIANT,
     };
   }
 
@@ -1102,7 +1118,7 @@ class KineApp {
       else if (target === 'kine') this.openKine(parsed.searchParams.get('path') ?? '');
     } catch (e) {
       log(`kine:// odkaz: ${(e as Error).message}`);
-      dialog.showErrorBox('Kine', (e as Error).message);
+      dialog.showErrorBox(PRODUCT, (e as Error).message);
     }
   }
 
@@ -1145,7 +1161,7 @@ void app.whenReady().then(async () => {
     await kine.start();
   } catch (e) {
     log(`start selhal: ${(e as Error).stack ?? (e as Error).message}`);
-    dialog.showErrorBox('Kine', `The app could not start: ${(e as Error).message}`);
+    dialog.showErrorBox(PRODUCT, `The app could not start: ${(e as Error).message}`);
     app.exit(1);
   }
 });

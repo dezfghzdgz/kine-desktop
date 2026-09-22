@@ -75,6 +75,7 @@ async function init() {
   else if (wanted && visibleTabs().includes(wanted as Tab)) tab = wanted as Tab;
   else if (settings.appMode === 'full') tab = 'kine';
   document.documentElement.lang = settings.lang;
+  document.title = status.variant === 'clipper' ? 'Kine Clipper' : 'Kine';
   render();
   void refreshGameNames();
 
@@ -160,7 +161,12 @@ function update(patch: Partial<Settings>) {
   void kine.updateSettings(patch);
 }
 
-/** Záložky podle režimu: web Kine jen v režimu "Kine + klipy". */
+/** Štítek "Clipper" u loga - ať je hned vidět, která z obou appek to je. */
+function brandTag() {
+  return status.variant === 'clipper' ? h('span', { class: 'brand-tag' }, 'Clipper') : null;
+}
+
+/** Záložky podle appky: web Kine jen v Kine do PC (režim 'full'). */
 function visibleTabs(): Tab[] {
   return settings.appMode === 'full' ? TABS : TABS.filter((x) => x !== 'kine');
 }
@@ -413,7 +419,7 @@ function renderSide() {
     h(
       'div',
       { class: 'brand-wrap' },
-      h('div', { class: 'brand', role: 'button', tabindex: '0', title: t('brandColorHint'), onclick: onBrandClick }, h('span', { class: 'mark' }), 'Kine'),
+      h('div', { class: 'brand', role: 'button', tabindex: '0', title: t('brandColorHint'), onclick: onBrandClick }, h('span', { class: `mark ${status.variant === 'clipper' ? 'clipper' : ''}` }), 'Kine', brandTag()),
       colorPickerOpen ? colorPicker() : null
     ),
     ...visibleTabs().map((name) =>
@@ -624,12 +630,29 @@ function languageSelect(big = false) {
   );
 }
 
-function modeRadios() {
+/**
+ * Která appka to je: Kine do PC (Kine + klipovač) nebo Kine Clipper (jen
+ * klipovač). Nepřepíná se - jsou to dvě různé appky; tady je jen odkaz na
+ * tu druhou.
+ */
+function variantPanel() {
+  const clipper = status.variant === 'clipper';
   return h(
     'div',
-    { class: 'radio-group' },
-    radio('appMode', 'clipper', t('modeClipper'), t('modeClipperHint')),
-    radio('appMode', 'full', t('modeFull'), t('modeFullHint'))
+    { class: 'panel stack' },
+    h('h2', {}, t('variantTitle')),
+    h(
+      'div',
+      { class: 'row', style: 'gap:12px;align-items:flex-start' },
+      h('span', { class: `app-icon ${clipper ? 'clipper' : ''}` }),
+      h(
+        'div',
+        { class: 'grow' },
+        h('div', { style: 'font-weight:600' }, clipper ? t('variantClipperName') : t('variantFullName')),
+        h('p', { class: 'hint' }, clipper ? t('variantClipperText') : t('variantFullText'))
+      )
+    ),
+    h('div', {}, h('button', { class: 'small quiet', onclick: () => void kine.openKine('/download') }, clipper ? t('variantGetFull') : t('variantGetClipper')))
   );
 }
 
@@ -785,7 +808,7 @@ function renderSettings() {
       ),
       checkbox('toast', t('toastSetting'), t('toastSettingHint'))
     ),
-    h('div', { class: 'panel stack' }, h('h2', {}, t('modeTitle')), modeRadios()),
+    variantPanel(),
     h('div', { class: 'panel stack' }, h('label', {}, t('language'), languageSelect()), h('p', { class: 'hint' }, t('brandColorHint')))
   );
 }
@@ -1303,7 +1326,7 @@ function renderAbout() {
 
 // ---- průvodce ------------------------------------------------------------------------------
 
-const WIZARD_STEPS = 5;
+const WIZARD_STEPS = 4;
 
 function renderWizard() {
   const step = wizardStep ?? 0;
@@ -1316,7 +1339,7 @@ function renderWizard() {
 
   if (step === 0) {
     box.append(
-      h('div', { class: 'brand', style: 'padding:0 0 6px' }, h('span', { class: 'mark' }), 'Kine'),
+      h('div', { class: 'brand', style: 'padding:0 0 6px' }, h('span', { class: `mark ${status.variant === 'clipper' ? 'clipper' : ''}` }), 'Kine', brandTag()),
       h('h1', {}, t('wizardWelcome')),
       h('p', { class: 'dim' }, t('wizardIntro', { seconds: settings.clipSeconds })),
       h('h2', {}, t('wizardChooseLanguage')),
@@ -1331,36 +1354,25 @@ function renderWizard() {
     );
   } else if (step === 1) {
     box.append(
-      h('h1', {}, t('wizardStepMode')),
-      h('div', { class: 'panel' }, modeRadios()),
-      h(
-        'div',
-        { class: 'spread' },
-        h('button', { class: 'quiet', onclick: go(0) }, t('back')),
-        h('button', { class: 'primary', onclick: () => { wizardStep = 2; update({ appModeChosen: true }); } }, t('next'))
-      )
-    );
-  } else if (step === 2) {
-    box.append(
       h('h1', {}, t('wizardStepAccount')),
       renderAccount(true),
       h(
         'div',
         { class: 'spread' },
-        h('button', { class: 'quiet', onclick: go(1) }, t('back')),
-        h('button', { class: status.account ? 'primary' : '', onclick: go(3) }, status.account ? t('next') : t('wizardSkipLogin'))
+        h('button', { class: 'quiet', onclick: go(0) }, t('back')),
+        h('button', { class: status.account ? 'primary' : '', onclick: go(2) }, status.account ? t('next') : t('wizardSkipLogin'))
       )
     );
     if (status.account) {
       // Po přihlášení se jde samo dál.
       setTimeout(() => {
-        if (wizardStep === 2 && status.account) {
-          wizardStep = 3;
+        if (wizardStep === 1 && status.account) {
+          wizardStep = 2;
           render();
         }
       }, 900);
     }
-  } else if (step === 3) {
+  } else if (step === 2) {
     box.append(
       h('h1', {}, t('wizardStepHotkey')),
       h(
@@ -1381,8 +1393,8 @@ function renderWizard() {
       h(
         'div',
         { class: 'spread' },
-        h('button', { class: 'quiet', onclick: go(2) }, t('back')),
-        h('button', { class: 'primary', onclick: () => { wizardStep = 4; update({ onboarded: true }); } }, t('next'))
+        h('button', { class: 'quiet', onclick: go(1) }, t('back')),
+        h('button', { class: 'primary', onclick: () => { wizardStep = 3; update({ onboarded: true }); } }, t('next'))
       )
     );
   } else {

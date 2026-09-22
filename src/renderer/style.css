@@ -216,6 +216,15 @@ kbd {
 .color-picker .swatch.custom .color-input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; min-height: 0; padding: 0; }
 .brand .mark { width: 28px; height: 28px; border-radius: var(--radius-sm); background: #0a0a0b; display: grid; place-items: center; box-shadow: inset 0 0 0 1px var(--brand-soft); }
 .brand .mark::after { content: ''; width: 0; height: 0; border-left: 11px solid var(--brand); border-top: 6.5px solid transparent; border-bottom: 6.5px solid transparent; margin-left: 3px; }
+/* Kine Clipper: ikona s úchyty ořezu místo samotného trojúhelníku + štítek u názvu. */
+.brand .mark.clipper { background: url('./icon-clipper.png') center / 100% no-repeat; box-shadow: none; }
+.brand .mark.clipper::after { display: none; }
+.brand-tag {
+  margin-left: 2px; padding: 1px 7px; border-radius: var(--radius-pill); font-size: var(--fs-2xs); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--brand); background: var(--brand-soft); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.35); align-self: center;
+}
+.app-icon { display: inline-block; width: 44px; height: 44px; flex: none; border-radius: 10px; background: url('./icon.png') center / 100% no-repeat; }
+.app-icon.clipper { background-image: url('./icon-clipper.png'); }
 .tab {
   display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
   padding: 11px 14px; border-radius: var(--radius-md);

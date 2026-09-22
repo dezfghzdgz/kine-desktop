@@ -47,7 +47,10 @@ export async function runTestDriver(kine: {
     }
     const clipSeconds = Number(process.env.KINE_TEST_CLIP_SECONDS ?? 6);
     const waitMs = Number(process.env.KINE_TEST_WAIT_MS ?? 9000);
-    kine.settings.update({ detection: 'always', clipSeconds, onboarded: true, toast: true, afterGame: 'review', appMode: 'full', appModeChosen: true });
+    // Režim appky určuje varianta (Kine do PC / Kine Clipper), tady se nenastavuje.
+    const clipperApp = (kine as any).variant === 'clipper';
+    result.variant = clipperApp ? 'clipper' : 'full';
+    kine.settings.update({ detection: 'always', clipSeconds, onboarded: true, toast: true, afterGame: 'review' });
 
     await sleep(500);
     await kine.capture.start();
@@ -146,26 +149,44 @@ export async function runTestDriver(kine: {
       );
       result.filters = filterOk;
     }
-    // Záložka Kine (web vložený do okna): stránka nahlásí plochu, hlavní
-    // proces položí WebContentsView; po přepnutí na klipy se schová.
-    kine.openSettings('kine');
-    await sleep(1500);
-    await shot(kine.settingsWindow, 'settings-kine');
-    result.kineViewShown = (kine as any).kineViewShown === true && !!(kine as any).kineView;
-    // Záložka Kine je bez postranního panelu, jen s lištou dole (stav + Klipy + Nastavení).
-    const kineWin = kine.settingsWindow;
-    if (kineWin && !kineWin.isDestroyed()) {
-      result.kineBar = await kineWin.webContents.executeJavaScript(
-        `(() => { const bar = document.querySelector('.kine-bar'); return !!bar && !document.querySelector('.side') && bar.querySelectorAll('button').length === 2 && document.querySelector('.kine-host').getBoundingClientRect().left === 0; })()`
-      );
-      // Tlačítko Klipy v liště vede zpátky na klipy (a panel se vrátí).
-      await kineWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.kine-bar button'); if (b) b.click(); return !!b; })()`);
-      await sleep(500);
-      result.kineBarBack = await kineWin.webContents.executeJavaScript(`!!document.querySelector('.side') && !!document.querySelector('.clips')`);
+    if (!clipperApp) {
+      // Záložka Kine (web vložený do okna): stránka nahlásí plochu, hlavní
+      // proces položí WebContentsView; po přepnutí na klipy se schová.
+      kine.openSettings('kine');
+      await sleep(1500);
+      await shot(kine.settingsWindow, 'settings-kine');
+      result.kineViewShown = (kine as any).kineViewShown === true && !!(kine as any).kineView;
+      // Záložka Kine je bez postranního panelu, jen s lištou dole (stav + Klipy + Nastavení).
+      const kineWin = kine.settingsWindow;
+      if (kineWin && !kineWin.isDestroyed()) {
+        result.kineBar = await kineWin.webContents.executeJavaScript(
+          `(() => { const bar = document.querySelector('.kine-bar'); return !!bar && !document.querySelector('.side') && bar.querySelectorAll('button').length === 2 && document.querySelector('.kine-host').getBoundingClientRect().left === 0; })()`
+        );
+        // Tlačítko Klipy v liště vede zpátky na klipy (a panel se vrátí).
+        await kineWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.kine-bar button'); if (b) b.click(); return !!b; })()`);
+        await sleep(500);
+        result.kineBarBack = await kineWin.webContents.executeJavaScript(`!!document.querySelector('.side') && !!document.querySelector('.clips')`);
+      }
+      kine.openSettings('clips');
+      await sleep(600);
+      result.kineViewHidden = (kine as any).kineViewShown === false;
+    } else {
+      // Kine Clipper: žádná záložka Kine, štítek "Clipper" u loga, v nastavení
+      // panel "Tahle appka" s ikonou klipovače a odkazem na Kine do PC.
+      kine.openSettings('clips');
+      await sleep(700);
+      const w = kine.settingsWindow;
+      if (w && !w.isDestroyed()) {
+        result.clipperSide = await w.webContents.executeJavaScript(
+          `(() => { const tabs = [...document.querySelectorAll('.side .tab')].map((b) => b.textContent.trim()); return !tabs.some((x) => x === 'Kine') && !!document.querySelector('.brand-tag') && !!document.querySelector('.brand .mark.clipper'); })()`
+        );
+        kine.openSettings('settings');
+        await sleep(700);
+        result.clipperPanel = await w.webContents.executeJavaScript(`!!document.querySelector('.app-icon.clipper') && !document.querySelector('.kine-host')`);
+        await shot(w, 'settings-settings-clipper');
+      }
+      result.kineViewNever = !(kine as any).kineView && kine.settings.get().appMode === 'clipper';
     }
-    kine.openSettings('clips');
-    await sleep(600);
-    result.kineViewHidden = (kine as any).kineViewShown === false;
 
     // Barva Kine: 5x klik na logo otevře výběr, barva ze vzorníku se propíše do CSS.
     const colorWin = kine.settingsWindow;
@@ -189,7 +210,8 @@ export async function runTestDriver(kine: {
       await sleep(500);
       await shot(wiz, 'wizard-mode');
     }
-    const checks = ['inlinePlayer', 'gridUntouched', 'trimPanel', 'trimNewClip', 'trimReplace', 'overlayClosed', 'filters', 'kineViewShown', 'kineBar', 'kineBarBack', 'kineViewHidden', 'colorPicker'];
+    const common = ['inlinePlayer', 'gridUntouched', 'trimPanel', 'trimNewClip', 'trimReplace', 'overlayClosed', 'filters', 'colorPicker'];
+    const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineBar', 'kineBarBack', 'kineViewHidden'];
     result.failed = checks.filter((k) => result[k] !== true);
     result.ok = !!clip1 && !!clip2 && kine.capture.state === 'on' && (result.failed as string[]).length === 0 && result.brandColor === '#a34ff7';
   } catch (e) {

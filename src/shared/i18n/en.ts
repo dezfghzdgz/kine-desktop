@@ -117,11 +117,6 @@ export const en = {
   clipsDirOpen: 'Open folder',
   toastSetting: 'Show a small "Clip saved" popup in the screen corner',
   toastSettingHint: 'In exclusive fullscreen games the popup cannot show - you get a system notification instead.',
-  modeTitle: 'How you use Kine',
-  modeClipper: 'Just the clipper',
-  modeClipperHint: 'Runs in the tray next to the clock. Press the key while playing and the clip is saved; Kine itself opens in your browser.',
-  modeFull: 'Kine + clips',
-  modeFullHint: 'Also opens Kine as a desktop app for watching videos, with your clips one click away.',
   language: 'Language',
   // games
   gamesTitle: 'When to record into the buffer',
@@ -212,7 +207,6 @@ export const en = {
   wizardWelcome: 'Welcome to Kine for PC',
   wizardIntro: 'Press a key and the last {seconds} seconds of your game are saved as a clip. After the game the clips upload to Kine - never during play, so your online game does not lag.',
   wizardChooseLanguage: 'Choose your language',
-  wizardStepMode: 'How will you use Kine?',
   wizardStepAccount: 'Account',
   wizardStepHotkey: 'Shortcut',
   wizardStepDone: 'Done',
@@ -280,6 +274,15 @@ export const en = {
   lowLoadHint: 'One click sets 720p, 30 fps and 5 Mb/s - recording takes as little performance as possible. Fine-tune below if you like.',
   playerPlay: 'Play',
   playerPause: 'Pause',
+  variantTitle: 'This app',
+  variantFullName: 'Kine for PC',
+  variantFullText: 'Kine as a desktop app plus the clipper, in one window. Want only the clipper, without Kine? That is a separate small app - Kine Clipper.',
+  variantClipperName: 'Kine Clipper',
+  variantClipperText: 'Just the clipper, in the tray next to the clock; Kine opens in your browser. Want Kine as a desktop app too, with your clips one tab over? That is Kine for PC - it includes this clipper.',
+  variantGetFull: 'Get Kine for PC',
+  variantGetClipper: 'Get Kine Clipper',
+  siblingFullRunning: 'Kine for PC is running and the clipper is part of it - Kine Clipper is closing. You can uninstall it.',
+  siblingClipperRunning: 'Kine Clipper is running too. One app is enough - the clipper is part of Kine for PC.',
 } as const;
 
 export type Key = keyof typeof en;

@@ -2,10 +2,12 @@
 # instalace pro uživatele (bez správce), zástupce na ploše, po skončení
 # se appka rovnou spustí. ffmpeg leží mimo archiv asar, aby šel spustit.
 #
-# Ve workflow (.github/workflows/release.yml) se z tohohle souboru dělá
-# electron-builder.generated.yml (scripts/publish-config.mjs): přidá
-# adresu pro aktualizace z našeho úložiště (Cloudflare R2) a podpis,
-# když jsou nastavené. Tady je základ, který funguje i bez nich.
+# Tohle je základ pro appku "Kine" (Kine do PC). Ve workflow
+# (.github/workflows/release.yml) z něj scripts/publish-config.mjs dělá
+# dva soubory: electron-builder.generated.yml (Kine) a
+# electron-builder.clipper.yml (Kine Clipper - jiný název, ikona, appId,
+# adresa aktualizací) a přidá adresu úložiště (Cloudflare R2) a podpis,
+# když jsou nastavené. Základ funguje i bez nich (npx electron-builder).
 appId: cz.kine.desktop
 productName: Kine
 copyright: Kine
@@ -15,6 +17,7 @@ directories:
 files:
   - dist/**/*
   - build/icon.png
+  - build/icon-clipper.png
   - build/tray.png
   - package.json
   - "!**/*.map"
@@ -43,8 +46,10 @@ nsis:
   deleteAppDataOnUninstall: false
   shortcutName: Kine
   artifactName: Kine-Setup.${ext}
-  # build/installer.nsh: zapíše název instalátoru do registru (režim appky).
-  installerLanguages: [en_US, cs_CZ, sk_SK, de_DE, pl_PL, es_ES, fr_FR, uk_UA]
+  # Instalátor je jen anglicky (jednojazyčný): vícejazyčný by se řídil
+  # jazykem Windows a hráči by ho viděli česky/německy… - appka sama je
+  # anglicky s výběrem jazyka v průvodci, tak ať je i instalátor.
+  multiLanguageInstaller: false
   language: 1033
 linux:
   target: [dir]

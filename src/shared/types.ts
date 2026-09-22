@@ -10,11 +10,17 @@ export type Lang = 'en' | 'cs' | 'sk' | 'de' | 'pl' | 'es' | 'fr' | 'uk';
 export const LANGS: readonly Lang[] = ['en', 'cs', 'sk', 'de', 'pl', 'es', 'fr', 'uk'];
 
 /**
- * Jak se appka používá:
- *  - clipper: jen klipovač v liště u hodin (Kine se otvírá v prohlížeči),
- *  - full: k tomu okno s Kine jako aplikace (koukání na videa) - výběr
- *    při stahování na webu a v průvodci.
+ * Dvě appky ze stejného kódu (src/main/variant.ts):
+ *  - full: "Kine" (Kine do PC) - Kine jako aplikace na koukání videí
+ *    + klipovač v jednom okně,
+ *  - clipper: "Kine Clipper" (Kine Klipovač) - jen klipovač v liště
+ *    u hodin, Kine se otvírá v prohlížeči.
+ * Kterou hráč má, se rozhoduje při stahování na webu; v appce se to
+ * nepřepíná (klipovač je součástí Kine do PC a funguje stejně).
  */
+export type Variant = 'full' | 'clipper';
+
+/** Režim appky = varianta (nastavuje se při každém startu podle varianty). */
 export type AppMode = 'clipper' | 'full';
 
 export type DetectionMode =
@@ -158,6 +164,8 @@ export type Status = {
   /** Umí tenhle systém zkratky z více kláves a tlačítka myši? (pomocník na Windows) */
   chordsSupported: boolean;
   version: string;
+  /** Která appka to je ("Kine" nebo "Kine Clipper"). */
+  variant: Variant;
 };
 
 export type GameSource = 'steam' | 'custom' | 'known' | 'fullscreen';

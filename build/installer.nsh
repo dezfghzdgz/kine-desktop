@@ -1,11 +1,10 @@
 ; Doplněk k instalátoru (electron-builder ho přibalí sám).
 ;
-; Instalátor si zapíše svůj název souboru do registru. Na webu jsou dva
-; odkazy na tentýž instalátor: Kine-Setup.exe (Kine + klipy) a
-; Kine-Clipper-Setup.exe (jen klipovač). Appka si to při prvním spuštění
-; přečte a v průvodci předvyplní režim.
+; Dřív si sem instalátor zapisoval svůj název do registru, podle kterého
+; appka hádala režim (jeden instalátor, dva názvy). Od 0.5.0 jsou to dvě
+; různé appky (Kine do PC a Kine Clipper - scripts/publish-config.mjs),
+; takže nic hádat netřeba. Starý klíč se při odinstalaci uklidí.
 !macro customInstall
-  WriteRegStr HKCU "Software\Kine" "installer" "$EXEFILE"
 !macroend
 
 !macro customUnInstall

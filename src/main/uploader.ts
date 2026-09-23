@@ -1,6 +1,7 @@
 import { closeSync, openSync, readSync, statSync, openAsBlob } from 'node:fs';
-import type { Clip, Settings, Visibility } from '../shared/types';
+import type { Clip, Settings, UploadRequest } from '../shared/types';
 import { gameHashtag } from '../shared/clipNaming';
+import { parseHashtags } from '../shared/upload';
 import type { ClipLibrary } from './clips';
 import { KineApiError, type KineApi } from './kineApi';
 import { TusAborted, tusUpload } from './tus';
@@ -16,18 +17,36 @@ import { TusAborted, tusUpload } from './tus';
  *
  * Jeden klip po druhém - souběžně by si jen braly pásmo.
  */
-export type UploadRequest = { clipId: string; visibility: Visibility; title?: string };
+export type { UploadRequest };
 
 export type UploaderEvent =
   | { type: 'done'; clip: Clip; url: string }
+  /** Kine video zpracovala - teď je vidět v seznamech i pro ostatní. */
+  | { type: 'ready'; clip: Clip; url: string }
   | { type: 'error'; clip: Clip; message: string }
   | { type: 'changed' };
+
+/**
+ * Jak často se po nahrání ptát, jestli Kine video už zpracovala: první
+ * minutu každé 3 s, do čtvrté minuty každých 10 s, pak každou půlminutu
+ * až do ~45 minut (dlouhá nahrávka zápasu). Potom se to nechá být - Kine
+ * si zaseklá videa dodělá sama (sweepProcessing na webu).
+ */
+export function readySchedule(): number[] {
+  const steps: number[] = [];
+  for (let i = 0; i < 20; i++) steps.push(3000);
+  for (let i = 0; i < 18; i++) steps.push(10000);
+  for (let i = 0; i < 80; i++) steps.push(30000);
+  return steps;
+}
 
 export class Uploader {
   private queue: UploadRequest[] = [];
   private current: { request: UploadRequest; abort: AbortController } | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private listeners = new Set<(e: UploaderEvent) => void>();
+  /** Klipy, u kterých se čeká, až je Kine zpracuje (id klipu -> zastavení čekání). */
+  private waiting = new Map<string, () => void>();
 
   constructor(
     private deps: {
@@ -40,6 +59,10 @@ export class Uploader {
       log: (message: string) => void;
       /** Popis videa na Kine (v jazyce appky, s odkazem na appku); bez něj krátký výchozí. */
       describe?: (clip: Clip) => string;
+      /** Nahrát náhled klipu jako vlastní náhled videa na Kine (bez tohohle se náhled neposílá). */
+      uploadThumbnail?: (videoId: string, file: string) => Promise<void>;
+      /** Rozvrh čekání na zpracování (testy ho zkrátí). */
+      readySchedule?: () => number[];
     }
   ) {}
 
@@ -61,15 +84,18 @@ export class Uploader {
     return this.pending() > 0 && this.deps.blocked() === 'game';
   }
 
-  /** Zařadí klipy; už zařazené nebo hotové přeskočí. */
+  /** Zařadí klipy; už zařazené nebo hotové přeskočí. Nastavení nahrání se uloží ke klipu (přežije restart). */
   enqueue(requests: UploadRequest[]): void {
     for (const r of requests) {
       const clip = this.deps.library.get(r.clipId);
       if (!clip || clip.deletedAt) continue;
       if (clip.upload?.state === 'done') continue;
       if (this.queue.some((q) => q.clipId === r.clipId) || this.current?.request.clipId === r.clipId) continue;
-      this.queue.push(r);
-      if (r.title && r.title.trim()) this.deps.library.update(r.clipId, { title: r.title.trim().slice(0, 150) });
+      const request: UploadRequest = { ...r, title: r.title?.trim().slice(0, 150) || undefined };
+      this.queue.push(request);
+      const patch: Partial<Clip> = { uploadOptions: request };
+      if (request.title) patch.title = request.title;
+      this.deps.library.update(r.clipId, patch);
       // Stav se zachová, když už klip kus nahraný má (tus naváže).
       const prev = clip.upload;
       if (!prev || prev.state === 'error' || prev.state === 'queued') {
@@ -80,14 +106,72 @@ export class Uploader {
     this.kick();
   }
 
-  /** Po startu appky: co zůstalo rozjeté nebo ve frontě z minula. */
+  /** Po startu appky: co zůstalo rozjeté nebo ve frontě z minula; a u nahraných, co Kine ještě nezpracovala, se čeká dál. */
   restoreFromLibrary(): void {
     const visibility = this.deps.settings().visibility;
-    const pending = this.deps.library
-      .list()
+    const clips = this.deps.library.list();
+    const pending = clips
       .filter((c) => c.upload && (c.upload.state === 'queued' || c.upload.state === 'paused' || c.upload.state === 'uploading'))
-      .map((c) => ({ clipId: c.id, visibility }));
+      .map((c) => c.uploadOptions ?? { clipId: c.id, visibility });
     if (pending.length > 0) this.enqueue(pending);
+    for (const c of clips) {
+      if (c.upload?.state === 'done' && c.upload.ready === false) this.watchReady(c.id, c.upload.videoId, c.upload.url);
+    }
+  }
+
+  /**
+   * Po nahrání: Kine video teprve zpracovává a do té doby ho nikde
+   * neukazuje. Appka se ptá dokola (readySchedule), a až je hotovo, klip
+   * dostane ready: true a ohlásí se 'ready' (toast "Klip je na Kine").
+   */
+  watchReady(clipId: string, videoId: string, url: string): void {
+    if (this.waiting.has(clipId)) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    this.waiting.set(clipId, () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    });
+    const finish = () => {
+      this.waiting.delete(clipId);
+    };
+    const run = async () => {
+      for (const pause of (this.deps.readySchedule ?? readySchedule)()) {
+        if (stopped) return finish();
+        await new Promise<void>((r) => {
+          timer = setTimeout(r, pause);
+        });
+        if (stopped) return finish();
+        const clip = this.deps.library.get(clipId);
+        if (!clip || clip.deletedAt || clip.upload?.state !== 'done') return finish();
+        try {
+          const status = await this.deps.api.status(videoId);
+          if (status === 'ready') {
+            this.deps.library.setUpload(clipId, { state: 'done', videoId, url, ready: true });
+            this.deps.log(`Kine video zpracovala: ${clip.title}`);
+            finish();
+            this.emit({ type: 'ready', clip: this.deps.library.get(clipId) ?? clip, url });
+            return;
+          }
+          if (status === 'not-found') {
+            // Video na Kine není (smazané?) - nemá cenu se ptát dál.
+            this.deps.log(`video ${videoId} na Kine není - čekání na zpracování končí`);
+            return finish();
+          }
+        } catch (e) {
+          // Výpadek při dotazu nevadí, zkusí se dál - video se zpracovává i bez nás.
+          this.deps.log(`dotaz na stav videa ${videoId}: ${(e as Error).message}`);
+        }
+      }
+      finish();
+    };
+    void run();
+  }
+
+  /** Přestat čekat na zpracování (konec appky). */
+  stopWaiting(): void {
+    for (const stop of this.waiting.values()) stop();
+    this.waiting.clear();
   }
 
   /** Zavolat, když se změní stav hry / připojení: přeruší nebo rozjede. */
@@ -211,23 +295,45 @@ export class Uploader {
     }
 
     const settings = this.deps.settings();
-    const hashtags = ['klip'];
-    if (clip.game) hashtags.push(gameHashtag(clip.game));
     const { id } = await api.confirm({
       title: (request.title ?? clip.title).trim().slice(0, 150) || clip.title,
-      description: this.deps.describe ? this.deps.describe(clip) : clip.game ? `Clip from ${clip.game} · Kine` : 'Clip · Kine',
+      description: request.description?.trim() || (this.deps.describe ? this.deps.describe(clip) : clip.game ? `Clip from ${clip.game} · Kine` : 'Clip · Kine'),
       cloudflareVideoId: videoId,
-      language: settings.videoLanguage,
+      language: request.language || settings.videoLanguage,
       visibility: request.visibility,
       width: clip.width,
       height: clip.height,
-      hashtags,
+      hashtags: request.hashtags ?? defaultHashtags(clip, settings),
+      category: request.category || settings.uploadCategory || 'catGaming',
+      madeForKids: request.madeForKids ?? false,
+      hasPaidPromotion: request.hasPaidPromotion ?? false,
+      isAiGenerated: request.isAiGenerated ?? false,
     });
 
     const url = `${api.siteUrl()}/watch/${id}`;
-    library.setUpload(clip.id, { state: 'done', videoId: id, url });
+    // Nahrané - ale Kine ho ještě zpracovává; vidět bude až po 'ready' (watchReady).
+    library.setUpload(clip.id, { state: 'done', videoId: id, url, ready: false });
+
+    // Náhled z appky jako náhled na Kine (stejná karta tady i tam). Když to nejde, video zůstane s náhledem od Kine.
+    const wantThumb = request.thumbnail ?? settings.uploadThumbnail;
+    if (wantThumb && clip.thumb && this.deps.uploadThumbnail) {
+      try {
+        await this.deps.uploadThumbnail(id, clip.thumb);
+      } catch (e) {
+        this.deps.log(`náhled na Kine se nepovedl: ${(e as Error).message}`);
+      }
+    }
+    this.watchReady(clip.id, id, url);
     return url;
   }
+}
+
+/** Hashtagy, když si hráč žádné nenapsal: "klip", hra a to, co má v nastavení. */
+export function defaultHashtags(clip: Clip, settings: Settings): string[] {
+  const tags = ['klip'];
+  if (clip.game) tags.push(gameHashtag(clip.game));
+  for (const tag of parseHashtags(settings.uploadHashtags ?? '')) if (!tags.includes(tag)) tags.push(tag);
+  return tags.slice(0, 15);
 }
 
 /**

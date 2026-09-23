@@ -67,6 +67,30 @@ export class Auth {
     }
   }
 
+  /**
+   * Náhled klipu jako vlastní náhled videa na Kine - stejně, jako to dělá
+   * web při nahrávání: obrázek do úložiště "thumbnails" pod
+   * <uživatel>/<video>.jpg a u videa se zapne custom_thumbnail. Jde to
+   * přes relaci hráče (pravidla RLS pustí jen vlastní videa), žádný
+   * zvláštní endpoint na Kine to nepotřebuje.
+   */
+  async uploadThumbnail(videoId: string, file: string): Promise<void> {
+    const client = await this.getClient();
+    const { data } = await client.auth.getUser();
+    const userId = data.user?.id;
+    if (!userId) throw new Error('not signed in');
+    const path = `${userId}/${videoId}.jpg`;
+    const bytes = readFileSync(file);
+    const { error } = await client.storage.from('thumbnails').upload(path, bytes, { upsert: true, contentType: 'image/jpeg' });
+    if (error) throw new Error(error.message);
+    const { data: pub } = client.storage.from('thumbnails').getPublicUrl(path);
+    const { error: updateError } = await client
+      .from('videos')
+      .update({ thumbnail_url: `${pub.publicUrl}?t=${Date.now()}`, custom_thumbnail: true })
+      .eq('id', videoId);
+    if (updateError) throw new Error(updateError.message);
+  }
+
   /** Přístupový token pro volání Kine; supabase-js ho sám obnoví, když vypršel. */
   async getToken(): Promise<string | null> {
     try {

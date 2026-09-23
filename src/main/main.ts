@@ -18,7 +18,8 @@ import {
   session,
   shell,
 } from 'electron';
-import { TRASH_DAYS, type CaptureEvent, type Clip, type DisplayInfo, type Settings, type Status, type Visibility } from '../shared/types';
+import { CATEGORY_KEYS, TRASH_DAYS, VISIBILITIES, type CaptureEvent, type Clip, type DisplayInfo, type Settings, type Status, type UploadRequest, type Visibility } from '../shared/types';
+import { parseHashtags } from '../shared/upload';
 import { hexToRgbTriplet } from '../shared/plan';
 import { makeT, type Key } from '../shared/i18n';
 import { hotkeyLabel } from '../shared/hotkeys';
@@ -75,6 +76,37 @@ function freeDiskBytes(dir: string): number {
   } catch {
     return -1;
   }
+}
+
+/**
+ * Požadavky na nahrání z oken: nevěří se ničemu, každé pole se očistí
+ * (viditelnost jen známá, hashtagy přes parseHashtags, texty ořezané).
+ */
+function sanitizeUploadRequests(raw: unknown, settings: Settings): UploadRequest[] {
+  if (!Array.isArray(raw)) return [];
+  const out: UploadRequest[] = [];
+  for (const item of raw) {
+    const r = item as Record<string, unknown> | null;
+    if (!r || typeof r.clipId !== 'string') continue;
+    const str = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined);
+    const flag = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
+    const category = typeof r.category === 'string' && (CATEGORY_KEYS as readonly string[]).includes(r.category) ? r.category : undefined;
+    const language = typeof r.language === 'string' && /^[a-z]{2}(-[a-z]{2})?$/i.test(r.language) ? r.language.toLowerCase() : undefined;
+    out.push({
+      clipId: r.clipId,
+      visibility: (VISIBILITIES as readonly string[]).includes(r.visibility as string) ? (r.visibility as Visibility) : settings.visibility,
+      title: str(r.title, 150),
+      description: str(r.description, 5000),
+      hashtags: Array.isArray(r.hashtags) ? parseHashtags(r.hashtags.filter((x) => typeof x === 'string').join(' ')) : undefined,
+      category,
+      language,
+      madeForKids: flag(r.madeForKids),
+      hasPaidPromotion: flag(r.hasPaidPromotion),
+      isAiGenerated: flag(r.isAiGenerated),
+      thumbnail: flag(r.thumbnail),
+    });
+  }
+  return out;
 }
 
 function mimeFor(file: string): string {
@@ -252,11 +284,17 @@ class KineApp {
         }
         return clip.game ? this.t('uploadDescriptionGame', { game: clip.game, url: download }) : this.t('uploadDescription', { url: download });
       },
+      uploadThumbnail: (videoId, file) => this.auth.uploadThumbnail(videoId, file),
     });
     this.uploader.on((e) => {
       if (e.type === 'done') {
+        // Nahrané, ale Kine ho ještě zpracovává - jen okénko v rohu; systémové oznámení až když je vidět.
         const id = e.clip.id;
-        void this.toast.show(this.t('toastUploaded', { title: e.clip.title }), 'ok', { notification: true, onClick: () => this.openClipOnKine(id) });
+        void this.toast.show(this.t('toastUploadedProcessing', { title: e.clip.title }), 'ok', { onClick: () => this.openClipOnKine(id) });
+      }
+      if (e.type === 'ready') {
+        const id = e.clip.id;
+        void this.toast.show(this.t('toastOnKine', { title: e.clip.title }), 'ok', { notification: true, onClick: () => this.openClipOnKine(id) });
       }
       if (e.type === 'error') void this.toast.show(this.t('toastUploadFailed', { title: e.clip.title }) + ` (${e.message})`, 'error', { notification: true });
       this.pushStatus();
@@ -1438,8 +1476,8 @@ class KineApp {
       const clip = this.library.get(id);
       if (clip) shell.showItemInFolder(clip.file);
     });
-    ipcMain.handle('clips:upload', (_e, requests: { clipId: string; visibility: Visibility; title?: string }[]) => {
-      this.uploader.enqueue(requests);
+    ipcMain.handle('clips:upload', (_e, requests: unknown) => {
+      this.uploader.enqueue(sanitizeUploadRequests(requests, this.settings.get()));
       this.pushStatus();
     });
     ipcMain.handle('clips:openOnKine', (_e, id: string) => this.openClipOnKine(id));
@@ -1540,8 +1578,9 @@ class KineApp {
     ipcMain.handle('hotkey:available', (_e, hotkey: string) => this.hotkeys.available(String(hotkey)));
 
     ipcMain.handle('review:clips', (_e, sessionId: string) => this.library.bySession(sessionId));
-    ipcMain.handle('review:done', (_e, requests: { clipId: string; visibility: Visibility; title?: string }[]) => {
-      if (requests.length > 0) this.uploader.enqueue(requests);
+    ipcMain.handle('review:done', (_e, requests: unknown) => {
+      const list = sanitizeUploadRequests(requests, this.settings.get());
+      if (list.length > 0) this.uploader.enqueue(list);
       this.reviewWindow?.close();
       this.pushStatus();
     });
@@ -1596,6 +1635,7 @@ class KineApp {
   quit(): void {
     log('konec');
     this.helper?.stop();
+    this.uploader.stopWaiting();
     void this.gameEvents.stop();
     // Rozjetá nahrávka se před koncem uloží (dlouhá může chvíli trvat - proto delší strop).
     const recording = !!this.capture.recordingInfo();

@@ -1,12 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { CaptureCommand, CaptureEvent, Clip, DisplayInfo, GameSource, ProcessInfo, Settings, Status, Visibility } from '../shared/types';
+import type { CaptureCommand, CaptureEvent, Clip, DisplayInfo, GameSource, ProcessInfo, Settings, Status, UploadRequest } from '../shared/types';
 
 /**
  * Most mezi stránkami a hlavním procesem. Stránky nemají Node ani
  * electron - jen tohle úzké rozhraní (window.kine, window.kineCapture).
  */
-
-type UploadRequest = { clipId: string; visibility: Visibility; title?: string };
 
 const on = <T>(channel: string, cb: (payload: T) => void) => {
   const listener = (_e: unknown, payload: T) => cb(payload);

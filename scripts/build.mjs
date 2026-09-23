@@ -68,6 +68,7 @@ await build({
     plan: 'src/shared/plan.ts',
     performance: 'src/shared/performance.ts',
     types: 'src/shared/types.ts',
+    upload: 'src/shared/upload.ts',
   },
   outdir: 'dist/esm',
   platform: 'node',

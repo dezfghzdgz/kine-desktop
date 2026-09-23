@@ -42,6 +42,7 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
                     ▼
    Uploader: tus po 8 MiB kusech do Cloudflare → /api/videos/confirm na Kine
              pauza, jakmile se rozjede hra; po hře pokračuje od místa, kam došel
+             → /api/videos/status dokola, dokud Kine video nezpracuje („Je na Kine“)
 ```
 
 - **Bez překódování.** Obraz kóduje Chromium (H.264 přes hardware
@@ -177,6 +178,29 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   („Dvojité zabití · Crystal Maiden“). Ani jedno není zásah do hry – jsou
   to rozhraní, která hry samy nabízejí (stejně je používá Medal, Overwolf,
   Allstar).
+- **Nahrání na Kine s nastavením** (`src/renderer/uploadDialog.ts`):
+  tlačítko Nahrát v knihovně (a ⚙ u klipu, ⚙ v okýnku po hře) otevře
+  vrstvu se stejnými poli, jaká má web při nahrávání - název, popis
+  (předvyplněný podle hry), hashtagy (předvyplněné `#klip` + hra +
+  hashtagy z nastavení; u víc klipů se píšou jen společné navíc),
+  viditelnost **veřejné / jen odběratelé / soukromé**, kategorie (15,
+  stejné klíče jako web), jazyk, „pro děti“ / placená propagace / AI,
+  a **náhled z appky jako náhled videa na Kine** (nahraje se do úložiště
+  `thumbnails` přes relaci hráče, jako to dělá web). V Nahrání a sdílení
+  jde nastavit, jestli se appka před nahráním ptá (jinak Nahrát pošle
+  klip rovnou s výchozím), hashtagy ke každému klipu, výchozí kategorie
+  a posílání náhledu. Požadavek na nahrání (`UploadRequest`,
+  `shared/types.ts`) se uloží ke klipu (`uploadOptions`), takže přežije
+  restart appky; hlavní proces všechna pole očistí (`sanitizeUploadRequests`).
+- **„Je na Kine“ až doopravdy:** Kine video po nahrání teprve zpracovává
+  (Cloudflare) a do té doby ho v žádném seznamu neukazuje. Dřív se appka
+  po potvrzení už nezeptala, takže video mohlo na Kine viset jako
+  „zpracovává se“ donekonečna (webhook od Cloudflare není nastavený a
+  doptával se jen prohlížeč). Teď se appka ptá `/api/videos/status`
+  podle rozvrhu (3 s / 10 s / 30 s, do ~45 min; `readySchedule`), karta
+  ukazuje „Nahráno · Kine ho zpracovává…“ a teprve po `ready` „✓ Na Kine“
+  s oznámením; po restartu se čekání naváže (`upload.ready === false`).
+  Web má k tomu záchranu na své straně (`sweepProcessing`, viz repo Kine).
 - **Kine v prohlížeči (Kine Clipper):** „Otevřít na Kine“ jde přes
   `/connect/app` s jednorázovým tokenem, takže se prohlížeč přihlásí
   stejným účtem jako appka - čerstvě nahraný (soukromý) klip je hned

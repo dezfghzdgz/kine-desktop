@@ -5,6 +5,8 @@
  *       -> { mode: 'tus' | 'basic', uploadURL, videoId }
  *  POST /api/videos/confirm            { title, cloudflareVideoId, ... }
  *       -> { video: { id } }
+ *  POST /api/videos/status             { videoId }
+ *       -> { status: 'ready' | 'processing' }   (Kine se zeptá Cloudflare)
  *
  * Token je přístupový token Supabase (Bearer); dodává ho auth.ts.
  */
@@ -23,16 +25,28 @@ export type ConfirmInput = {
   description: string;
   cloudflareVideoId: string;
   language: string;
-  visibility: 'public' | 'private';
+  visibility: 'public' | 'subscribers' | 'private';
   width: number | null;
   height: number | null;
   hashtags: string[];
+  category: string;
+  madeForKids: boolean;
+  hasPaidPromotion: boolean;
+  isAiGenerated: boolean;
 };
+
+export type VideoStatus = 'ready' | 'processing' | 'not-found';
 
 export type KineApi = {
   siteUrl(): string;
   createUploadUrl(fileSize: number): Promise<UploadTarget>;
   confirm(input: ConfirmInput): Promise<{ id: string }>;
+  /**
+   * Je video na Kine už zpracované? Kine se zeptá Cloudflare a když je
+   * hotovo, přepne ho na "ready" - do té doby není v žádném seznamu na
+   * Kine vidět. Volá se po nahrání dokola, dokud není hotovo.
+   */
+  status(videoId: string): Promise<VideoStatus>;
 };
 
 export function createKineApi(deps: {
@@ -67,11 +81,11 @@ export function createKineApi(deps: {
         title: input.title,
         description: input.description,
         cloudflareVideoId: input.cloudflareVideoId,
-        madeForKids: false,
-        hasPaidPromotion: false,
-        isAiGenerated: false,
+        madeForKids: input.madeForKids,
+        hasPaidPromotion: input.hasPaidPromotion,
+        isAiGenerated: input.isAiGenerated,
         language: input.language,
-        category: 'catGaming',
+        category: input.category,
         visibility: input.visibility,
         isPremiere: false,
         scheduledAt: null,
@@ -83,6 +97,20 @@ export function createKineApi(deps: {
       });
       if (!data?.video?.id) throw new KineApiError('Kine video neuložila.', 500);
       return { id: data.video.id as string };
+    },
+    async status(videoId) {
+      // Bez přihlášení to jde taky (stav videa není tajný), token se ale pošle, když je.
+      const token = await deps.getToken();
+      const res = await fetchImpl(`${deps.siteUrl()}/api/videos/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ videoId }),
+        signal: AbortSignal.timeout(20000),
+      });
+      if (res.status === 404) return 'not-found';
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new KineApiError(typeof data?.error === 'string' ? data.error : `Kine odpověděla ${res.status}.`, res.status);
+      return data?.status === 'ready' ? 'ready' : 'processing';
     },
   };
 }

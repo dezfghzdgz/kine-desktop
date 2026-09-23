@@ -173,3 +173,12 @@ test('výkon appky: tři profily, neplatná hodnota = vyvážený, řazení knih
   assert.equal(sanitizeSettings({ lastVersion: '0.7.0' }).lastVersion, '0.7.0');
   assert.equal(sanitizeSettings({ lastVersion: 'abc' }).lastVersion, '');
 });
+
+import { parseHashtags, formatHashtags } from '../dist/esm/upload.js';
+
+test('hashtagy: bez #, malými písmeny, bez dvojic a mezer, s diakritikou, nejvýš 15', () => {
+  assert.deepEqual(parseHashtags('#Klip, cs2 mirage #klip  hráč!'), ['klip', 'cs2', 'mirage', 'hráč']);
+  assert.deepEqual(parseHashtags(''), []);
+  assert.deepEqual(parseHashtags('a b c d e f g h i j k l m n o p q').length, 15);
+  assert.equal(formatHashtags(['klip', 'cs2']), '#klip #cs2');
+});

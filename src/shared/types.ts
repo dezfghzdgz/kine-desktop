@@ -41,7 +41,41 @@ export type AfterGame =
 
 export type Codec = 'auto' | 'h264' | 'vp9' | 'vp8';
 
-export type Visibility = 'public' | 'private';
+/** Viditelnost videa na Kine - stejné hodnoty jako web (public / subscribers = jen odběratelé / private). */
+export type Visibility = 'public' | 'subscribers' | 'private';
+export const VISIBILITIES: readonly Visibility[] = ['public', 'subscribers', 'private'];
+
+/**
+ * Co jde nastavit u nahrání na Kine (stejná pole, jaká má web v nahrávání).
+ * Co chybí, doplní appka z výchozích hodnot (nastavení Nahrání a sdílení,
+ * popis a hashtagy podle hry).
+ */
+export type UploadOptions = {
+  title?: string;
+  /** Vlastní popis; když chybí, appka dá výchozí ("Klip z {hra} …" s odkazem na appku). */
+  description?: string;
+  /** Hashtagy bez #; když chybí, appka dá "klip" + hru + výchozí z nastavení. */
+  hashtags?: string[];
+  /** Klíč kategorie Kine ('catGaming', 'catMusic'…). */
+  category?: string;
+  /** Jazyk videa (cs, en…); když chybí, z nastavení. */
+  language?: string;
+  madeForKids?: boolean;
+  hasPaidPromotion?: boolean;
+  isAiGenerated?: boolean;
+  /** Poslat náhled klipu z appky jako vlastní náhled na Kine (jinak si Kine vezme snímek sama). */
+  thumbnail?: boolean;
+};
+
+/** Požadavek na nahrání jednoho klipu (knihovna, okýnko po hře, automaticky po hře). */
+export type UploadRequest = { clipId: string; visibility: Visibility } & UploadOptions;
+
+/** Kategorie Kine (klíče překladu, stejné jako web lib/categories.ts). */
+export const CATEGORY_KEYS = [
+  'catGaming', 'catEntertainment', 'catComedy', 'catMusic', 'catFilm', 'catSports', 'catPeople', 'catHowTo',
+  'catEducation', 'catScience', 'catNews', 'catPets', 'catCars', 'catTravel', 'catNonprofit',
+] as const;
+export type CategoryKey = (typeof CATEGORY_KEYS)[number];
 
 export type Settings = {
   /** 2 = od verze 0.3 (mikrofon zapnutý v základu, volba režimu zvlášť). */
@@ -108,6 +142,14 @@ export type Settings = {
   lastVersion: string;
   /** Řazení knihovny klipů. */
   clipsSort: ClipsSort;
+  /** Před nahráním z knihovny ukázat nastavení nahrání (název, popis, hashtagy…); false = nahrát rovnou s výchozím. */
+  uploadAsk: boolean;
+  /** Hashtagy, které se přidají ke každému nahrání (bez #, oddělené mezerou/čárkou). */
+  uploadHashtags: string;
+  /** Výchozí kategorie na Kine. */
+  uploadCategory: string;
+  /** Posílat náhled klipu z appky jako náhled na Kine. */
+  uploadThumbnail: boolean;
 };
 
 export type PerformanceMode = 'low' | 'balanced' | 'high';
@@ -119,7 +161,8 @@ export type ClipUpload =
   | { state: 'queued' }
   | { state: 'uploading'; percent: number; tusUrl?: string; videoId?: string }
   | { state: 'paused'; percent: number; reason: 'game' | 'offline'; tusUrl?: string; videoId?: string }
-  | { state: 'done'; videoId: string; url: string }
+  /** ready: Kine video zpracovala a je vidět (false = nahrané, Kine ho ještě zpracovává; chybí = starší záznam, hotovo). */
+  | { state: 'done'; videoId: string; url: string; ready?: boolean }
   | { state: 'error'; message: string };
 
 export type Clip = {
@@ -145,6 +188,8 @@ export type Clip = {
   kind?: 'clip' | 'recording';
   /** V koši od (ISO) - soubor leží ve složce .trash, po TRASH_DAYS dnech se smaže nadobro. */
   deletedAt?: string;
+  /** S čím se klip nahrává / nahrál (ať se po restartu appky neztratí hashtagy a spol.). */
+  uploadOptions?: UploadRequest;
 };
 
 /** Jak dlouho klip leží v koši, než zmizí sám. */

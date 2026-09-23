@@ -1,6 +1,6 @@
 import type { KineBridge } from '../preload/preload';
-import type { Clip, DisplayInfo, GameSource, Lang, ProcessInfo, Settings, Status } from '../shared/types';
-import { LANGS, TRASH_DAYS } from '../shared/types';
+import type { Clip, DisplayInfo, GameSource, Lang, ProcessInfo, Settings, Status, UploadRequest } from '../shared/types';
+import { CATEGORY_KEYS, LANGS, TRASH_DAYS, VISIBILITIES } from '../shared/types';
 import { LANG_NAMES, makeT, type Key } from '../shared/i18n';
 import { HotkeyRecorder, formatHotkey, hotkeyLabel } from '../shared/hotkeys';
 import { DISCORD_FILE_MAX_BYTES, isDiscordWebhook, suggestedMbps } from '../shared/settingsSchema';
@@ -8,6 +8,7 @@ import { applyBrandColor, clipOptionsFor, maxClipSecondsFor } from '../shared/pl
 import { performanceProfile } from '../shared/performance';
 import { clear, clipMeta, errorText, fileUrl, formatBytes, formatDate, formatDuration, h } from './ui';
 import { closePlayer, openPlayer, openPlayerId, type Neighbors, type PlayerHandle } from './player';
+import { VIDEO_LANGS, openUploadDialog } from './uploadDialog';
 
 /**
  * Hlavní okno: v režimu "Kine + klipy" první záložka Kine - web Kine přes
@@ -1300,7 +1301,29 @@ function renderGames() {
 
 // ---- nahrávání ------------------------------------------------------------------------
 
-const VIDEO_LANGS: [string, string][] = [['en', 'English'], ['cs', 'Čeština'], ['sk', 'Slovenčina'], ['de', 'Deutsch'], ['pl', 'Polski'], ['es', 'Español'], ['fr', 'Français'], ['uk', 'Українська']];
+/**
+ * Nahrání klipů na Kine z knihovny: s nastavením (dialog - název, popis,
+ * hashtagy, viditelnost, kategorie…), nebo rovnou s výchozím, když si to
+ * hráč tak nastavil (uploadAsk = false). `force` = dialog vždycky (⚙).
+ */
+function startUpload(list: Clip[], force = false) {
+  if (list.length === 0) return;
+  if (!settings.uploadAsk && !force) {
+    void kine.uploadClips(list.map((c): UploadRequest => ({ clipId: c.id, visibility: settings.visibility })));
+    return;
+  }
+  openUploadDialog({
+    clips: list,
+    settings,
+    t,
+    askToggle: true,
+    onConfirm: (requests, opts) => {
+      if (opts.askNextTime !== settings.uploadAsk) update({ uploadAsk: opts.askNextTime });
+      void kine.uploadClips(requests);
+      clearSelection();
+    },
+  });
+}
 
 function renderUpload() {
   const price = status.account?.prices.clips ?? status.account?.prices.all ?? null;
@@ -1335,9 +1358,8 @@ function renderUpload() {
           t('visibility'),
           h(
             'select',
-            { onchange: (e: Event) => update({ visibility: (e.target as HTMLSelectElement).value as Settings['visibility'] }) },
-            h('option', { value: 'private', selected: settings.visibility === 'private' }, t('visibilityPrivate')),
-            h('option', { value: 'public', selected: settings.visibility === 'public' }, t('visibilityPublic'))
+            { class: 'visibility-select', onchange: (e: Event) => update({ visibility: (e.target as HTMLSelectElement).value as Settings['visibility'] }) },
+            ...VISIBILITIES.map((v) => h('option', { value: v, selected: settings.visibility === v }, t(v === 'public' ? 'visibilityPublic' : v === 'subscribers' ? 'visibilitySubscribers' : 'visibilityPrivate')))
           )
         ),
         h(
@@ -1350,7 +1372,39 @@ function renderUpload() {
             ...VIDEO_LANGS.map(([code, name]) => h('option', { value: code, selected: settings.videoLanguage === code }, name))
           )
         )
-      )
+      ),
+      h('p', { class: 'hint', style: 'margin:0' }, t(settings.visibility === 'public' ? 'visibilityPublicHint' : settings.visibility === 'subscribers' ? 'visibilitySubscribersHint' : 'visibilityPrivateHint')),
+      // Nastavení nahrání: ptát se / nahrát rovnou, hashtagy ke všemu, kategorie, náhled.
+      checkbox('uploadAsk', t('uploadAskSetting'), t('uploadAskSettingHint')),
+      h(
+        'div',
+        { class: 'row', style: 'gap:12px;align-items:flex-end' },
+        h(
+          'label',
+          { class: 'grow' },
+          t('uploadHashtagsSetting'),
+          h('input', {
+            type: 'text',
+            class: 'upload-hashtags-setting',
+            value: settings.uploadHashtags,
+            placeholder: 'kine cz',
+            maxlength: '300',
+            onchange: (e: Event) => update({ uploadHashtags: (e.target as HTMLInputElement).value.trim() }),
+          })
+        ),
+        h(
+          'label',
+          { style: 'min-width:220px' },
+          t('uploadCategorySetting'),
+          h(
+            'select',
+            { class: 'upload-category-setting', onchange: (e: Event) => update({ uploadCategory: (e.target as HTMLSelectElement).value }) },
+            ...CATEGORY_KEYS.map((key) => h('option', { value: key, selected: settings.uploadCategory === key }, t(key)))
+          )
+        )
+      ),
+      h('p', { class: 'hint', style: 'margin:0' }, t('uploadHashtagsSettingHint')),
+      checkbox('uploadThumbnail', t('uploadThumbnailSetting'), t('uploadThumbnailSettingHint'))
     ),
     h('div', { class: 'panel' }, h('h2', {}, t('onlyWhenNotPlayingTitle')), h('p', { class: 'dim', style: 'margin:0' }, t('onlyWhenNotPlayingHint'))),
     discordPanel()
@@ -1403,6 +1457,7 @@ function uploadState(clip: Clip) {
   if (u.state === 'queued') return h('div', { class: 'state' }, t('uploadQueued'));
   if (u.state === 'uploading') return h('div', {}, h('div', { class: 'progress' }, h('span', { style: `width:${u.percent}%` })), h('div', { class: 'state' }, t('uploadUploading', { percent: u.percent })));
   if (u.state === 'paused') return h('div', {}, h('div', { class: 'progress' }, h('span', { style: `width:${u.percent}%` })), h('div', { class: 'state' }, t(u.reason === 'game' ? 'uploadPausedGame' : 'uploadPausedOffline', { percent: u.percent })));
+  if (u.state === 'done' && u.ready === false) return h('div', { class: 'state processing', title: t('uploadProcessingHint') }, h('span', { class: 'spin' }), ' ' + t('uploadProcessing'));
   if (u.state === 'done') return h('div', { class: 'state done' }, '✓ ' + t('uploadDone'));
   return h('div', { class: 'state error' }, t('uploadError', { message: u.message }));
 }
@@ -1608,10 +1663,7 @@ function selectionBar(shown: Clip[]) {
                     class: 'small',
                     disabled: !status.account,
                     title: status.account ? '' : t('uploadNeedsLogin'),
-                    onclick: () => {
-                      void kine.uploadClips(uploadable.map((c) => ({ clipId: c.id, visibility: settings.visibility })));
-                      clearSelection();
-                    },
+                    onclick: () => startUpload(uploadable),
                   },
                   t('selectionUpload')
                 )
@@ -1863,13 +1915,15 @@ function renderClips() {
         h(
           'button',
           {
-            class: 'small primary',
+            class: 'small primary upload-btn',
             disabled: !status.account,
             title: status.account ? '' : t('uploadNeedsLogin'),
-            onclick: () => void kine.uploadClips([{ clipId: clip.id, visibility: settings.visibility }]),
+            onclick: () => startUpload([clip]),
           },
           clip.upload?.state === 'error' ? t('libraryRetry') : t('libraryUpload')
-        )
+        ),
+        // Nastavení nahrání (název, popis, hashtagy, viditelnost…) - vždycky, i když se appka jinak neptá.
+        h('button', { class: 'small quiet upload-options', disabled: !status.account, title: t('uploadOptionsButton'), onclick: () => startUpload([clip], true) }, '⚙')
       );
     }
     if (clip.upload?.state === 'done') {

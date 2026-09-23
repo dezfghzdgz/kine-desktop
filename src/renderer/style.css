@@ -464,6 +464,27 @@ button.seg.active { color: var(--brand); box-shadow: inset 0 0 0 1px rgba(var(--
 .state { font-size: var(--fs-sm); color: var(--text-dim); }
 .state.done { color: var(--brand); }
 .state.error { color: var(--danger); }
+/* Nahrané, Kine ještě zpracovává: točící se kolečko. */
+.state.processing { color: var(--warn); display: inline-flex; align-items: center; gap: 6px; }
+.spin { display: inline-block; width: 11px; height: 11px; border-radius: 50%; border: 2px solid rgba(255, 200, 87, 0.3); border-top-color: var(--warn); animation: spin 0.9s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.upload-options { width: 32px; padding: 0 !important; }
+
+/* ---------- Nastavení nahrání (vrstva jako přehrávač) ---------- */
+.upload-dialog { width: min(720px, 100%); }
+.upload-body { padding: 16px 18px; overflow: auto; gap: 14px; }
+.upload-clips { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow: auto; flex: none; }
+.upload-clip { display: grid; grid-template-columns: 96px 1fr; gap: 12px; align-items: center; }
+.upload-clips.single .upload-clip { grid-template-columns: 180px 1fr; }
+.upload-clip .thumb { aspect-ratio: 16 / 9; background: #000; border-radius: var(--radius-sm); overflow: hidden; }
+.upload-clip .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.upload-dialog textarea { resize: vertical; min-height: 64px; line-height: 1.45; }
+.upload-tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 22px; font-size: var(--fs-sm); }
+.upload-tags .tag { padding: 1px 8px; border-radius: var(--radius-pill); background: var(--brand-soft); color: var(--brand); font-weight: 600; font-size: var(--fs-xs); }
+.seg-row { gap: 6px; }
+.check.small { font-size: var(--fs-sm); align-items: center; }
+.check.small input { margin: 0; }
+.upload-foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 18px; border-top: 1px solid var(--border); background: var(--panel-raised); flex-wrap: wrap; }
 .empty { color: var(--text-faint); padding: 30px 0; text-align: center; }
 
 /* ---------- Seznam procesů, štítky ---------- */

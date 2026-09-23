@@ -21,7 +21,7 @@ export async function runTestDriver(kine: {
   openReview: (sessionId: string) => void;
   settings: { update: (p: any) => any; get: () => any };
   toast: { show: (m: string, k?: any, o?: any) => Promise<void> };
-  library: { list: () => any[] };
+  library: { list: () => any[]; get: (id: string) => any };
   settingsWindow: BrowserWindow | null;
   reviewWindow: BrowserWindow | null;
 }): Promise<void> {
@@ -95,12 +95,60 @@ export async function runTestDriver(kine: {
         );
         result.reviewMerge = clicked && !!montage && montage.sessionId === clip1.sessionId && onlyMontageSelected;
         await shot(rw, 'review-merged');
+
+        // Nastavení nahrání (⚙): pro víc klipů společné (názvy po jednom), pro jeden předvyplněné
+        // podle klipu; Nahrát z dialogu předá nastavení hlavnímu procesu a uloží se ke klipu.
+        await rw.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.spread button')].find((x) => x.textContent && !x.classList.contains('review-merge') && x.textContent.trim().length > 0); if (b) b.click(); return !!b; })()`);
+        await sleep(300);
+        const manyOpened = await rw.webContents.executeJavaScript(`(() => { const b = document.querySelector('.review-upload-options'); if (!b || b.disabled) return false; b.click(); return true; })()`);
+        await sleep(400);
+        const manyDialog = await rw.webContents.executeJavaScript(
+          `(() => { const d = document.querySelector('.upload-dialog'); if (!d) return null; const uc = d.querySelector(".upload-clips"); const body = d.querySelector(".upload-body"); return { clips: d.querySelectorAll('.upload-clips:not(.single) .upload-clip').length, vis: d.querySelectorAll('.seg-row button').length, cats: d.querySelector('.upload-body select').options.length, note: !!d.querySelector('.upload-tags .faint'), clipsHeight: uc ? uc.getBoundingClientRect().height : -1, clipsTop: uc ? uc.getBoundingClientRect().top : -1, scrollTop: body ? body.scrollTop : -1, bodyTop: body ? body.getBoundingClientRect().top : -1, thumbH: (d.querySelector('.upload-clip .thumb') || { getBoundingClientRect: () => ({ height: -1 }) }).getBoundingClientRect().height }; })()`
+        );
+        await shot(rw, 'review-upload-many');
+        await rw.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        await sleep(300);
+        const closedByEsc = await rw.webContents.executeJavaScript(`!document.querySelector('.upload-dialog')`);
+        // Jen sestřih: jeden klip - popis a hashtagy předvyplněné, přepnout na odběratele, přidat hashtag, nahrát.
+        // "Zrušit výběr" je druhé tlačítko v hlavičce (každý klik překreslí okno, proto ne po jednom přes zaškrtávátka).
+        await rw.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.spread .row > button')][1]; if (b) b.click(); return !!b; })()`);
+        await sleep(300);
+        await rw.webContents.executeJavaScript(`(() => { const cards = [...document.querySelectorAll('.clip')]; const card = cards.find((c) => /montage/i.test(c.querySelector('.title-edit').value)); const p = card && card.querySelector('.pick'); if (p && !p.checked) p.click(); return !!p; })()`);
+        await sleep(300);
+        await rw.webContents.executeJavaScript(`(() => { const b = document.querySelector('.review-upload-options'); if (b && !b.disabled) b.click(); return true; })()`);
+        await sleep(400);
+        const singleDialog = await rw.webContents.executeJavaScript(
+          `(() => { const d = document.querySelector('.upload-dialog'); if (!d) return null; const tags = [...d.querySelectorAll('.upload-tags .tag')].map((x) => x.textContent); const desc = d.querySelector('textarea').value; d.querySelector('.seg-row button[data-visibility="subscribers"]').click(); const inp = d.querySelector('.upload-hashtags'); inp.value = inp.value + ' #Test_Tag'; inp.dispatchEvent(new Event('input')); inp.dispatchEvent(new Event('blur')); return { single: !!d.querySelector('.upload-clips.single'), tags, desc, tagsAfter: [...d.querySelectorAll('.upload-tags .tag')].map((x) => x.textContent), submit: !!d.querySelector('.upload-submit') }; })()`
+        );
+        await shot(rw, 'review-upload-single');
+        await rw.webContents.executeJavaScript(`(() => { const b = document.querySelector('.upload-submit'); if (b) b.click(); return !!b; })()`);
+        let saved: any = null;
+        for (let i = 0; i < 30 && !saved; i++) {
+          await sleep(200);
+          saved = montage ? kine.library.get(montage.id)?.uploadOptions ?? null : null;
+        }
+        result.uploadDialogDebug = { manyOpened, manyDialog, closedByEsc, singleDialog, saved };
+        result.uploadDialog =
+          manyOpened &&
+          !!manyDialog && manyDialog.clips === 3 && manyDialog.vis === 3 && manyDialog.cats === 15 && manyDialog.note && manyDialog.clipsHeight > 100 &&
+          closedByEsc &&
+          !!singleDialog && singleDialog.single && singleDialog.tags.includes('#klip') && /Kine/.test(singleDialog.desc) && singleDialog.tagsAfter.includes('#test_tag') &&
+          !!saved && saved.visibility === 'subscribers' && Array.isArray(saved.hashtags) && saved.hashtags.includes('test_tag') && saved.category === 'catGaming' && saved.hashtags.includes('klip');
       }
     }
     for (const tab of ['clips', 'settings', 'games', 'upload', 'account', 'about']) {
       kine.openSettings(tab);
       await sleep(900);
       await shot(kine.settingsWindow, `settings-${tab}`);
+    }
+
+    // Nahrání a sdílení: viditelnost má tři volby (i "jen odběratelé"), k tomu hashtagy ke všemu a kategorie.
+    kine.openSettings('upload');
+    await sleep(700);
+    if (kine.settingsWindow && !kine.settingsWindow.isDestroyed()) {
+      result.uploadSettings = await kine.settingsWindow.webContents.executeJavaScript(
+        `(() => { const v = document.querySelector('.visibility-select'); const c = document.querySelector('.upload-category-setting'); return !!v && v.options.length === 3 && !!c && c.options.length === 15 && !!document.querySelector('.upload-hashtags-setting'); })()`
+      );
     }
 
     // Přehrávač jako vrstva přes okno: klik na náhled prvního klipu otevře
@@ -665,7 +713,7 @@ export async function runTestDriver(kine: {
       'inlinePlayer', 'gridUntouched', 'trimPanel', 'trimNewClip', 'trimReplace', 'vertical', 'verticalUi', 'autoClip', 'overlayClosed', 'filters',
       'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks', 'reviewMerge', 'updateUi',
       'playerNav', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
-      'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'thumbFrame', 'storage',
+      'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings',
       'colorPicker', 'brandIcon', 'brandMarkSvg',
     ];
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];

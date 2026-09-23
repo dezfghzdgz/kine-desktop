@@ -1,4 +1,4 @@
-import { LANGS, type Settings } from './types';
+import { CATEGORY_KEYS, LANGS, VISIBILITIES, type Settings } from './types';
 import { isHotkey } from './hotkeys';
 
 /**
@@ -44,6 +44,10 @@ export const DEFAULT_SETTINGS: Settings = {
   performance: 'balanced',
   lastVersion: '',
   clipsSort: 'newest',
+  uploadAsk: true,
+  uploadHashtags: '',
+  uploadCategory: 'catGaming',
+  uploadThumbnail: true,
 };
 
 export const CLIP_SECONDS_OPTIONS = [15, 30, 60, 90, 120] as const;
@@ -108,7 +112,7 @@ export function sanitizeSettings(input: unknown): Settings {
     detectFullscreen: bool(raw.detectFullscreen, d.detectFullscreen),
     customGames,
     afterGame: oneOf(raw.afterGame, ['review', 'auto', 'none'] as const, d.afterGame),
-    visibility: oneOf(raw.visibility, ['public', 'private'] as const, d.visibility),
+    visibility: oneOf(raw.visibility, VISIBILITIES, d.visibility),
     videoLanguage: text(raw.videoLanguage, d.videoLanguage, 10) || d.videoLanguage,
     startWithSystem: bool(raw.startWithSystem, d.startWithSystem),
     toast: bool(raw.toast, d.toast),
@@ -122,6 +126,10 @@ export function sanitizeSettings(input: unknown): Settings {
     performance: oneOf(raw.performance, ['low', 'balanced', 'high'] as const, d.performance),
     lastVersion: /^\d+\.\d+\.\d+$/.test(String(raw.lastVersion ?? '')) ? String(raw.lastVersion) : '',
     clipsSort: oneOf(raw.clipsSort, ['newest', 'oldest', 'longest', 'largest'] as const, d.clipsSort),
+    uploadAsk: bool(raw.uploadAsk, d.uploadAsk),
+    uploadHashtags: typeof raw.uploadHashtags === 'string' ? raw.uploadHashtags.slice(0, 300) : d.uploadHashtags,
+    uploadCategory: oneOf(raw.uploadCategory, CATEGORY_KEYS, d.uploadCategory),
+    uploadThumbnail: bool(raw.uploadThumbnail, d.uploadThumbnail),
   };
 }
 

@@ -1,9 +1,11 @@
 import type { KineBridge } from '../preload/preload';
 import type { Clip, Settings, Visibility } from '../shared/types';
+import { VISIBILITIES } from '../shared/types';
 import { makeT } from '../shared/i18n';
 import { clear, clipMeta, fileUrl, formatDuration, h } from './ui';
 import { applyBrandColor } from '../shared/plan';
 import { openPlayer, type PlayerHandle } from './player';
+import { openUploadDialog } from './uploadDialog';
 
 /**
  * Okýnko po hře: klipy z posledního hraní, každý s náhledem a
@@ -172,8 +174,26 @@ function render() {
   const visSelect = h(
     'select',
     { style: 'width:auto;min-width:220px', onchange: (e: Event) => (visibility = (e.target as HTMLSelectElement).value as Visibility) },
-    h('option', { value: 'private', selected: visibility === 'private' }, t('visibilityPrivate')),
-    h('option', { value: 'public', selected: visibility === 'public' }, t('visibilityPublic'))
+    ...VISIBILITIES.map((v) => h('option', { value: v, selected: visibility === v }, t(v === 'public' ? 'visibilityPublic' : v === 'subscribers' ? 'visibilitySubscribers' : 'visibilityPrivate')))
+  );
+  const picked = () => clips.filter((c) => selected.has(c.id));
+  // Nastavení nahrání (popis, hashtagy, kategorie…) pro vybrané - nahrání pak jde rovnou z dialogu.
+  const optionsBtn = h(
+    'button',
+    {
+      class: 'quiet review-upload-options',
+      disabled: selectedCount === 0,
+      title: t('uploadOptionsButton'),
+      onclick: () =>
+        openUploadDialog({
+          clips: picked(),
+          settings: { ...settings, visibility },
+          t,
+          titles,
+          onConfirm: (requests) => void kine.reviewDone(requests),
+        }),
+    },
+    '⚙'
   );
 
   app.append(
@@ -201,15 +221,13 @@ function render() {
         'div',
         { class: 'row' },
         h('button', { class: 'quiet', onclick: () => void kine.reviewDone([]) }, t('reviewSkip')),
+        optionsBtn,
         h(
           'button',
           {
             class: 'primary',
             disabled: selectedCount === 0,
-            onclick: () =>
-              void kine.reviewDone(
-                clips.filter((c) => selected.has(c.id)).map((c) => ({ clipId: c.id, visibility, title: titles.get(c.id) ?? c.title }))
-              ),
+            onclick: () => void kine.reviewDone(picked().map((c) => ({ clipId: c.id, visibility, title: titles.get(c.id) ?? c.title }))),
           },
           t('reviewUpload', { count: selectedCount })
         )

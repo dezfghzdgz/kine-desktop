@@ -130,6 +130,11 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   konci série, aby v něm bylo všechno. Ani jedno není zásah do hry – jsou
   to rozhraní, která hry samy nabízejí (stejně je používá Medal, Overwolf,
   Allstar).
+- **Kine v prohlížeči (Kine Clipper):** „Otevřít na Kine“ jde přes
+  `/connect/app` s jednorázovým tokenem, takže se prohlížeč přihlásí
+  stejným účtem jako appka - čerstvě nahraný (soukromý) klip je hned
+  vidět, i když v prohlížeči nikdo přihlášený nebyl. Bez přihlášení v
+  appce jde odkaz rovnou.
 - **Sdílení:** u nahraného klipu je „Kopírovat odkaz“ (odkaz na Kine do
   schránky) a „Poslat na Discord“ – webhook kanálu se vyplní v záložce
   Nahrání a sdílení, appka pošle název + odkaz (`main.ts` → `shareToDiscord`).

@@ -705,9 +705,10 @@ class KineApp {
    */
   openKine(path = ''): void {
     const s = this.settings.get();
-    const url = s.siteUrl + (path ? (path.startsWith('/') ? path : `/${path}`) : '');
+    const cleanPath = path ? (path.startsWith('/') ? path : `/${path}`) : '';
+    const url = s.siteUrl + cleanPath;
     if (s.appMode !== 'full') {
-      void shell.openExternal(url);
+      void this.openKineInBrowser(url, cleanPath || '/');
       return;
     }
     if (this.kineView && !this.kineView.webContents.isDestroyed()) {
@@ -716,6 +717,28 @@ class KineApp {
       this.pendingKinePath = path;
     }
     this.openSettings('kine');
+  }
+
+  /**
+   * Kine Clipper otvírá Kine v prohlížeči. Když je appka přihlášená, vezme
+   * si jednorázový token a pošle prohlížeč přes /connect/app - ten se
+   * přihlásí stejným účtem a teprve pak skočí na cíl. Bez toho by čerstvě
+   * nahraný (soukromý) klip v prohlížeči s jiným nebo žádným účtem hlásil
+   * „nemáš přístup“. Bez přihlášení (nebo když token nevyjde) jde odkaz rovnou.
+   */
+  private async openKineInBrowser(url: string, nextPath: string): Promise<void> {
+    if (this.auth.current()) {
+      try {
+        const th = await this.auth.webLinkToken();
+        if (th) {
+          await shell.openExternal(`${this.settings.get().siteUrl}/connect/app?th=${encodeURIComponent(th)}&next=${encodeURIComponent(nextPath)}`);
+          return;
+        }
+      } catch (e) {
+        log(`otevření Kine s přihlášením: ${(e as Error).message}`);
+      }
+    }
+    await shell.openExternal(url);
   }
 
   /** Web Kine vložený do hlavního okna; vznikne, až ho stránka poprvé ukáže. */

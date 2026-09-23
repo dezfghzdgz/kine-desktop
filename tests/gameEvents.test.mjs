@@ -121,3 +121,83 @@ test('popisky a cfg pro CS2', () => {
   assert.match(cfg, /"player_state" "1"/);
   assert.ok(cfg.startsWith('"Kine"\r\n{'));
 });
+
+// ---- 0.9.0: CS2 mapa + skóre, Dota 2, Minecraft ---------------------------------------
+
+import { cs2Context, cs2MapName, dota2Events, dota2GsiConfig, heroName, isDota2Payload, minecraftGameDir, minecraftLogEvent, minecraftUserFromLog } from '../dist/esm/gameEventsParse.js';
+
+test('CS2: mapa a skóre do názvu klipu (z pohledu hráče)', () => {
+  assert.equal(cs2MapName('de_mirage'), 'Mirage');
+  assert.equal(cs2MapName('cs_office'), 'Office');
+  assert.equal(cs2MapName('de_ancient'), 'Ancient');
+  assert.equal(cs2MapName(''), '');
+  let r = cs2Events(null, gsi(0, 0, { map: { name: 'de_mirage', team_ct: { score: 7 }, team_t: { score: 5 } }, player: { steamid: ME, team: 'CT', state: { round_kills: 0 }, match_stats: { kills: 0 } } }));
+  assert.equal(cs2Context(r.state), 'Mirage 7:5');
+  r = cs2Events(r.state, gsi(1, 1, { map: { name: 'de_mirage', team_ct: { score: 7 }, team_t: { score: 5 } }, player: { steamid: ME, team: 'T', state: { round_kills: 1 }, match_stats: { kills: 1 } } }));
+  assert.equal(cs2Context(r.state), 'Mirage 5:7');
+  // Bez skóre jen mapa; bez ničeho prázdné.
+  assert.equal(cs2Context(cs2Events(null, gsi(0, 0)).state), 'Mirage');
+  assert.equal(cs2Context(null), '');
+});
+
+const dota = (kills, extra = {}) => ({
+  provider: { name: 'Dota 2', appid: 570, steamid: ME },
+  map: { matchid: '7000000001', game_state: 'DOTA_GAMERULES_STATE_GAME_IN_PROGRESS' },
+  player: { steamid: ME, name: 'Hráč', kills, deaths: 0, assists: 1 },
+  hero: { name: 'npc_dota_hero_crystal_maiden', level: 6 },
+  ...extra,
+});
+
+test('Dota 2: poznání zprávy, zabití z nárůstu player.kills, nový zápas začíná od nuly', () => {
+  assert.equal(isDota2Payload(dota(0)), true);
+  assert.equal(isDota2Payload(gsi(0, 0, { provider: { steamid: ME, appid: 730 } })), false);
+  assert.equal(isDota2Payload(gsi(0, 0)), false);
+  let r = dota2Events(null, dota(0));
+  assert.deepEqual(r.events, []);
+  assert.equal(r.state.hero, 'Crystal Maiden');
+  r = dota2Events(r.state, dota(1));
+  assert.deepEqual(r.events, [{ game: 'dota2', kind: 'kill', count: 1 }]);
+  // Dvě zabití v jedné zprávě = dvě události (sérii poskládá KillStreak).
+  r = dota2Events(r.state, dota(3));
+  assert.equal(r.events.length, 2);
+  // Nový zápas: jiné matchid, kills od nuly - nic nehlásit.
+  r = dota2Events(r.state, dota(0, { map: { matchid: '7000000002' } }));
+  assert.deepEqual(r.events, []);
+  r = dota2Events(r.state, dota(1, { map: { matchid: '7000000002' } }));
+  assert.equal(r.events.length, 1);
+  // Divák: hráč s jiným steamid se nepočítá.
+  r = dota2Events(r.state, dota(5, { player: { steamid: '1', kills: 5 } }));
+  assert.deepEqual(r.events, []);
+  assert.equal(heroName('npc_dota_hero_shadow_fiend'), 'Shadow Fiend');
+  assert.match(dota2GsiConfig(27381, 'abc'), /"hero" "1"/);
+  assert.match(dota2GsiConfig(27381, 'abc'), /"token" "abc"/);
+});
+
+test('Minecraft: jméno hráče ze startu logu, smrt / PvP zabití / pokrok z [CHAT] řádků', () => {
+  assert.equal(minecraftUserFromLog('[10:00:01] [main/INFO]: Setting user: Steve'), 'Steve');
+  assert.equal(minecraftUserFromLog('[10:00:01] [main/INFO]: Loaded 1 recipes'), null);
+  const line = (text) => `[10:00:02] [Render thread/INFO]: [System] [CHAT] ${text}`;
+  assert.deepEqual(minecraftLogEvent(line('Steve was slain by Zombie'), 'Steve'), { kind: 'death', text: 'Steve was slain by Zombie' });
+  assert.equal(minecraftLogEvent(line('Steve fell from a high place'), 'Steve').kind, 'death');
+  assert.equal(minecraftLogEvent(line('Steve drowned'), 'Steve').kind, 'death');
+  assert.equal(minecraftLogEvent(line('Steve has made the advancement [Stone Age]'), 'Steve').kind, 'advancement');
+  assert.equal(minecraftLogEvent(line('Steve has completed the challenge [Return to Sender]'), 'Steve').kind, 'advancement');
+  // Jiný jazyk hry: název pokroku v závorkách na konci.
+  assert.equal(minecraftLogEvent(line('Steve získal pokrok [Doba kamenná]'), 'Steve').kind, 'advancement');
+  // PvP: cizí smrt "by Steve" (i se zbraní).
+  assert.equal(minecraftLogEvent(line('Alex was slain by Steve'), 'Steve').kind, 'kill');
+  assert.equal(minecraftLogEvent(line('Alex was shot by Steve using [Bow]'), 'Steve').kind, 'kill');
+  // Vlastní smrt se zbraní nesmí být "pokrok".
+  assert.equal(minecraftLogEvent(line('Steve was slain by Alex using [Sword]'), 'Steve').kind, 'death');
+  // Chat hráčů, připojení, cizí smrt bez mě, jiný hráč se stejným začátkem jména: nic.
+  assert.equal(minecraftLogEvent(line('<Steve> was slain by Zombie lol'), 'Steve'), null);
+  assert.equal(minecraftLogEvent(line('Steve joined the game'), 'Steve'), null);
+  assert.equal(minecraftLogEvent(line('Alex was slain by Zombie'), 'Steve'), null);
+  assert.equal(minecraftLogEvent(line('Steve2 was slain by Zombie'), 'Steve'), null);
+  assert.equal(minecraftLogEvent('[10:00:02] [Render thread/INFO]: Steve was slain by Zombie', 'Steve'), null);
+  assert.equal(minecraftLogEvent(line('Steve was slain by Zombie'), ''), null);
+  // Složka hry z příkazové řádky.
+  assert.equal(minecraftGameDir('javaw -Xmx2G --gameDir C:\\Hry\\mc --assetsDir x'), 'C:\\Hry\\mc');
+  assert.equal(minecraftGameDir('javaw --gameDir "C:\\Moje hry\\mc" --version 1.21'), 'C:\\Moje hry\\mc');
+  assert.equal(minecraftGameDir('javaw -jar server.jar'), null);
+});

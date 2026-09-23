@@ -25,7 +25,13 @@ const kine = {
 
   listClips: (): Promise<Clip[]> => ipcRenderer.invoke('clips:list'),
   onClips: (cb: (clips: Clip[]) => void) => on<Clip[]>('clips', cb),
+  /** Smazat = do koše (po týdnu zmizí samo); klip už v koši se smaže nadobro. */
   deleteClip: (id: string): Promise<void> => ipcRenderer.invoke('clips:delete', id),
+  /** Vrátit klip z koše. */
+  restoreClip: (id: string): Promise<Clip | null> => ipcRenderer.invoke('clips:restore', id),
+  emptyTrash: (): Promise<void> => ipcRenderer.invoke('clips:emptyTrash'),
+  /** Místo: klipy, koš, zásobník, volno na disku. */
+  storageInfo: (): Promise<{ clipsBytes: number; clipsCount: number; trashBytes: number; trashCount: number; bufferBytes: number; freeBytes: number; clipsDir: string }> => ipcRenderer.invoke('storage:info'),
   renameClip: (id: string, title: string): Promise<Clip | null> => ipcRenderer.invoke('clips:rename', id, title),
   setClipGame: (id: string, game: string | null): Promise<Clip | null> => ipcRenderer.invoke('clips:setGame', id, game),
   openClip: (id: string): Promise<string> => ipcRenderer.invoke('clips:open', id),
@@ -36,23 +42,31 @@ const kine = {
   pickClipsDir: (): Promise<string | null> => ipcRenderer.invoke('clips:pickDir'),
   clipNow: (): Promise<Clip | null> => ipcRenderer.invoke('clips:clipNow'),
   /** Zkrácení / ztlumení klipu; 'new' = nový klip vedle, 'replace' = přepsat původní. */
-  trimClip: (id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' }): Promise<Clip> => ipcRenderer.invoke('clips:trim', id, opts),
+  trimClip: (id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur' }): Promise<Clip> => ipcRenderer.invoke('clips:trim', id, opts),
   /** Text do schránky (odkaz na klip). */
   copyText: (text: string): Promise<void> => ipcRenderer.invoke('app:copy', text),
-  /** Nahraný klip na Discord (webhook z nastavení). */
+  /** Klip na Discord (webhook z nastavení): nahraný jako odkaz, jinak jako soubor do 10 MB. */
   shareToDiscord: (id: string): Promise<void> => ipcRenderer.invoke('clips:discord', id),
+  /** Soubor ze složky s klipy (GIF, krátký klip) na Discord. Chyba 'too-large' = přes limit. */
+  shareFileToDiscord: (file: string, title: string): Promise<void> => ipcRenderer.invoke('clips:discordFile', file, title),
   /** Hvězdička u klipu. */
   setFavorite: (id: string, favorite: boolean): Promise<Clip | null> => ipcRenderer.invoke('clips:favorite', id, favorite),
   /** Sestřih vybraných klipů do jednoho nového (průběh chodí jako onTrimProgress s id "merge"). */
   mergeClips: (ids: string[]): Promise<Clip> => ipcRenderer.invoke('clips:merge', ids),
   /** GIF z úseku klipu - soubor vedle klipu (průběh jako onTrimProgress s id klipu). */
   makeGif: (id: string, range: { start: number; end: number }): Promise<{ file: string; sizeBytes: number; lengthSeconds: number }> => ipcRenderer.invoke('clips:gif', id, range),
+  /** Náhled klipu ze snímku v daném čase (přehrávač: "Tenhle snímek jako náhled"). */
+  setThumbnailFrame: (id: string, atSeconds: number): Promise<Clip | null> => ipcRenderer.invoke('clips:thumbFrame', id, atSeconds),
   /** Ukázat soubor ze složky s klipy (třeba GIF) ve složce. */
   revealFile: (file: string): Promise<void> => ipcRenderer.invoke('clips:revealFile', file),
+  /** Tažení klipu z knihovny ven (do Discordu, prohlížeče, složky) - volá se z ondragstart, bez čekání. */
+  dragClip: (id: string): void => ipcRenderer.send('clips:dragStart', id),
   onTrimProgress: (cb: (p: { id: string; percent: number }) => void) => on<{ id: string; percent: number }>('clips:trimProgress', cb),
   toggleCapture: (): Promise<void> => ipcRenderer.invoke('capture:toggle'),
   /** Pozastavit / obnovit nahrávání do zásobníku (jako v nabídce u hodin). */
   togglePause: (): Promise<void> => ipcRenderer.invoke('capture:pause'),
+  /** Start / stop nahrávání celého zápasu (uloží se jako dlouhý klip). */
+  toggleRecording: (): Promise<void> => ipcRenderer.invoke('capture:record'),
 
   loginBrowser: (): Promise<void> => ipcRenderer.invoke('auth:loginBrowser'),
   cancelBrowserLogin: (): Promise<void> => ipcRenderer.invoke('auth:cancelBrowser'),

@@ -140,3 +140,25 @@ export function progressPercent(line: string, totalSeconds: number): number | nu
   if (!m || totalSeconds <= 0) return null;
   return Math.min(99, Math.round((Number(m[1]) / 1e6 / totalSeconds) * 100));
 }
+
+// ---- na výšku 9:16 --------------------------------------------------------------------
+
+export type VerticalMode = 'left' | 'center' | 'right' | 'blur';
+
+/** Filtr ffmpeg pro výřez na výšku; null = bez výřezu. */
+export function verticalCropFilter(anchor: VerticalMode | undefined | null): string | null {
+  if (!anchor) return null;
+  // Šířka 9:16 sudá (yuv420p chce sudé rozměry); když je obraz už užší, nechá se celý.
+  const w = "'trunc(min(iw,ih*9/16)/2)*2'";
+  if (anchor === 'blur') {
+    return [
+      'split[bg][fg]',
+      `[bg]crop=w=${w}:h=ih:x='(iw-ow)/2':y=0,boxblur=luma_radius=24:luma_power=2:chroma_radius=12:chroma_power=1[bgb]`,
+      `[fg]scale=w=${w}:h=-2[fgs]`,
+      "[bgb][fgs]overlay=x='(W-w)/2':y='(H-h)/2'",
+    ].join(';');
+  }
+  const k = anchor === 'left' ? '0' : anchor === 'right' ? '1' : '0.5';
+  // ow = šířka výstupu.
+  return `crop=w=${w}:h=ih:x='(iw-ow)*${k}':y=0`;
+}

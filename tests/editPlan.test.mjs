@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergePlan, gifArgs, parseProbe, progressPercent, GIF_MAX_SECONDS } from '../dist/esm/editPlan.js';
+import { mergePlan, gifArgs, parseProbe, progressPercent, verticalCropFilter, GIF_MAX_SECONDS } from '../dist/esm/editPlan.js';
 
 const HEADER = `Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'a.mp4':
   Duration: 00:00:07.33, start: 0.000000, bitrate: 36 kb/s
@@ -74,4 +74,19 @@ test('průběh z -progress pipe:1', () => {
   assert.equal(progressPercent('out_time_ms=9300000', 9.3), 99, 'nikdy 100 před koncem');
   assert.equal(progressPercent('frame=12', 9.3), null);
   assert.equal(progressPercent('out_time_us=1', 0), null);
+});
+
+test('na výšku 9:16: výřez vlevo/střed/vpravo, rozmazané pozadí jako jeden filtergraph', () => {
+  assert.equal(verticalCropFilter(null), null);
+  assert.equal(verticalCropFilter(undefined), null);
+  assert.match(verticalCropFilter('left'), /^crop=w='trunc\(min\(iw,ih\*9\/16\)\/2\)\*2':h=ih:x='\(iw-ow\)\*0':y=0$/);
+  assert.match(verticalCropFilter('center'), /\*0\.5':y=0$/);
+  assert.match(verticalCropFilter('right'), /\*1':y=0$/);
+  const blur = verticalCropFilter('blur');
+  // Jeden vstup (split), dvě větve, jeden výstup (overlay) - jde do -vf.
+  assert.ok(blur.startsWith('split[bg][fg];'));
+  assert.match(blur, /\[bg\]crop=.*boxblur.*\[bgb\]/);
+  assert.match(blur, /\[fg\]scale=.*:h=-2\[fgs\]/);
+  assert.match(blur, /\[bgb\]\[fgs\]overlay=x='\(W-w\)\/2':y='\(H-h\)\/2'$/);
+  assert.equal((blur.match(/;/g) || []).length, 3);
 });

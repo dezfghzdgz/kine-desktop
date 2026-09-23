@@ -255,6 +255,20 @@ kbd {
 .side-actions { display: flex; gap: 6px; margin-top: 4px; }
 .side-actions button.small { flex: 1; min-height: 30px; padding: 4px 6px; font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .side-actions .side-clip:not(:disabled) { color: var(--brand); }
+/* Nahrávání zápasu: tlačítko se za běhu zbarví a tiká v něm čas. */
+.side-record.recording { color: var(--danger); box-shadow: inset 0 0 0 1px rgba(255, 107, 107, 0.55); background-color: rgba(255, 107, 107, 0.12); background-image: none; font-weight: 600; font-variant-numeric: tabular-nums; }
+.rec-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); margin-right: 6px; box-shadow: 0 0 8px rgba(255, 107, 107, 0.8); animation: rec-blink 1.2s ease-in-out infinite; }
+@keyframes rec-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.hotkey.empty { color: var(--text-faint); font-weight: 500; }
+/* Úložiště: dvě úzké sloupce popisek / hodnota. */
+.storage-grid { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; align-items: center; font-size: var(--fs-sm); }
+.storage-grid b { font-weight: 600; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+/* Koš v knihovně: lišta s počtem a tlačítkem, karty lehce zesvětlené. */
+.trash-bar { padding: 8px 12px; border-radius: var(--radius-md); background: rgba(255, 107, 107, 0.08); box-shadow: inset 0 0 0 1px rgba(255, 107, 107, 0.25); }
+.filters .trash-filter.active { color: var(--danger); box-shadow: inset 0 0 0 1px rgba(255, 107, 107, 0.5); background-color: rgba(255, 107, 107, 0.1); }
+.clips.in-trash .clip .thumb img { filter: saturate(0.4) brightness(0.8); }
+.trash-meta { color: var(--danger); font-size: var(--fs-xs); }
+.clip .thumb .kind-badge { position: absolute; left: 8px; bottom: 6px; padding: 1px 7px; border-radius: var(--radius-xs); font-size: var(--fs-2xs); font-weight: 700; letter-spacing: 0.04em; color: #fff; background: rgba(255, 107, 107, 0.85); }
 .side-account {
   display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 6px; padding: 6px 4px 2px; min-height: 0;
   background: none; box-shadow: none; border-top: 1px solid var(--border); border-radius: 0; text-align: left; font-size: var(--fs-sm); color: var(--text);
@@ -398,6 +412,7 @@ kbd {
 button.seg.active { color: var(--brand); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.55); background-color: var(--brand-soft); }
 /* Stínování mimo výřez 9:16 nad videem. */
 .crop-shade { position: absolute; background: rgba(0, 0, 0, 0.62); pointer-events: none; z-index: 2; box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.6); }
+.crop-shade.blur { background: rgba(0, 0, 0, 0.25); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
 .chip {
   min-height: 26px; padding: 2px 10px; border-radius: var(--radius-pill); font-size: var(--fs-xs);
   background: var(--panel-raised); background-image: none; box-shadow: inset 0 0 0 1px var(--border); color: var(--text-dim);
@@ -407,9 +422,9 @@ button.seg.active { color: var(--brand); box-shadow: inset 0 0 0 1px rgba(var(--
 .filters label { min-width: 150px; }
 .filters label.grow { flex: 1; min-width: 200px; }
 .filters select, .filters input { min-height: 36px; padding: 6px 10px; }
-.filters .fav-filter { min-height: 36px; display: inline-flex; align-items: center; gap: 6px; }
+.filters .fav-filter, .filters .trash-filter { min-height: 36px; display: inline-flex; align-items: center; gap: 6px; }
 .filters .fav-filter.active { color: var(--brand); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.55); background-color: var(--brand-soft); }
-.filters .fav-filter .count { font-size: var(--fs-2xs); color: var(--text-faint); background: var(--panel-raised); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 0 6px; line-height: 16px; }
+.filters .fav-filter .count, .filters .trash-filter .count { font-size: var(--fs-2xs); color: var(--text-faint); background: var(--panel-raised); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 0 6px; line-height: 16px; }
 /* Výběr více klipů: zaškrtávátko a hvězdička nad náhledem - ukážou se při najetí, vybrané/oblíbené pořád. */
 .clip .thumb .pick {
   position: absolute; left: 8px; top: 8px; width: 20px; height: 20px; margin: 0; accent-color: var(--brand); cursor: pointer; z-index: 3;

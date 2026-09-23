@@ -57,6 +57,8 @@ export type Settings = {
   clipHotkey: string;
   /** Zkratka pro ruční zapnutí/vypnutí zásobníku. */
   toggleHotkey: string;
+  /** Zkratka start/stop nahrávání celého zápasu (prázdné = vypnuto). */
+  recordHotkey: string;
   /** Kolik sekund zpět klip sahá. */
   clipSeconds: number;
   /** Výška obrazu: 0 = jako obrazovka. */
@@ -139,7 +141,14 @@ export type Clip = {
   upload: ClipUpload | null;
   /** Oblíbený (hvězdička v knihovně) - starší index ho nemá, proto volitelný. */
   favorite?: boolean;
+  /** 'recording' = nahrávka celého zápasu (start/stop), jinak klip ze zásobníku. */
+  kind?: 'clip' | 'recording';
+  /** V koši od (ISO) - soubor leží ve složce .trash, po TRASH_DAYS dnech se smaže nadobro. */
+  deletedAt?: string;
 };
+
+/** Jak dlouho klip leží v koši, než zmizí sám. */
+export const TRASH_DAYS = 7;
 
 export type CaptureState = 'off' | 'starting' | 'on' | 'error';
 
@@ -190,8 +199,10 @@ export type Status = {
   version: string;
   /** Která appka to je ("Kine" nebo "Kine Clipper"). */
   variant: Variant;
-  /** Hra, která právě posílá události pro automatické klipy (CS2 / LoL), nebo null. */
-  autoClipsLive: 'cs2' | 'lol' | null;
+  /** Hra, která právě posílá události pro automatické klipy (CS2 / LoL / Dota 2 / Minecraft), nebo null. */
+  autoClipsLive: 'cs2' | 'lol' | 'dota2' | 'minecraft' | null;
+  /** Běží nahrávání celého zápasu? Od kdy (ms od epochy). */
+  recordingSince: number | null;
 };
 
 export type GameSource = 'steam' | 'custom' | 'known' | 'fullscreen';

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { sanitizeSettings, DEFAULT_SETTINGS, isAccelerator, isDiscordWebhook, suggestedMbps } from '../dist/esm/settingsSchema.js';
 import { parseHotkey, formatHotkey, isSimpleHotkey, toAccelerator, hotkeyVks, hotkeyLabel, partFromCode, partFromGamepadButton, HotkeyRecorder, PAD_VK_BASE } from '../dist/esm/hotkeys.js';
-import { clipFileBase, defaultClipTitle, gameHashtag, safeFilePart, formatDuration } from '../dist/esm/clipNaming.js';
+import { clipFileBase, defaultClipTitle, gameHashtag, safeFilePart, formatBytes, formatDuration } from '../dist/esm/clipNaming.js';
 import { translate, langFromLocale, DICTS, LANG_NAMES } from '../dist/esm/i18n.js';
 import { PERFORMANCE, performanceProfile } from '../dist/esm/performance.js';
 
@@ -84,6 +84,9 @@ test('názvy klipů a souborů', () => {
   assert.equal(gameHashtag("Baldur's Gate 3"), 'baldursgate3');
   assert.equal(safeFilePart('   '), 'clip');
   assert.equal(formatDuration(75), '1:15');
+  assert.equal(formatDuration(3725), '1:02:05');
+  assert.equal(formatBytes(512 * 1024), '512 kB');
+  assert.equal(formatBytes(2.5 * 1024 * 1024 * 1024), '2.5 GB');
 });
 
 test('překlady: dosazení proměnných a jazyk ze systému', () => {

@@ -18,8 +18,8 @@ import { clear, errorText, fileUrl, formatBytes, h } from './ui';
  */
 type T = (key: Key, vars?: Record<string, string | number>) => string;
 
-export type TrimRequest = { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' };
-type CropAnchor = 'left' | 'center' | 'right';
+export type TrimRequest = { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur' };
+type CropAnchor = 'left' | 'center' | 'right' | 'blur';
 /** Formát výstupu v úpravách: původní video, výřez na výšku, nebo GIF (soubor vedle klipu). */
 type ExportFormat = 'original' | 'vertical' | 'gif';
 
@@ -50,6 +50,10 @@ export type PlayerOptions = {
     gif?: (clip: Clip, range: { start: number; end: number }) => Promise<{ file: string; sizeBytes: number; lengthSeconds: number }>;
     /** Ukázat hotový soubor ve složce. */
     reveal?: (file: string) => void;
+    /** Poslat hotový soubor (GIF) na Discord; bez tohohle tlačítko není. */
+    discord?: (file: string, title: string) => Promise<void>;
+    /** Náhled klipu ze snímku v daném čase; bez tohohle tlačítko není. */
+    thumbnail?: (clip: Clip, atSeconds: number) => Promise<unknown>;
   };
 };
 
@@ -100,11 +104,13 @@ export function openPlayerId(): string | null {
 /** m:ss.d - desetiny, ať jde řez umístit přesně. */
 export function formatTime(seconds: number): string {
   const s = Math.max(0, seconds);
-  const m = Math.floor(s / 60);
-  const rest = s - m * 60;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const rest = s - h * 3600 - m * 60;
   const whole = Math.floor(rest);
   const tenth = Math.floor((rest - whole) * 10);
-  return `${m}:${String(whole).padStart(2, '0')}.${tenth}`;
+  const mm = h > 0 ? `${h}:${String(m).padStart(2, '0')}` : `${m}`;
+  return `${mm}:${String(whole).padStart(2, '0')}.${tenth}`;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -234,8 +240,10 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     left: h('button', { class: 'small quiet seg', onclick: () => setVertical('left') }, t('exportCropLeft')),
     center: h('button', { class: 'small quiet seg active', onclick: () => setVertical('center') }, t('exportCropCenter')),
     right: h('button', { class: 'small quiet seg', onclick: () => setVertical('right') }, t('exportCropRight')),
+    blur: h('button', { class: 'small quiet seg', onclick: () => setVertical('blur') }, t('exportCropBlur')),
   };
-  const anchorRow = h('div', { class: 'row hidden', style: 'gap:6px' }, anchorBtns.left, anchorBtns.center, anchorBtns.right, h('span', { class: 'faint' }, t('exportVerticalHint')));
+  const anchorHint = h('span', { class: 'faint' }, t('exportVerticalHint'));
+  const anchorRow = h('div', { class: 'row hidden', style: 'gap:6px' }, anchorBtns.left, anchorBtns.center, anchorBtns.right, anchorBtns.blur, anchorHint);
   const gifHint = h('p', { class: 'hint gif-hint hidden' }, t('exportGifHint', { width: GIF_WIDTH, max: GIF_MAX_SECONDS }));
   const progressBar = h('span', {});
   const progress = h('div', { class: 'progress trim-progress hidden' }, progressBar);
@@ -253,7 +261,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       h('button', { class: 'small quiet', onclick: () => setStart(video.currentTime) }, t('trimSetStart')),
       h('button', { class: 'small quiet', onclick: () => setEnd(video.currentTime) }, t('trimSetEnd')),
       h('button', { class: 'small quiet', onclick: () => playSelection() }, '▶ ' + t('trimPlaySelection')),
-      h('label', { class: 'check', style: 'align-items:center' }, muteBox, t('trimMute'))
+      h('label', { class: 'check', style: 'align-items:center' }, muteBox, t('trimMute')),
+      edit?.thumbnail ? h('button', { class: 'small quiet thumb-frame', title: t('thumbFrameHint'), onclick: () => void useFrameAsThumb() }, '📷 ' + t('thumbFrame')) : null
     ),
     h('p', { class: 'hint' }, t('trimHint')),
     h('div', { class: 'row', style: 'gap:6px' }, h('span', { class: 'faint', style: 'margin-right:4px' }, t('exportFormat')), formatBtns.original, formatBtns.vertical, edit?.gif ? formatBtns.gif : null),
@@ -353,6 +362,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     for (const el of [shadeLeft, shadeRight]) {
       el.style.top = `${offY}px`;
       el.style.height = `${dh}px`;
+      // Rozmazané pozadí: kraje se neoříznou, jen zmenší a rozmažou - stín to naznačí rozmazáním místo ztmavení.
+      el.classList.toggle('blur', vertical === 'blur');
     }
     shadeLeft.style.left = `${offX}px`;
     shadeLeft.style.width = `${Math.max(0, cropX)}px`;
@@ -368,6 +379,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     anchorRow.classList.toggle('hidden', !anchor);
     gifHint.classList.toggle('hidden', !gif);
     for (const [key, btn] of Object.entries(anchorBtns)) btn.classList.toggle('active', key === anchor);
+    anchorHint.textContent = anchor === 'blur' ? t('exportBlurHint') : t('exportVerticalHint');
     layoutCrop();
     refreshButtons();
   }
@@ -526,13 +538,26 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     confirmReplace = false;
     void save('replace');
   }
-  function showNote(message: string, kind: 'ok' | 'error', action?: { label: string; onClick: () => void }) {
+  function showNote(message: string, kind: 'ok' | 'error', ...actions: ({ label: string; onClick: () => void } | undefined)[]) {
     clear(note);
     note.append(h('span', {}, message));
-    if (action) note.append(h('button', { class: 'small quiet', style: 'margin-left:10px', onclick: action.onClick }, action.label));
+    const shown = actions.filter((a): a is { label: string; onClick: () => void } => !!a);
+    for (const action of shown) note.append(h('button', { class: 'small quiet', style: 'margin-left:10px', onclick: action.onClick }, action.label));
     note.className = `player-note ${kind}`;
     if (noteTimer) clearTimeout(noteTimer);
-    noteTimer = setTimeout(() => note.classList.add('hidden'), kind === 'error' ? 8000 : action ? 9000 : 4000);
+    noteTimer = setTimeout(() => note.classList.add('hidden'), kind === 'error' ? 8000 : shown.length ? 12000 : 4000);
+  }
+  /** Snímek, na kterém přehrávač stojí, jako náhled klipu (karta v knihovně i na Kine). */
+  async function useFrameAsThumb() {
+    if (!edit?.thumbnail) return;
+    const at = video.currentTime || 0;
+    try {
+      await edit.thumbnail(clip, at);
+      showNote(t('thumbFrameDone', { time: formatTime(at) }), 'ok');
+    } catch (e) {
+      options.onLog?.(`náhled ze snímku: ${(e as Error).message}`);
+      showNote(t('thumbFrameFailed', { message: errorText(e, t) }), 'error');
+    }
   }
   /** GIF z výběru: soubor vedle klipu, klip sám se nemění; okno zůstane v úpravách. */
   async function saveGif() {
@@ -550,7 +575,23 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       saving = null;
       const name = result.file.split(/[\\/]/).pop() ?? result.file;
       const reveal = edit.reveal;
-      showNote(t('gifDone', { name, size: formatBytes(result.sizeBytes) }), 'ok', reveal ? { label: t('gifReveal'), onClick: () => reveal(result.file) } : undefined);
+      const discord = edit.discord;
+      showNote(
+        t('gifDone', { name, size: formatBytes(result.sizeBytes) }),
+        'ok',
+        reveal ? { label: t('gifReveal'), onClick: () => reveal(result.file) } : undefined,
+        discord
+          ? {
+              label: t('libraryDiscord'),
+              onClick: () => {
+                showNote(t('discordSending'), 'ok');
+                discord(result.file, clip.title)
+                  .then(() => showNote(t('discordSent'), 'ok'))
+                  .catch((e: unknown) => showNote(t('discordFailed', { message: errorText(e, t) }), 'error'));
+              },
+            }
+          : undefined
+      );
     } catch (e) {
       saving = null;
       options.onLog?.(`GIF: ${(e as Error).message}`);

@@ -32,7 +32,8 @@ async function load(id: string) {
   settings = await kine.getSettings();
   visibility = settings.visibility;
   clips = (await kine.reviewClips(sessionId)).filter((c) => !c.upload || c.upload.state === 'error');
-  selected = new Set(clips.map((c) => c.id));
+  // Nahrávka celého zápasu (dlouhá, velká) se předem nezaškrtává - hráč ji přidá sám.
+  selected = new Set(clips.filter((c) => c.kind !== 'recording').map((c) => c.id));
   titles.clear();
   player?.close();
   render();
@@ -43,7 +44,7 @@ async function refresh() {
   if (!sessionId && clips.length === 0) return;
   const fresh = (await kine.reviewClips(sessionId)).filter((c) => !c.upload || c.upload.state === 'error');
   const known = new Set(clips.map((c) => c.id));
-  for (const c of fresh) if (!known.has(c.id)) selected.add(c.id);
+  for (const c of fresh) if (!known.has(c.id) && c.kind !== 'recording') selected.add(c.id);
   for (const id of [...selected]) if (!fresh.some((c) => c.id === id)) selected.delete(id);
   clips = fresh;
   player?.sync(clips);
@@ -162,6 +163,7 @@ function render() {
       clip.thumb ? h('img', { src: fileUrl(clip.thumb), alt: '' }) : null,
       check,
       h('span', { class: 'play-badge' }, '▶'),
+      clip.kind === 'recording' ? h('span', { class: 'kind-badge' }, '⏺ ' + t('libraryRecordingBadge')) : null,
       h('span', { class: 'dur' }, formatDuration(clip.durationSeconds))
     );
     grid.append(h('div', { class: `clip ${isSelected ? 'selected' : ''}` }, thumb, body));

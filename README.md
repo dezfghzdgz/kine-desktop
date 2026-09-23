@@ -31,7 +31,10 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
    ffmpeg -c copy -f segment  ──►  %TEMP%\kine-buffer\gen-N\00042.mkv (2 s kousky)
                     │                staré kousky se mažou
    zkratka (F8) ────┤  nahrávání se zastaví (přesný konec) a hned rozjede znovu
-   zabití ve hře ───┤  (CS2 Game State Integration / LoL Live Client API, GameEvents)
+   zabití ve hře ───┤  (CS2 / Dota 2 Game State Integration, LoL Live Client API,
+                    │   Minecraft logs/latest.log - GameEvents)
+   Ctrl+F8 ─────────┤  nahrávání celého zápasu: od stisku se kousky nemažou,
+                    │   druhý stisk je slepí do jednoho dlouhého videa
                     ▼
    ffmpeg -f concat -c copy  ──►  Videos\Kine\Kine 2026-09-21 20-14-05 CS2.mp4 + .jpg
                     │
@@ -88,7 +91,13 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   chodí do okna. **Formát na výšku 9:16** (TikTok, Shorts, Reels): ve
   vrstvě se zastíní, co se odřízne, hráč vybere levou/střední/pravou část
   obrazu a uloží se nový klip `… (9:16)` (výška zůstane, šířka =
-  výška·9/16; `crop` filtr v `edit.ts`). Původní se nikdy nepřepisuje.
+  výška·9/16; `crop` filtr, `editPlan.verticalCropFilter`), nebo čtvrtou
+  volbu **Rozmazané pozadí**: celý obraz zmenšený doprostřed a nad ním
+  i pod ním rozmazaná kopie (`split` → `crop`+`boxblur` / `scale` →
+  `overlay`, jeden filtergraph do `-vf`). Původní se nikdy nepřepisuje.
+  V úpravách je i **Náhled z tohohle snímku**: snímek, na kterém
+  přehrávač stojí, se stane náhledem klipu (`clips:thumbFrame`, ffmpeg
+  `-ss`; nový soubor náhledu, starý se smaže).
   **GIF** (třetí formát): úsek do 15 s, 480 px, 15 fps, paleta +
   dithering (`editPlan.gifArgs`), bez zvuku, soubor `.gif` vedle klipu
   (do knihovny nepatří - tam jsou jen videa), tlačítko „Ukázat ve složce“.
@@ -106,6 +115,31 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   pruhy místo roztažení, společné fps, zvuk 48 kHz stereo a ticho tam,
   kde klip zvuk nemá, `concat` filtr, libx264), nebo je naráz nahraje či
   smaže. Sestřih je nový klip `Kine … sestřih.mp4`, původní zůstávají.
+  Kartu jde **přetáhnout ven z okna** (Discord, prohlížeč, Průzkumník) -
+  `ondragstart` → `clips:dragStart` → `webContents.startDrag` se souborem
+  a náhledem jako ikonou.
+- **Koš** (`src/main/clips.ts`): smazání klip nemaže, přesune soubor do
+  `<složka s klipy>/.trash` a klip dostane `deletedAt`; v knihovně je
+  tlačítko **Koš (N)** s kartami „Vrátit“ / „Smazat nadobro“ a „Vysypat
+  koš“. Po 7 dnech (`TRASH_DAYS`) zmizí samy (při startu a jednou za
+  hodinu). Klip v koši se nenahrává ani neukazuje jinde. V Záznamu je
+  přehled **Úložiště**: klipy, koš, zásobník a volné místo na disku
+  (`storage:info`, `statfs`), s varováním pod 5 GB.
+- **Nahrávání celého zápasu** (`capture.ts` → `startRecording` /
+  `stopRecording`): zkratka (výchozí Ctrl+F8, jde vypnout), tlačítko
+  **Nahrát zápas** v postranním panelu (za běhu tiká čas a je z něj
+  Zastavit), položka v nabídce u hodin (ikona u hodin má červenou tečku).
+  Zásobník musí běžet - nahrávka jsou jeho kousky, které se od startu
+  nemažou (`prune` je nechá), stop je slepí stejně jako klip (`-c copy`,
+  H.264 s AAC), takže se nic nepřekóduje a hra to nepocítí. Uloží se jako
+  klip s `kind: 'recording'` (odznak **REC** v knihovně i po hře), název
+  „Hra · nahrávka 23. 9. 20:14“, soubor `… recording.mp4`. Strop 3 h
+  (`RECORDING_MAX_SECONDS`) a hlídání volného místa (pod 2 GB se
+  nahrávka sama uloží a skončí, kontrola po 30 s). Konec hry, pauza,
+  změna kvality, vypnutí zásobníku i ukončení appky rozjetou nahrávku
+  nejdřív uloží. Po hře se nahrávka nabídne v okýnku, ale nepředzaškrtne
+  se a v režimu „nahrát všechno“ se nenahrává sama (hodiny videa jen na
+  přání hráče). Popis na Kine: „Celý zápas …“.
 - **Postranní panel:** nahoře Kine a Klipy, pod hlavičkou Nastavení
   Záznam / Hry / Nahrání a sdílení / Účet / O appce (každá položka
   s ikonou), dole karta stavu: co appka dělá, jak dlouhý zásobník drží
@@ -127,7 +161,20 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   dotaz každé 2 s, jen když běží `League of Legends.exe`; události
   `ChampionKill`/`Multikill`/`Ace` s hráčem jako zabijákem. Série zabití se
   spojí do jednoho klipu (3,5 s klid, nejvýš 12 s), klip vzniká až po
-  konci série, aby v něm bylo všechno. Ani jedno není zásah do hry – jsou
+  konci série, aby v něm bylo všechno. **Dota 2**: stejný GSI server
+  (zprávy se poznají podle `provider.appid` 570 / 730), cfg se zapíše do
+  `game/dota/cfg/gamestate_integration/` (podsložka se založí), zabití =
+  nárůst `player.kills`. **Minecraft (Java)**: hra nic neposílá, ale
+  všechno z chatu zapisuje do `logs/latest.log` - appka soubor sleduje
+  (od konce, každých 1,5 s; složka z `--gameDir` příkazové řádky, jinak
+  `%APPDATA%\.minecraft`), jméno hráče má z řádku `Setting user:`, a
+  klipuje **smrt** (anglická znění zpráv o smrti), **PvP zabití** („… by
+  <hráč>“) a **pokrok** („has made the advancement“ v kterémkoli jazyce
+  podle názvu pokroku v závorkách). Smrt a pokrok jsou samostatné klipy
+  („Smrt“, „Pokrok“ v názvu), zabití jdou do série jako jinde.
+  **Název automatického klipu nese kontext**: u CS2 mapa a skóre
+  z pohledu hráče („Trojité zabití · Mirage 7:5“), u Doty hrdina
+  („Dvojité zabití · Crystal Maiden“). Ani jedno není zásah do hry – jsou
   to rozhraní, která hry samy nabízejí (stejně je používá Medal, Overwolf,
   Allstar).
 - **Kine v prohlížeči (Kine Clipper):** „Otevřít na Kine“ jde přes
@@ -137,7 +184,11 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   appce jde odkaz rovnou.
 - **Sdílení:** u nahraného klipu je „Kopírovat odkaz“ (odkaz na Kine do
   schránky) a „Poslat na Discord“ – webhook kanálu se vyplní v záložce
-  Nahrání a sdílení, appka pošle název + odkaz (`main.ts` → `shareToDiscord`).
+  Nahrání a sdílení. Nahraný klip se pošle jako název + odkaz, **nenahraný
+  rovnou jako soubor** (multipart, do 10 MB - `DISCORD_FILE_MAX_BYTES`;
+  větší má tlačítko vypnuté s vysvětlením), a hotový **GIF má v přehrávači
+  tlačítko Poslat na Discord** (`shareFileToDiscord`, jen soubory ze
+  složky s klipy).
 - **Dvě appky vedle sebe** se hlídají: hlídání her dává každé kolo (5 s)
   seznam procesů i hlavnímu procesu (`onProcesses`); Kine Clipper se při
   běžícím `Kine.exe` sám vypne (klipovač je v Kine do PC), Kine při

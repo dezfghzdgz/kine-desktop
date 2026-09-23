@@ -1,11 +1,31 @@
 import { createServer, type Server } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Settings } from '../shared/types';
 import { log } from './log';
-import { KillStreak, cs2Events, cs2GsiConfig, lolEvents, streakLabelKey, type Cs2State, type GameEvent, type LolPlayer } from './gameEventsParse';
+import {
+  KillStreak,
+  cs2Context,
+  cs2Events,
+  cs2GsiConfig,
+  dota2Context,
+  dota2Events,
+  dota2GsiConfig,
+  isDota2Payload,
+  lolEvents,
+  minecraftGameDir,
+  minecraftLogEvent,
+  minecraftUserFromLog,
+  streakLabelKey,
+  type Cs2State,
+  type Dota2State,
+  type EventGame,
+  type GameEvent,
+  type LolPlayer,
+} from './gameEventsParse';
 
 /**
  * Automatické klipy z herních událostí - to, čím je Medal známý, jenže
@@ -27,10 +47,14 @@ import { KillStreak, cs2Events, cs2GsiConfig, lolEvents, streakLabelKey, type Cs
 const GSI_PORTS = [27381, 27382, 27383, 27384, 27385];
 const CS2_CFG_NAME = 'gamestate_integration_kine.cfg';
 const CS2_CFG_DIR = ['steamapps', 'common', 'Counter-Strike Global Offensive', 'game', 'csgo', 'cfg'];
+/** Dota 2 chce cfg v podsložce gamestate_integration (CS2 ho bere přímo v cfg). */
+const DOTA2_CFG_DIR = ['steamapps', 'common', 'dota 2 beta', 'game', 'dota', 'cfg', 'gamestate_integration'];
 /** Výchozí interval dotazů na LoL, když ho nastavení výkonu neurčí. */
 const LOL_POLL_MS = 2000;
+/** Jak často se čte logs/latest.log Minecraftu. */
+const MINECRAFT_POLL_MS = 1500;
 
-export type AutoClipLabelKey = ReturnType<typeof streakLabelKey>;
+export type AutoClipLabelKey = ReturnType<typeof streakLabelKey> | 'autoClipDeath' | 'autoClipAdvancement';
 
 export class GameEvents {
   private server: Server | null = null;
@@ -42,6 +66,10 @@ export class GameEvents {
   private lolPlayer: LolPlayer | null = null;
   private lolBusy = false;
   private lastLolAt = 0;
+  private dota2State: Dota2State | null = null;
+  private lastDota2At = 0;
+  private minecraft: { timer: ReturnType<typeof setInterval>; file: string; offset: number; player: string; tail: string } | null = null;
+  private lastMinecraftAt = 0;
   private streak: KillStreak;
   private cfgPaths: string[] = [];
 
@@ -50,42 +78,64 @@ export class GameEvents {
       settings: () => Settings;
       updateSettings: (patch: Partial<Settings>) => void;
       steamLibraries: () => Promise<string[]>;
-      /** Udělat klip; count = délka série. */
-      onClip: (count: number, labelKey: AutoClipLabelKey, game: 'cs2' | 'lol') => void;
+      /** Udělat klip; count = délka série, context = mapa a skóre / hrdina do názvu (může být prázdné). */
+      onClip: (count: number, labelKey: AutoClipLabelKey, game: EventGame, context: string) => void;
       onStateChange?: () => void;
       /** Jak často se ptát LoL (ms) - podle nastavení výkonu. */
       lolPollMs?: () => number;
+      /** Příkazová řádka Minecraftu (kvůli --gameDir), prázdné = výchozí složka. */
+      minecraftCommandLine?: () => string;
     }
   ) {
-    let lastGame: 'cs2' | 'lol' = 'cs2';
+    let lastGame: EventGame = 'cs2';
     this.streak = new KillStreak({
       mode: () => this.deps.settings().autoClips,
-      onClip: (count) => this.deps.onClip(count, streakLabelKey(count), lastGame),
+      onClip: (count) => this.deps.onClip(count, streakLabelKey(count), lastGame, this.context(lastGame)),
     });
     this.handle = (e: GameEvent) => {
       lastGame = e.game;
+      if (e.kind === 'death' || e.kind === 'advancement') {
+        // Samostatné události (Minecraft): klip hned, bez skládání do série.
+        if (this.deps.settings().autoClips === 'off') return;
+        this.streak.flush();
+        this.deps.onClip(1, e.kind === 'death' ? 'autoClipDeath' : 'autoClipAdvancement', e.game, '');
+        return;
+      }
       this.streak.add(e);
     };
   }
 
   private handle: (e: GameEvent) => void;
 
-  /** Která hra právě posílá události (za posledních 30 s), nebo null. */
-  live(): 'cs2' | 'lol' | null {
+  /** Text do názvu klipu podle hry: CS2 mapa + skóre, Dota 2 hrdina. */
+  private context(game: EventGame): string {
+    if (game === 'cs2') return cs2Context(this.cs2State);
+    if (game === 'dota2') return dota2Context(this.dota2State);
+    return '';
+  }
+
+  /** Která hra právě posílá události (za posledních 30 s; když víc, ta poslední), nebo null. */
+  live(): EventGame | null {
     const now = Date.now();
-    if (now - this.lastLolAt < 30000) return 'lol';
-    if (now - this.lastCs2At < 30000) return 'cs2';
-    return null;
+    const seen: [EventGame, number][] = [
+      ['lol', this.lastLolAt],
+      ['cs2', this.lastCs2At],
+      ['dota2', this.lastDota2At],
+      ['minecraft', this.minecraft ? this.lastMinecraftAt : 0],
+    ];
+    const latest = seen.filter(([, at]) => at > 0 && now - at < 30000).sort((a, b) => b[1] - a[1])[0];
+    return latest ? latest[0] : null;
   }
 
   async start(): Promise<void> {
     if (this.deps.settings().autoClips === 'off') return;
     await this.startGsiServer();
-    await this.installCs2Config();
+    await this.installGsiConfigs();
   }
 
   async stop(): Promise<void> {
     this.stopLol();
+    this.stopMinecraft();
     this.streak.reset();
     if (this.server) {
       await new Promise<void>((r) => this.server!.close(() => r()));
@@ -103,17 +153,21 @@ export class GameEvents {
     if (prev.autoClips === next.autoClips) return;
     if (next.autoClips === 'off') {
       await this.stop();
-      this.removeCs2Config();
+      this.removeGsiConfigs();
     } else if (!this.server) {
       await this.start();
     }
   }
 
-  /** Hlídání her říká, co běží - podle toho se zapíná dotazování LoL. */
-  onGame(exe: string | null): void {
+  /** Hlídání her říká, co běží - podle toho se zapíná dotazování LoL a čtení logu Minecraftu. */
+  onGame(exe: string | null, name: string | null = null): void {
+    const on = this.deps.settings().autoClips !== 'off';
     const lol = exe === 'league of legends.exe';
-    if (lol && !this.lolTimer && this.deps.settings().autoClips !== 'off') this.startLol();
+    if (lol && !this.lolTimer && on) this.startLol();
     if (!lol && this.lolTimer) this.stopLol();
+    const minecraft = name === 'Minecraft' && (exe === 'javaw.exe' || exe === 'java.exe');
+    if (minecraft && !this.minecraft && on) this.startMinecraft();
+    if (!minecraft && this.minecraft) this.stopMinecraft();
   }
 
   // ---- CS2 ------------------------------------------------------------------------------
@@ -162,6 +216,18 @@ export class GameEvents {
     }
     const token = this.deps.settings().gsiToken;
     if (token && payload?.auth?.token !== token) return;
+    if (isDota2Payload(payload)) {
+      const first = this.lastDota2At === 0;
+      this.lastDota2At = Date.now();
+      if (first) {
+        log('herní události: Dota 2 se připojila');
+        this.deps.onStateChange?.();
+      }
+      const { state, events } = dota2Events(this.dota2State, payload);
+      this.dota2State = state;
+      for (const e of events) this.handle(e);
+      return;
+    }
     const first = this.lastCs2At === 0;
     this.lastCs2At = Date.now();
     if (first) {
@@ -173,11 +239,14 @@ export class GameEvents {
     for (const e of events) this.handle(e);
   }
 
-  /** Zapíše cfg do každé nalezené instalace CS2 (obvykle jedna); beze změny nic nepřepisuje. */
-  private async installCs2Config(): Promise<void> {
+  /**
+   * Zapíše cfg do každé nalezené instalace CS2 a Dota 2 (obvykle jedna);
+   * beze změny nic nepřepisuje. U Doty se podsložka gamestate_integration
+   * založí, když chybí (hra ji sama nevytváří).
+   */
+  private async installGsiConfigs(): Promise<void> {
     if (!this.port) return;
     const token = this.deps.settings().gsiToken;
-    const wanted = cs2GsiConfig(this.port, token);
     let libraries: string[] = [];
     try {
       libraries = await this.deps.steamLibraries();
@@ -185,16 +254,28 @@ export class GameEvents {
       log(`herní události: Steam nenalezen (${(e as Error).message})`);
     }
     this.cfgPaths = [];
+    const targets: { dir: string; wanted: string; game: string; create: boolean }[] = [];
     for (const lib of libraries) {
-      const dir = join(lib, ...CS2_CFG_DIR);
-      if (!existsSync(dir)) continue;
-      const file = join(dir, CS2_CFG_NAME);
+      targets.push({ dir: join(lib, ...CS2_CFG_DIR), wanted: cs2GsiConfig(this.port, token), game: 'CS2', create: false });
+      targets.push({ dir: join(lib, ...DOTA2_CFG_DIR), wanted: dota2GsiConfig(this.port, token), game: 'Dota 2', create: true });
+    }
+    for (const t of targets) {
+      if (!existsSync(t.dir)) {
+        // Dota 2: složka cfg existuje, jen podsložka pro GSI ne.
+        if (!t.create || !existsSync(join(t.dir, '..'))) continue;
+        try {
+          mkdirSync(t.dir, { recursive: true });
+        } catch {
+          continue;
+        }
+      }
+      const file = join(t.dir, CS2_CFG_NAME);
       this.cfgPaths.push(file);
       try {
         const current = existsSync(file) ? readFileSync(file, 'utf8') : '';
-        if (current !== wanted) {
-          writeFileSync(file, wanted);
-          log(`herní události: zapsán ${file} (CS2 ho načte při příštím startu)`);
+        if (current !== t.wanted) {
+          writeFileSync(file, t.wanted);
+          log(`herní události: zapsán ${file} (${t.game} ho načte při příštím startu)`);
         }
       } catch (e) {
         log(`herní události: ${file} nejde zapsat: ${(e as Error).message}`);
@@ -202,7 +283,7 @@ export class GameEvents {
     }
   }
 
-  private removeCs2Config(): void {
+  private removeGsiConfigs(): void {
     for (const file of this.cfgPaths) {
       try {
         if (existsSync(file)) unlinkSync(file);
@@ -211,6 +292,80 @@ export class GameEvents {
       }
     }
     this.cfgPaths = [];
+  }
+
+  // ---- Minecraft ------------------------------------------------------------------------
+
+  /** Začne sledovat logs/latest.log (od konce - staré zprávy nejsou klipy). */
+  private startMinecraft(): void {
+    const dir = minecraftGameDir(this.deps.minecraftCommandLine?.() ?? '') ?? defaultMinecraftDir();
+    const file = join(dir, 'logs', 'latest.log');
+    let offset = 0;
+    let player = '';
+    try {
+      offset = statSync(file).size;
+      // Jméno hráče je na začátku logu ("Setting user: …") - přečte se jednou z hlavy souboru.
+      const head = readHead(file, 64 * 1024);
+      for (const line of head.split(/\r?\n/)) {
+        const user = minecraftUserFromLog(line);
+        if (user) player = user;
+      }
+    } catch {
+      // Log ještě není (hra se spouští) - dočte se při prvním kole.
+    }
+    const timer = setInterval(() => this.pollMinecraft(), MINECRAFT_POLL_MS);
+    this.minecraft = { timer, file, offset, player, tail: '' };
+    this.lastMinecraftAt = Date.now();
+    log(`herní události: Minecraft běží - sleduju ${file}${player ? ` (hráč ${player})` : ''}`);
+    this.deps.onStateChange?.();
+  }
+
+  private stopMinecraft(): void {
+    if (!this.minecraft) return;
+    clearInterval(this.minecraft.timer);
+    this.minecraft = null;
+    this.lastMinecraftAt = 0;
+    this.deps.onStateChange?.();
+  }
+
+  /** Přečte, co v logu přibylo, a řádek po řádku hledá smrt / zabití / pokrok. */
+  private pollMinecraft(): void {
+    const mc = this.minecraft;
+    if (!mc) return;
+    let size: number;
+    try {
+      size = statSync(mc.file).size;
+    } catch {
+      return;
+    }
+    // Nová hra přepsala log (je menší) - číst od začátku.
+    if (size < mc.offset) {
+      mc.offset = 0;
+      mc.tail = '';
+    }
+    if (size === mc.offset) return;
+    this.lastMinecraftAt = Date.now();
+    let chunk: Buffer;
+    try {
+      chunk = readRangeBytes(mc.file, mc.offset, Math.min(size - mc.offset, 512 * 1024));
+    } catch {
+      return;
+    }
+    mc.offset += chunk.length;
+    const lines = (mc.tail + chunk.toString('utf8')).split(/\r?\n/);
+    mc.tail = lines.pop() ?? '';
+    for (const line of lines) {
+      const user = minecraftUserFromLog(line);
+      if (user) {
+        mc.player = user;
+        continue;
+      }
+      const e = minecraftLogEvent(line, mc.player);
+      if (!e) continue;
+      log(`herní události: Minecraft ${e.kind}: ${e.text}`);
+      if (e.kind === 'kill') this.handle({ game: 'minecraft', kind: 'kill', count: 1 });
+      else this.handle({ game: 'minecraft', kind: e.kind, count: 1 });
+    }
   }
 
   // ---- League of Legends --------------------------------------------------------------
@@ -256,6 +411,33 @@ export class GameEvents {
     } finally {
       this.lolBusy = false;
     }
+  }
+}
+
+/** Výchozí složka Minecraftu (Java): %APPDATA%\\.minecraft, na Linuxu ~/.minecraft. */
+function defaultMinecraftDir(): string {
+  if (process.platform === 'win32') return join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), '.minecraft');
+  if (process.platform === 'darwin') return join(homedir(), 'Library', 'Application Support', 'minecraft');
+  return join(homedir(), '.minecraft');
+}
+
+function readHead(file: string, bytes: number): string {
+  return readRange(file, 0, bytes);
+}
+
+/** Kus souboru od `offset` (nejvíc `bytes`), jako UTF-8 text. */
+function readRange(file: string, offset: number, bytes: number): string {
+  return readRangeBytes(file, offset, bytes).toString('utf8');
+}
+
+function readRangeBytes(file: string, offset: number, bytes: number): Buffer {
+  const fd = openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(bytes);
+    const n = readSync(fd, buf, 0, bytes, offset);
+    return buf.subarray(0, n);
+  } finally {
+    closeSync(fd);
   }
 }
 

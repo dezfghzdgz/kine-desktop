@@ -1,6 +1,6 @@
 import { statSync } from 'node:fs';
 import { spawnFfmpeg, probe, runFfmpeg } from './ffmpeg';
-import { GIF_FPS, GIF_WIDTH, gifArgs, mergePlan, progressPercent, type MergeInput } from './editPlan';
+import { GIF_FPS, GIF_WIDTH, gifArgs, mergePlan, progressPercent, verticalCropFilter, type MergeInput } from './editPlan';
 import { log } from './log';
 
 /**
@@ -21,19 +21,13 @@ export type TrimOptions = {
   /** Datový tok obrazu (Mb/s) - stejný jako při nahrávání. */
   videoMbps: number;
   /**
-   * Výřez na výšku 9:16 (TikTok, Shorts, Reels): z obrazu se vezme pruh
-   * o šířce výška·9/16 - vlevo, uprostřed, nebo vpravo. Výška zůstává.
+   * Na výšku 9:16 (TikTok, Shorts, Reels): z obrazu se vezme pruh o šířce
+   * výška·9/16 - vlevo, uprostřed, nebo vpravo. Výška zůstává. 'blur' =
+   * celý obraz zmenšený doprostřed a nad ním i pod ním rozmazané pozadí
+   * z téhož snímku (nic se neořízne).
    */
-  vertical?: 'left' | 'center' | 'right';
+  vertical?: 'left' | 'center' | 'right' | 'blur';
 };
-
-/** Filtr ffmpeg pro výřez na výšku; null = bez výřezu. */
-export function verticalCropFilter(anchor: TrimOptions['vertical']): string | null {
-  if (!anchor) return null;
-  const k = anchor === 'left' ? '0' : anchor === 'right' ? '1' : '0.5';
-  // ow = šířka výstupu; když je obraz už užší než 9:16, nechá se celý.
-  return `crop=w='min(iw,ih*9/16)':h=ih:x='(iw-ow)*${k}':y=0`;
-}
 
 export type TrimResult = { file: string; durationSeconds: number; sizeBytes: number; width: number | null; height: number | null };
 
@@ -145,10 +139,11 @@ export async function makeGif(input: string, output: string, range: { start: num
   return { file: output, sizeBytes: statSync(output).size, lengthSeconds };
 }
 
-/** Náhled (první snímek) k upravenému klipu. */
-export async function makeThumbnail(video: string, thumb: string): Promise<boolean> {
+/** Náhled k upravenému klipu: první snímek, nebo snímek v čase `atSeconds` (hráč si ho vybral v přehrávači). */
+export async function makeThumbnail(video: string, thumb: string, atSeconds = 0): Promise<boolean> {
   try {
-    await runFfmpeg(['-loglevel', 'error', '-i', video, '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '4', thumb], 30000);
+    const seek = atSeconds > 0 ? ['-ss', atSeconds.toFixed(3)] : [];
+    await runFfmpeg(['-loglevel', 'error', ...seek, '-i', video, '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '4', thumb], 30000);
     return true;
   } catch {
     return false;

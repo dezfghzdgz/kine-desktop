@@ -1,8 +1,9 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { join } from 'node:path';
 import { BrowserWindow, app } from 'electron';
 import { log } from './log';
+import { trayIcon } from './icon';
 
 /**
  * Samočinná zkouška celé appky bez člověka (KINE_TEST=1).
@@ -169,6 +170,10 @@ export async function runTestDriver(kine: {
         const vertical = await (kine as any).trimClip(clip1.id, { start: 0, end: 2, mute: false, mode: 'new', vertical: 'center' });
         result.verticalSize = `${vertical.width}x${vertical.height}`;
         result.vertical = !!vertical.width && !!vertical.height && Math.abs(vertical.width - Math.round((vertical.height * 9) / 16)) <= 2 && /vertical/.test(vertical.title);
+        // Rozmazané pozadí: taky 9:16, stejná výška jako původní (celý obraz zmenšený doprostřed).
+        const blur = await (kine as any).trimClip(clip1.id, { start: 0, end: 2, mute: false, mode: 'new', vertical: 'blur' });
+        result.verticalBlurSize = `${blur.width}x${blur.height}`;
+        result.verticalBlur = !!blur.width && !!blur.height && Math.abs(blur.width - Math.round((blur.height * 9) / 16)) <= 2 && blur.height === vertical.height && blur.durationSeconds > 1.5;
       }
 
       // Automatické klipy: falešné zprávy CS2 (Game State Integration) na lokální
@@ -177,15 +182,23 @@ export async function runTestDriver(kine: {
       const port: number = ge?.port ?? 0;
       if (port) {
         const token = kine.settings.get().gsiToken;
-        const post = (roundKills: number, matchKills: number) =>
+        const postJson = (payload: unknown) =>
           new Promise<void>((resolve) => {
-            const body = JSON.stringify({ auth: { token }, provider: { steamid: '1' }, map: { name: 'de_test' }, player: { steamid: '1', state: { round_kills: roundKills }, match_stats: { kills: matchKills } } });
+            const body = JSON.stringify(payload);
             const req = httpRequest({ host: '127.0.0.1', port, method: 'POST', path: '/', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, (res) => {
               res.resume();
               res.on('end', () => resolve());
             });
             req.on('error', () => resolve());
             req.end(body);
+          });
+        // CS2 posílá i skóre - do názvu klipu jde mapa a skóre z pohledu hráče ("Test 3:1").
+        const post = (roundKills: number, matchKills: number) =>
+          postJson({
+            auth: { token },
+            provider: { steamid: '1', appid: 730 },
+            map: { name: 'de_test', team_ct: { score: 3 }, team_t: { score: 1 } },
+            player: { steamid: '1', team: 'CT', state: { round_kills: roundKills }, match_stats: { kills: matchKills } },
           });
         // Knihovna přežívá mezi běhy zkoušky - hledá se jen klip, který teď přibyl.
         const knownIds = new Set(kine.library.list().map((c) => c.id));
@@ -199,6 +212,47 @@ export async function runTestDriver(kine: {
           auto = kine.library.list().find((c) => !knownIds.has(c.id) && /Double kill/.test(c.title));
         }
         result.autoClip = !!auto;
+        result.autoClipTitle = auto?.title ?? null;
+        result.autoClipContext = !!auto && /Double kill · Test 3:1$/.test(auto.title);
+
+        // Dota 2 na stejném serveru (appid 570): dvě zabití v player.kills → "Double kill · Crystal Maiden".
+        const dota = (kills: number) =>
+          postJson({
+            auth: { token },
+            provider: { name: 'Dota 2', appid: 570, steamid: '1' },
+            map: { matchid: '77', game_state: 'DOTA_GAMERULES_STATE_GAME_IN_PROGRESS' },
+            player: { steamid: '1', kills, deaths: 0 },
+            hero: { name: 'npc_dota_hero_crystal_maiden' },
+          });
+        const known2 = new Set(kine.library.list().map((c) => c.id));
+        await dota(0);
+        await dota(2);
+        let dotaClip: any = null;
+        for (let i = 0; i < 30 && !dotaClip; i++) {
+          await sleep(500);
+          dotaClip = kine.library.list().find((c) => !known2.has(c.id) && /Crystal Maiden/.test(c.title));
+        }
+        result.dota2Clip = !!dotaClip && /Double kill · Crystal Maiden$/.test(dotaClip.title) && ge.live() === 'dota2';
+
+        // Minecraft: appka sleduje logs/latest.log ve složce ze --gameDir; řádek [CHAT] o smrti hráče = klip "Death".
+        const mcDir = join(outDir, 'mc');
+        mkdirSync(join(mcDir, 'logs'), { recursive: true });
+        const mcLog = join(mcDir, 'logs', 'latest.log');
+        writeFileSync(mcLog, '[10:00:00] [main/INFO]: Setting user: Tester\n[10:00:01] [Render thread/INFO]: [System] [CHAT] Tester joined the game\n');
+        (kine as any).games.minecraftCmdline = `javaw -Xmx2G --gameDir "${mcDir}" --version 1.21`;
+        ge.onGame('javaw.exe', 'Minecraft');
+        await sleep(300);
+        const mcLive = ge.live() === 'minecraft';
+        const known3 = new Set(kine.library.list().map((c) => c.id));
+        appendFileSync(mcLog, '[10:00:05] [Render thread/INFO]: [System] [CHAT] Tester was slain by Zombie\n[10:00:06] [Render thread/INFO]: [System] [CHAT] Tester has made the advancement [Stone Age]\n');
+        let mcClips: any[] = [];
+        for (let i = 0; i < 40 && mcClips.length < 2; i++) {
+          await sleep(500);
+          mcClips = kine.library.list().filter((c) => !known3.has(c.id));
+        }
+        ge.onGame(null, null);
+        result.minecraftTitles = mcClips.map((c) => c.title);
+        result.minecraftClip = mcLive && mcClips.length === 2 && mcClips.some((c) => /Death$/.test(c.title)) && mcClips.some((c) => /Advancement$/.test(c.title)) && ge.live() !== 'minecraft';
       }
 
       // Přepsání původního klipu (bez zvuku): stejný soubor, kratší, nový náhled.
@@ -454,6 +508,135 @@ export async function runTestDriver(kine: {
       result.performance = panel && low && noPreview && kine.settings.get().performance === 'balanced';
     }
 
+    // Nahrávání celého zápasu: tlačítko v postranním panelu spustí nahrávku
+    // (tiká v něm čas), druhý klik ji uloží jako dlouhý klip s odznakem REC.
+    // Zkratka pro nahrávání je v Záznamu třetí pole zkratky.
+    kine.openSettings('clips');
+    await sleep(700);
+    const recWin = kine.settingsWindow;
+    if (recWin && !recWin.isDestroyed()) {
+      const started = await recWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-record'); if (!b || b.disabled) return false; b.click(); return true; })()`);
+      let running = false;
+      for (let i = 0; i < 40 && !running; i++) {
+        await sleep(250);
+        running = !!(kine as any).capture.recordingInfo();
+      }
+      await sleep(1200);
+      const timer = await recWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-record.recording'); const t = b && b.querySelector('.rec-time'); return !!t && /^0:0[1-9]$/.test(t.textContent.trim()); })()`);
+      await shot(recWin, 'settings-recording');
+      await sleep(4500);
+      const beforeStop = new Set(kine.library.list().map((c) => c.id));
+      await recWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-record.recording'); if (b) b.click(); return !!b; })()`);
+      let rec: any = null;
+      for (let i = 0; i < 120 && !rec; i++) {
+        await sleep(500);
+        rec = kine.library.list().find((c) => !beforeStop.has(c.id) && c.kind === 'recording');
+      }
+      await sleep(800);
+      const badge = await recWin.webContents.executeJavaScript(`!!document.querySelector('.clip .thumb .kind-badge') && !document.querySelector('.side-record.recording')`);
+      result.recordingClip = rec ? { durationSeconds: rec.durationSeconds, title: rec.title, file: rec.file } : null;
+      // Ikona u hodin s červenou tečkou (pravý dolní roh) - zvětšená do souboru, ať se dá prohlédnout.
+      const dotIcon = trayIcon((kine as any).appIcon(), true);
+      const { width: dw, height: dh } = dotIcon.getSize();
+      const bmp: Buffer = dotIcon.toBitmap();
+      const px = (x: number, y: number) => {
+        const i = (y * dw + x) * 4;
+        return [bmp[i], bmp[i + 1], bmp[i + 2]];
+      };
+      const corner = px(dw - 3, dh - 3);
+      const opposite = px(2, 2);
+      writeFileSync(join(outDir, 'tray-recording.png'), dotIcon.resize({ width: 128, height: 128 }).toPNG());
+      writeFileSync(join(outDir, 'tray-normal.png'), trayIcon((kine as any).appIcon(), false).resize({ width: 128, height: 128 }).toPNG());
+      result.trayDotPixels = { corner, opposite };
+      // Červená v BGRA (Linux/Windows): B ~70, G ~70, R ~255; protější roh tečku nemá.
+      const red = (p: number[]) => p[2] >= 240 && p[1] <= 90 && p[0] <= 90;
+      result.trayDot = red(corner) && !red(opposite);
+      result.recording = started && running && timer && !!rec && rec.durationSeconds >= 4 && /recording/i.test(rec.title) && badge && !(kine as any).capture.recordingInfo() && kine.capture.state === 'on';
+      kine.openSettings('settings');
+      await sleep(700);
+      result.recordHotkeyField = await recWin.webContents.executeJavaScript(`document.querySelectorAll('.panel .field .hotkey').length === 3`);
+    }
+
+    // Koš: smazání z karty (dvojí klik = potvrzení) dá klip do koše, tlačítko Koš ho ukáže,
+    // "Vrátit" ho vrátí. Soubor se mezitím stěhuje do .trash a zpátky.
+    kine.openSettings('clips');
+    await sleep(700);
+    const trashWin = kine.settingsWindow;
+    if (trashWin && !trashWin.isDestroyed() && clip2) {
+      const before = kine.library.list().length;
+      const clicked = await trashWin.webContents.executeJavaScript(`(() => { const card = document.querySelector('.clip[data-id="${clip2.id}"]'); if (!card) return false; const btns = [...card.querySelectorAll('.actions button.danger')]; const b = btns[btns.length - 1]; b.click(); return true; })()`);
+      await sleep(300);
+      await trashWin.webContents.executeJavaScript(`(() => { const card = document.querySelector('.clip[data-id="${clip2.id}"]'); const b = card && card.querySelector('.actions button.danger:not(.quiet)'); if (b) b.click(); return !!b; })()`);
+      let inTrash: any = null;
+      for (let i = 0; i < 20 && !inTrash; i++) {
+        await sleep(200);
+        const live = (kine as any).library.trash().find((c: any) => c.id === clip2.id) ?? null;
+        // Kopie - knihovna vrací živé objekty a vrácení z koše by cestu přepsalo.
+        inTrash = live ? { ...live } : null;
+      }
+      await sleep(500);
+      const trashBtn = await trashWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.filters .trash-filter'); if (!b) return false; b.click(); return b.querySelector('.count').textContent === '1'; })()`);
+      await sleep(500);
+      const trashView = await trashWin.webContents.executeJavaScript(`!!document.querySelector('.trash-bar') && document.querySelectorAll('.clips.in-trash .clip').length === 1 && !!document.querySelector('.clip .trash-restore') && !document.querySelector('.clip .thumb .pick')`);
+      await shot(trashWin, 'settings-clips-trash');
+      await trashWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.clip .trash-restore'); if (b) b.click(); return !!b; })()`);
+      let restored: any = null;
+      for (let i = 0; i < 20 && !restored; i++) {
+        await sleep(200);
+        const live = kine.library.list().find((c) => c.id === clip2.id) ?? null;
+        restored = live ? { ...live } : null;
+      }
+      let backInLibrary = false;
+      for (let i = 0; i < 15 && !backInLibrary; i++) {
+        await sleep(200);
+        backInLibrary = await trashWin.webContents.executeJavaScript(`!document.querySelector('.filters .trash-filter') && !document.querySelector('.trash-bar') && !!document.querySelector('.clip[data-id="${clip2.id}"]')`);
+      }
+      const filtersHtml = backInLibrary ? '' : await trashWin.webContents.executeJavaScript(`((document.querySelector('.filters') || {}).outerHTML || '').slice(0, 400) + ' | cards=' + document.querySelectorAll('.clip').length + ' trashbar=' + !!document.querySelector('.trash-bar')`);
+      result.trashDebug = { clicked, inTrashFile: inTrash?.file, restoredFile: restored?.file, trashBtn, trashView, backInLibrary, filtersHtml };
+      result.trash =
+        clicked && !!inTrash && /[\\/]\.trash[\\/]/.test(inTrash.file) && !!inTrash.deletedAt && trashBtn && trashView && !!restored && !restored.deletedAt && !/\.trash/.test(restored.file) && backInLibrary && kine.library.list().length === before;
+    }
+
+    // Náhled ze snímku: v úpravách tlačítko vezme snímek, na kterém přehrávač stojí - klip má nový soubor náhledu.
+    kine.openSettings('clips');
+    await sleep(600);
+    if (trashWin && !trashWin.isDestroyed() && clip1) {
+      const beforeThumb = kine.library.list().find((c) => c.id === clip1.id)?.thumb ?? null;
+      await trashWin.webContents.executeJavaScript(`(() => { const card = document.querySelector('.clip[data-id="${clip1.id}"]'); const b = card && [...card.querySelectorAll('.actions button')].find((x) => /✂/.test(x.textContent)); if (b) b.click(); return !!b; })()`);
+      await sleep(900);
+      await trashWin.webContents.executeJavaScript(`(() => { const v = document.querySelector('.overlay video'); if (v) { v.pause(); v.currentTime = 2; } return !!v; })()`);
+      await sleep(500);
+      const thumbBtn = await trashWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.overlay .thumb-frame'); if (!b) return false; b.click(); return true; })()`);
+      let newThumb: string | null = null;
+      for (let i = 0; i < 30 && (!newThumb || newThumb === beforeThumb); i++) {
+        await sleep(300);
+        newThumb = kine.library.list().find((c) => c.id === clip1.id)?.thumb ?? null;
+      }
+      await sleep(300);
+      const noteOk = await trashWin.webContents.executeJavaScript(`(() => { const n = document.querySelector('.overlay .player-note'); return !!n && !n.classList.contains('hidden') && n.classList.contains('ok'); })()`);
+      result.thumbFrameDebug = { thumbBtn, beforeThumb, newThumb, noteOk, overlay: await trashWin.webContents.executeJavaScript(`!!document.querySelector('.overlay')`) };
+      await trashWin.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await sleep(300);
+      result.thumbFrame = thumbBtn && !!newThumb && newThumb !== beforeThumb && existsSync(newThumb) && noteOk;
+    }
+
+    // Úložiště: v Záznamu je přehled místa (klipy, koš, zásobník, volno).
+    kine.openSettings('settings');
+    await sleep(900);
+    const storageWin = kine.settingsWindow;
+    if (storageWin && !storageWin.isDestroyed()) {
+      let ok = false;
+      for (let i = 0; i < 20 && !ok; i++) {
+        await sleep(250);
+        // (v šabloně nejde psát \d - byl by z toho jen "d")
+        ok = await storageWin.webContents.executeJavaScript(`(() => { const g = document.querySelector('.storage-grid'); return !!g && g.querySelectorAll('b').length === 4 && /[0-9]/.test(g.querySelectorAll('b')[0].textContent); })()`);
+      }
+      result.storage = ok;
+      if (!ok) result.storageDebug = await storageWin.webContents.executeJavaScript(`(document.querySelector('.storage') || {}).outerHTML || 'no .storage'`);
+      await storageWin.webContents.executeJavaScript(`(() => { const p = document.querySelector('.storage'); if (p) p.closest('.panel').scrollIntoView({ block: 'start' }); return true; })()`);
+      await shot(storageWin, 'settings-storage');
+    }
+
     // O appce: "Zkontrolovat aktualizace" ukáže stav (při vývoji "dev"), ne jen chybu.
     kine.openSettings('about');
     await sleep(700);
@@ -481,7 +664,8 @@ export async function runTestDriver(kine: {
     const common = [
       'inlinePlayer', 'gridUntouched', 'trimPanel', 'trimNewClip', 'trimReplace', 'vertical', 'verticalUi', 'autoClip', 'overlayClosed', 'filters',
       'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks', 'reviewMerge', 'updateUi',
-      'playerNav', 'clipsSort', 'performance',
+      'playerNav', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
+      'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'thumbFrame', 'storage',
       'colorPicker', 'brandIcon', 'brandMarkSvg',
     ];
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];

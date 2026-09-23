@@ -57,11 +57,46 @@ export function brandIcon(basePath: string, color: string | null): NativeImage {
   return image;
 }
 
-/** Zmenšená kopie pro ikonu u hodin (Windows 16 px, macOS 18 px šablona). */
-export function trayIcon(icon: NativeImage): NativeImage {
+/**
+ * Zmenšená kopie pro ikonu u hodin (Windows 16 px, macOS 18 px šablona).
+ * Při nahrávání zápasu dostane vpravo dole červenou tečku (ne na macOS -
+ * šablona je jednobarevná).
+ */
+export function trayIcon(icon: NativeImage, recording = false): NativeImage {
   if (icon.isEmpty()) return nativeImage.createEmpty();
   const size = process.platform === 'darwin' ? 18 : 16;
   const small = icon.resize({ width: size, height: size });
-  if (process.platform === 'darwin') small.setTemplateImage(true);
-  return small;
+  if (process.platform === 'darwin') {
+    small.setTemplateImage(true);
+    return small;
+  }
+  return recording ? withRecordingDot(small) : small;
+}
+
+/** Červená tečka (⏺) přes pravý dolní roh - stejné bajty jako brandIcon (BGRA / RGBA se pozná z dat). */
+export function withRecordingDot(icon: NativeImage): NativeImage {
+  const { width, height } = icon.getSize();
+  const buf = Buffer.from(icon.toBitmap());
+  if (buf.length < width * height * 4) return icon;
+  const r = Math.max(3, Math.round(width * 0.22));
+  const cx = width - r - 1;
+  const cy = height - r - 1;
+  // Pořadí kanálů: Skia na Windows i Linuxu dává BGRA (modrá první), macOS RGBA.
+  // (Podle barvy to tady poznat nejde - ikona už může být přebarvená na cokoli.)
+  const blueAt = process.platform === 'darwin' ? 2 : 0;
+  const redAt = 2 - blueAt;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const d = Math.hypot(x - cx, y - cy);
+      if (d > r + 0.5) continue;
+      const i = (y * width + x) * 4;
+      // Tmavý lem kolem tečky, ať je vidět i na tyrkysu.
+      const edge = d > r - 1;
+      buf[i + redAt] = edge ? 20 : 255;
+      buf[i + 1] = edge ? 20 : 70;
+      buf[i + blueAt] = edge ? 20 : 70;
+      buf[i + 3] = 255;
+    }
+  }
+  return nativeImage.createFromBitmap(buf, { width, height });
 }

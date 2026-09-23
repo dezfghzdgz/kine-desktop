@@ -5,9 +5,12 @@
  * "série", ze které vznikne jeden klip.
  */
 
+export type EventGame = 'cs2' | 'lol' | 'dota2' | 'minecraft';
+
 export type GameEvent = {
-  game: 'cs2' | 'lol';
-  kind: 'kill' | 'multikill' | 'ace';
+  game: EventGame;
+  /** kill/multikill/ace se skládají do série; death a advancement jsou samostatné (Minecraft). */
+  kind: 'kill' | 'multikill' | 'ace' | 'death' | 'advancement';
   /** Kolik zabití má série zatím (CS2: zabití v kole; LoL: KillStreak u Multikill, 1 u zabití). */
   count: number;
 };
@@ -19,7 +22,22 @@ export type Cs2State = {
   roundKills: number;
   matchKills: number;
   map: string;
+  /** Skóre z pohledu hráče ("7:5" - moje : jejich), prázdné, když ho CS2 neposlal. */
+  score: string;
 };
+
+/** "de_mirage" -> "Mirage", "cs_office" -> "Office", "ar_baggage" -> "Baggage". */
+export function cs2MapName(map: string): string {
+  const raw = map.replace(/^(de|cs|ar|dz|gd|lobby)_/, '').replace(/_/g, ' ').trim();
+  return raw ? raw.charAt(0).toUpperCase() + raw.slice(1) : '';
+}
+
+/** Kontext do názvu automatického klipu: "Mirage 7:5" / "Mirage" / "". */
+export function cs2Context(state: Cs2State | null): string {
+  if (!state) return '';
+  const map = cs2MapName(state.map);
+  return [map, state.score].filter(Boolean).join(' ');
+}
 
 /**
  * CS2 posílá po každé změně celý stav (hráč, kolo, mapa). Zabití se pozná
@@ -38,11 +56,19 @@ export function cs2Events(prev: Cs2State | null, payload: unknown): { state: Cs2
   const roundKills = Number(player.state?.round_kills ?? NaN);
   const matchKills = Number(player.match_stats?.kills ?? NaN);
   const map = String(p.map?.name ?? '');
+  const ct = Number(p.map?.team_ct?.score ?? NaN);
+  const t = Number(p.map?.team_t?.score ?? NaN);
+  let score = prev?.score ?? '';
+  if (Number.isFinite(ct) && Number.isFinite(t)) {
+    const mine = String(player.team ?? '').toUpperCase() === 'T' ? [t, ct] : [ct, t];
+    score = `${mine[0]}:${mine[1]}`;
+  }
   const state: Cs2State = {
     steamid: mySteamId,
     roundKills: Number.isFinite(roundKills) ? roundKills : prev?.roundKills ?? 0,
     matchKills: Number.isFinite(matchKills) ? matchKills : prev?.matchKills ?? 0,
     map,
+    score,
   };
   const events: GameEvent[] = [];
   // Nový zápas / jiná mapa / statistiky klesly = začít od nuly, nic nehlásit.
@@ -56,6 +82,152 @@ export function cs2Events(prev: Cs2State | null, payload: unknown): { state: Cs2
     }
   }
   return { state, events };
+}
+
+// ---- Dota 2: Game State Integration --------------------------------------------------
+
+export type Dota2State = {
+  steamid: string;
+  matchid: string;
+  kills: number;
+  hero: string;
+};
+
+/** Je to zpráva z Dota 2 (appid 570)? CS2 posílá 730. Bez appid se hádá podle bloku "hero". */
+export function isDota2Payload(payload: unknown): boolean {
+  const p = payload as Record<string, any> | null;
+  if (!p || typeof p !== 'object') return false;
+  const appid = Number(p.provider?.appid ?? NaN);
+  if (Number.isFinite(appid)) return appid === 570;
+  return !!p.hero && !p.round;
+}
+
+/**
+ * Dota 2 posílá celý stav taky (provider, map, player, hero). Zabití = nárůst
+ * `player.kills`; každé se hlásí jako jedno (sérii poskládá KillStreak podle
+ * času). Nový zápas (jiné matchid) nebo pokles = začít od nuly, nic nehlásit.
+ * Před začátkem hry (výběr hrdinů) se `player.kills` nemění, tak nic nevadí.
+ */
+export function dota2Events(prev: Dota2State | null, payload: unknown): { state: Dota2State | null; events: GameEvent[] } {
+  const p = payload as Record<string, any> | null;
+  if (!p || typeof p !== 'object') return { state: prev, events: [] };
+  const player = p.player;
+  if (!player || typeof player !== 'object') return { state: prev, events: [] };
+  const mySteamId = String(p.provider?.steamid ?? player.steamid ?? '');
+  // Divácký režim posílá hráče po týmech (team2/team3) - žádné vlastní zabití, nic.
+  if (String(player.steamid ?? mySteamId) !== mySteamId) return { state: prev, events: [] };
+  const kills = Number(player.kills ?? NaN);
+  const matchid = String(p.map?.matchid ?? prev?.matchid ?? '');
+  const hero = heroName(String(p.hero?.name ?? ''));
+  const state: Dota2State = {
+    steamid: mySteamId,
+    matchid,
+    kills: Number.isFinite(kills) ? kills : prev?.kills ?? 0,
+    hero: hero || prev?.hero || '',
+  };
+  const events: GameEvent[] = [];
+  const fresh = !prev || prev.steamid !== mySteamId || (matchid && prev.matchid && prev.matchid !== matchid) || state.kills < prev.kills;
+  if (!fresh && prev && Number.isFinite(kills) && kills > prev.kills) {
+    for (let i = prev.kills; i < kills; i++) events.push({ game: 'dota2', kind: 'kill', count: 1 });
+  }
+  return { state, events };
+}
+
+/** "npc_dota_hero_crystal_maiden" -> "Crystal Maiden". */
+export function heroName(name: string): string {
+  const raw = name.replace(/^npc_dota_hero_/, '').replace(/_/g, ' ').trim();
+  return raw.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** Kontext do názvu klipu z Dota 2: jméno hrdiny. */
+export function dota2Context(state: Dota2State | null): string {
+  return state?.hero ?? '';
+}
+
+/** Obsah gamestate_integration_kine.cfg pro Dota 2 (složka game/dota/cfg/gamestate_integration/). */
+export function dota2GsiConfig(port: number, token: string): string {
+  return [
+    '"Kine"',
+    '{',
+    `  "uri" "http://127.0.0.1:${port}"`,
+    '  "timeout" "5.0"',
+    '  "buffer" "0.1"',
+    '  "throttle" "0.1"',
+    '  "heartbeat" "10.0"',
+    '  "auth"',
+    '  {',
+    `    "token" "${token}"`,
+    '  }',
+    '  "data"',
+    '  {',
+    '    "provider" "1"',
+    '    "map" "1"',
+    '    "player" "1"',
+    '    "hero" "1"',
+    '  }',
+    '}',
+    '',
+  ].join('\r\n');
+}
+
+// ---- Minecraft: logs/latest.log ------------------------------------------------------
+
+/**
+ * Minecraft (Java) nic neposílá, ale všechno, co se objeví v chatu - i zprávy
+ * o smrti a o splněném pokroku - zapisuje do logs/latest.log jako
+ * "[CHAT] …". Appka soubor sleduje a hledá zprávy o hráči:
+ *  - smrt: řádek začíná jménem hráče a obsahuje známé anglické znění
+ *    ("was slain by", "fell from a high place", …),
+ *  - zabití jiného hráče (PvP): anglická zpráva o smrti končící "by <hráč>",
+ *  - pokrok: "has made the advancement" / "has completed the challenge" /
+ *    "has reached the goal", a v kterémkoli jazyce řádek začínající jménem
+ *    hráče s názvem pokroku v hranatých závorkách.
+ * Zprávy hráčů v chatu vypadají "<Jméno> text" - ty se přeskočí.
+ */
+export const MINECRAFT_DEATH_PATTERNS: RegExp[] = [
+  /was (slain|shot|killed|fireballed|pummeled|blown up|squashed|impaled|skewered|stung|poked|frozen|pricked|struck|roasted|burnt|doomed|squished|obliterated)/i,
+  /(drowned|starved|suffocated|withered|froze|experienced kinetic energy|discovered the floor was lava|walked into|fell (from|off|out|too far|while)|hit the ground too hard|went up in flames|burned to death|tried to swim in lava|blew up|died|left the confines of this world|was killed|didn't want to live|went off with a bang|was roasted)/i,
+];
+const MINECRAFT_ADVANCEMENT = /has (made the advancement|completed the challenge|reached the goal)/i;
+const MINECRAFT_JOIN_LEAVE = /(joined|left) the game/i;
+
+export type MinecraftLogEvent = { kind: 'death' | 'kill' | 'advancement'; text: string };
+
+/** Jméno hráče z řádku "Setting user: Steve" (píše se při startu hry). */
+export function minecraftUserFromLog(line: string): string | null {
+  const m = /Setting user: (\S+)/.exec(line);
+  return m ? m[1] : null;
+}
+
+/** Události z jednoho řádku logu (nebo null). */
+export function minecraftLogEvent(line: string, player: string): MinecraftLogEvent | null {
+  const idx = line.indexOf('[CHAT] ');
+  if (idx < 0 || !player) return null;
+  const text = line.slice(idx + 7).replace(/§./g, '').trim();
+  if (!text || text.startsWith('<')) return null;
+  const mine = text === player || text.startsWith(player + ' ');
+  if (mine) {
+    if (MINECRAFT_JOIN_LEAVE.test(text)) return null;
+    if (MINECRAFT_ADVANCEMENT.test(text)) return { kind: 'advancement', text };
+    if (MINECRAFT_DEATH_PATTERNS.some((re) => re.test(text))) return { kind: 'death', text };
+    // Jiný jazyk hry: "Steve získal pokrok [Doba kamenná]" - název pokroku je vždy v závorkách na konci.
+    if (/\[[^\]]+\]\s*$/.test(text)) return { kind: 'advancement', text };
+    return null;
+  }
+  // Někdo jiný zemřel a na konci je "by <já>" (případně "by <já> using [zbraň]").
+  const byMe = new RegExp(`\\bby ${escapeRegExp(player)}(\\s+using\\s+\\[[^\\]]+\\])?$`, 'i');
+  if (byMe.test(text) && MINECRAFT_DEATH_PATTERNS.some((re) => re.test(text))) return { kind: 'kill', text };
+  return null;
+}
+
+/** "--gameDir C:\\Hry\\mc" (i v uvozovkách) z příkazové řádky javy; null = výchozí .minecraft. */
+export function minecraftGameDir(cmdline: string): string | null {
+  const m = /--gameDir\s+(?:"([^"]+)"|(\S+))/.exec(cmdline);
+  return m ? (m[1] ?? m[2]) : null;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // ---- League of Legends: Live Client Data API ----------------------------------------

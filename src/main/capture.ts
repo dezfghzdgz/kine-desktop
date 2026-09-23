@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, statfsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { BrowserWindow, app } from 'electron';
@@ -33,6 +33,10 @@ import { concatList, expired, parseSegmentCsv, sameResolutionTailStart, selectFo
 const SEGMENT_SECONDS = 2;
 /** Rezerva nad délku klipu, ať se nikdy nemaže to, co stisk ještě chce. */
 const KEEP_MARGIN_SECONDS = 10;
+/** Nejdelší souvislé nahrávání (celý zápas); pak se samo uloží a skončí. */
+export const RECORDING_MAX_SECONDS = 3 * 60 * 60;
+/** Pod tolik volného místa na disku se nahrávání samo uloží, ať nedojde místo. */
+const RECORDING_MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024;
 
 type Generation = {
   id: number;
@@ -66,6 +70,15 @@ export class CaptureManager {
   private _state: CaptureState = 'off';
   private _error: string | null = null;
   private building = 0;
+  /**
+   * Nahrávání celého zápasu: od `since` se kousky nemažou (zásobník jinak
+   * drží jen posledních N sekund) a po zastavení se slepí do jednoho
+   * dlouhého souboru. Zkratka na klip mezitím funguje normálně.
+   */
+  private recording: { since: number; game: string | null } | null = null;
+  private recordingStopHandler: ((reason: 'max' | 'disk') => void) | null = null;
+  /** Kdy se naposledy měřilo volné místo při nahrávání (statfs jednou za 30 s stačí). */
+  private lastDiskCheck = 0;
   private csvTimer: ReturnType<typeof setInterval> | null = null;
   private waiters = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
   /** Složka se zásobníkem (kousky videa). Každá appka svou; když je zamčená, vezme se jiná. */
@@ -134,6 +147,31 @@ export class CaptureManager {
     this._state = state;
     this._error = error;
     this.deps.onState(state, error);
+  }
+
+  /** Běží nahrávání celého zápasu? Od kdy (ms), pro kterou hru. */
+  /** Kolik místa zabírají kousky v zásobníku (všechny generace). */
+  bufferBytes(): number {
+    let total = 0;
+    for (const g of this.generations) {
+      for (const seg of g.segments) {
+        try {
+          total += statSync(seg.file).size;
+        } catch {
+          // kousek už zmizel
+        }
+      }
+    }
+    return total;
+  }
+
+  recordingInfo(): { since: number; game: string | null } | null {
+    return this.recording ? { ...this.recording } : null;
+  }
+
+  /** Kdo dostane vědět, že se nahrávání zastavilo samo (délka, místo na disku). */
+  onRecordingAutoStop(handler: (reason: 'max' | 'disk') => void): void {
+    this.recordingStopHandler = handler;
   }
 
   /** Aktuální generace (běžící nahrávání). */
@@ -393,7 +431,13 @@ export class CaptureManager {
   /** Smaže segmenty, které už žádný klip nemůže chtít, a prázdné staré generace. */
   private prune(): void {
     const keep = this.deps.settings().clipSeconds + KEEP_MARGIN_SECONDS;
-    const old = expired(this.allSegments(), Date.now(), keep);
+    let old = expired(this.allSegments(), Date.now(), keep);
+    if (this.recording) {
+      // Co patří do nahrávaného zápasu, zůstává (s rezervou jednoho kousku před startem).
+      const since = this.recording.since - SEGMENT_SECONDS * 1000;
+      old = old.filter((s) => s.endWall < since);
+      this.watchRecordingLimits();
+    }
     if (old.length === 0) return;
     const dead = new Set(old.map((s) => s.file));
     for (const g of this.generations) {
@@ -415,6 +459,70 @@ export class CaptureManager {
     });
   }
 
+  // ---- nahrávání celého zápasu ----------------------------------------------------
+
+  /**
+   * Začne nahrávat celý zápas: od teď se kousky nemažou. Zásobník musí
+   * běžet. Generace se přepne, ať nahrávka začíná přesně teď.
+   */
+  async startRecording(game: string | null): Promise<void> {
+    if (this._state !== 'on' || !this.live) throw new Error('not-capturing');
+    if (this.recording) return;
+    const live = this.live;
+    const next = this.newGeneration(live.mimeType);
+    const stopped = this.waitFor(`stopped:${live.id}`, 8000);
+    this.waitFor(`started:${next.id}`, 15000).catch((e) => {
+      log(`nová generace při startu nahrávání nenaběhla: ${e.message}`);
+      this.setState('error', e.message);
+    });
+    this.send({ type: 'restart', generation: next.id });
+    await stopped;
+    this.recording = { since: Date.now(), game };
+    this.lastDiskCheck = Date.now();
+    log(`nahrávání zápasu začalo${game ? ` (${game})` : ''}`);
+  }
+
+  /** Když nahrávání trvá moc dlouho nebo dochází místo, samo se uloží (přes handler v hlavním procesu). */
+  private watchRecordingLimits(): void {
+    if (!this.recording || this.building > 0) return;
+    const now = Date.now();
+    const seconds = (now - this.recording.since) / 1000;
+    let reason: 'max' | 'disk' | null = null;
+    if (seconds >= RECORDING_MAX_SECONDS) reason = 'max';
+    else if (now - this.lastDiskCheck >= 30000) {
+      this.lastDiskCheck = now;
+      if (freeBytes(this.bufferDir) < RECORDING_MIN_FREE_BYTES) reason = 'disk';
+    }
+    if (reason && this.recordingStopHandler) {
+      log(`nahrávání zápasu se zastaví samo (${reason})`);
+      const handler = this.recordingStopHandler;
+      this.recordingStopHandler = null;
+      handler(reason);
+    }
+  }
+
+  /**
+   * Zastaví nahrávání a slepí všechno od startu do jednoho souboru (jako
+   * klip, jen dlouhý). Vrací výsledek, nebo hodí 'too-early', když ještě
+   * nic není. Zásobník jede dál.
+   */
+  async stopRecording(outDir: string, thumbDir = outDir): Promise<ClipResult & { since: number }> {
+    const rec = this.recording;
+    if (!rec) throw new Error('not-recording');
+    if (this._state !== 'on' || !this.live) {
+      this.recording = null;
+      throw new Error('not-capturing');
+    }
+    const seconds = (Date.now() - rec.since) / 1000;
+    try {
+      const result = await this.makeClip(seconds, outDir, rec.game, thumbDir, { kind: 'recording' });
+      return { ...result, since: rec.since };
+    } finally {
+      // Ať se kousky zase mažou, i kdyby slepení selhalo.
+      this.recording = null;
+    }
+  }
+
   // ---- klip -------------------------------------------------------------------
 
   /** Kolik sekund je právě v zásobníku (pro hlášku "teprve se plní"). */
@@ -430,11 +538,12 @@ export class CaptureManager {
    * generaci (přesný konec), rozjede novou a slepí segmenty. Náhled (první
    * snímek videa) jde do `thumbDir` - ve složce s klipy tak leží jen videa.
    */
-  async makeClip(seconds: number, outDir: string, game: string | null, thumbDir = outDir): Promise<ClipResult> {
+  async makeClip(seconds: number, outDir: string, game: string | null, thumbDir = outDir, options: { kind?: 'clip' | 'recording' } = {}): Promise<ClipResult> {
     if (this._state !== 'on') throw new Error('not-capturing');
     const live = this.live;
     if (!live) throw new Error('not-capturing');
     const endWall = Date.now();
+    const recording = options.kind === 'recording';
     this.building += 1;
     try {
       // Přepnout na novou generaci: stará se uzavře přesně teď.
@@ -454,14 +563,16 @@ export class CaptureManager {
       // Když hra mezitím přepnula rozlišení (celá obrazovka 4:3, načítání),
       // kousky mají různé rozměry a slepený soubor prohlížeč nepřehraje -
       // ukáže černo s 0:00. Vezme se jen souvislý konec se stejnými rozměry.
-      chosen = await sameResolutionTail(chosen);
+      // U dlouhé nahrávky (stovky kousků) se kontrolují jen kraje - probe
+      // každého kousku by trvalo minuty.
+      chosen = await sameResolutionTail(chosen, recording ? 24 : Infinity);
       const have = totalSeconds(chosen);
       if (chosen.length === 0 || have < 1) throw new Error('too-early');
 
       mkdirSync(outDir, { recursive: true });
       const createdAt = new Date(endWall);
       const isH264 = /h264|avc1/i.test(live.mimeType);
-      const base = clipFileBase(createdAt, game);
+      const base = recording ? `${clipFileBase(createdAt, game)} recording` : clipFileBase(createdAt, game);
       const file = uniquePath(outDir, base, isH264 ? '.mp4' : '.webm');
       const listFile = join(live.dir, 'concat.txt');
       writeFileSync(listFile, concatList(chosen.map((s) => s.file)));
@@ -472,7 +583,8 @@ export class CaptureManager {
       if (isH264) args.push('-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart');
       else args.push('-c', 'copy');
       args.push(file);
-      await runFfmpeg(args);
+      // Dlouhá nahrávka = víc času na slepení (výchozí 2 min by u hodinového zápasu nestačily).
+      await runFfmpeg(args, recording ? 30 * 60 * 1000 : 120000);
 
       // Náhled = první snímek videa (to samé, co ukáže přehrávač), mimo složku s klipy.
       let thumb: string | null = null;
@@ -494,11 +606,21 @@ export class CaptureManager {
         thumb,
         createdAt,
       };
-      log(`klip: ${file} (${result.durationSeconds.toFixed(1)} s, ${chosen.length} segmentů)`);
+      log(`${recording ? 'nahrávka' : 'klip'}: ${file} (${result.durationSeconds.toFixed(1)} s, ${chosen.length} segmentů)`);
       return result;
     } finally {
       this.building -= 1;
     }
+  }
+}
+
+/** Volné místo na disku, kde leží složka (Node statfs); když to nejde zjistit, "dost". */
+function freeBytes(dir: string): number {
+  try {
+    const st = statfsSync(dir);
+    return Number(st.bavail) * Number(st.bsize);
+  } catch {
+    return Number.POSITIVE_INFINITY;
   }
 }
 
@@ -507,15 +629,20 @@ export class CaptureManager {
  * poslední. Rozměry se čtou z hlavičky (probe), po několika naráz; když
  * se u některého nepovede zjistit, bere se, že sedí.
  */
-async function sameResolutionTail(segments: Segment[]): Promise<Segment[]> {
+async function sameResolutionTail(segments: Segment[], maxProbes = Infinity): Promise<Segment[]> {
   if (segments.length < 2) return segments;
   const sizes: (string | null)[] = new Array(segments.length).fill(null);
+  // Když je kousků moc, ptá se jen na rovnoměrný vzorek (neznámé = "sedí").
+  const step = Number.isFinite(maxProbes) && segments.length > maxProbes ? Math.ceil(segments.length / maxProbes) : 1;
+  const indexes: number[] = [];
+  for (let i = 0; i < segments.length; i += step) indexes.push(i);
+  if (indexes[indexes.length - 1] !== segments.length - 1) indexes.push(segments.length - 1);
   const limit = 6;
-  for (let i = 0; i < segments.length; i += limit) {
-    const batch = segments.slice(i, i + limit);
-    const results = await Promise.all(batch.map((seg) => probe(seg.file).catch(() => ({ width: null, height: null, durationSeconds: null }))));
+  for (let i = 0; i < indexes.length; i += limit) {
+    const batch = indexes.slice(i, i + limit);
+    const results = await Promise.all(batch.map((idx) => probe(segments[idx].file).catch(() => ({ width: null, height: null, durationSeconds: null }))));
     results.forEach((r, j) => {
-      sizes[i + j] = r.width && r.height ? `${r.width}x${r.height}` : null;
+      sizes[batch[j]] = r.width && r.height ? `${r.width}x${r.height}` : null;
     });
   }
   const start = sameResolutionTailStart(sizes);

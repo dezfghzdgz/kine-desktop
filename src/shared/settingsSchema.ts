@@ -16,6 +16,7 @@ export const DEFAULT_SETTINGS: Settings = {
   appModeChosen: false,
   clipHotkey: 'F8',
   toggleHotkey: 'Ctrl+F9',
+  recordHotkey: 'Ctrl+F8',
   clipSeconds: 30,
   maxHeight: 1080,
   fps: 30,
@@ -91,6 +92,8 @@ export function sanitizeSettings(input: unknown): Settings {
     appModeChosen: upgrade ? false : bool(raw.appModeChosen, d.appModeChosen),
     clipHotkey: isHotkey(raw.clipHotkey) ? (raw.clipHotkey as string) : d.clipHotkey,
     toggleHotkey: isHotkey(raw.toggleHotkey) ? (raw.toggleHotkey as string) : d.toggleHotkey,
+    // Prázdné = nahrávání zápasu bez zkratky (jen tlačítkem); chybějící klíč ze starší verze = výchozí.
+    recordHotkey: raw.recordHotkey === '' ? '' : isHotkey(raw.recordHotkey) ? (raw.recordHotkey as string) : d.recordHotkey,
     clipSeconds: Number.isFinite(clipSeconds)
       ? Math.min(CLIP_SECONDS_MAX, Math.max(CLIP_SECONDS_MIN, Math.round(clipSeconds)))
       : d.clipSeconds,
@@ -121,6 +124,9 @@ export function sanitizeSettings(input: unknown): Settings {
     clipsSort: oneOf(raw.clipsSort, ['newest', 'oldest', 'longest', 'largest'] as const, d.clipsSort),
   };
 }
+
+/** Největší soubor, který Discord vezme přes webhook bez vylepšeného serveru (10 MB). */
+export const DISCORD_FILE_MAX_BYTES = 10 * 1024 * 1024;
 
 /** Webhook Discordu: jen adresy discord.com/discordapp.com /api/webhooks/<id>/<token>. */
 export function isDiscordWebhook(value: unknown): boolean {

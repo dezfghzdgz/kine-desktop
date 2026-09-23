@@ -65,7 +65,7 @@ export class Uploader {
   enqueue(requests: UploadRequest[]): void {
     for (const r of requests) {
       const clip = this.deps.library.get(r.clipId);
-      if (!clip) continue;
+      if (!clip || clip.deletedAt) continue;
       if (clip.upload?.state === 'done') continue;
       if (this.queue.some((q) => q.clipId === r.clipId) || this.current?.request.clipId === r.clipId) continue;
       this.queue.push(r);
@@ -130,7 +130,8 @@ export class Uploader {
     const request = this.queue.shift();
     if (!request) return;
     const clip = this.deps.library.get(request.clipId);
-    if (!clip) {
+    if (!clip || clip.deletedAt) {
+      // Klip mezitím skončil v koši - nahrávat ho nemá smysl.
       void this.next();
       return;
     }

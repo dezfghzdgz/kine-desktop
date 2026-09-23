@@ -44,12 +44,16 @@ export function gameHashtag(game: string): string {
     .slice(0, 30);
 }
 
+/** "0:07", "12:34", u nahrávek celého zápasu "1:02:05". */
 export function formatDuration(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));
-  return `${Math.floor(s / 60)}:${pad2(s % 60)}`;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}:${pad2(m)}:${pad2(s % 60)}` : `${m}:${pad2(s % 60)}`;
 }
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} kB`;
-  return `${(bytes / 1024 / 1024).toFixed(bytes < 100 * 1024 * 1024 ? 1 : 0)} MB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(bytes < 100 * 1024 * 1024 ? 1 : 0)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(bytes < 100 * 1024 * 1024 * 1024 ? 1 : 0)} GB`;
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, statfsSync, unlinkSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import {
   BrowserWindow,
@@ -12,16 +12,18 @@ import {
   dialog,
   globalShortcut,
   ipcMain,
+  nativeImage,
   net,
   screen,
   session,
   shell,
 } from 'electron';
-import type { CaptureEvent, Clip, DisplayInfo, Settings, Status, Visibility } from '../shared/types';
+import { TRASH_DAYS, type CaptureEvent, type Clip, type DisplayInfo, type Settings, type Status, type Visibility } from '../shared/types';
 import { hexToRgbTriplet } from '../shared/plan';
 import { makeT, type Key } from '../shared/i18n';
 import { hotkeyLabel } from '../shared/hotkeys';
 import { clipFileBase, defaultClipTitle, safeFilePart } from '../shared/clipNaming';
+import { DISCORD_FILE_MAX_BYTES } from '../shared/settingsSchema';
 import { maxClipSecondsFor } from '../shared/plan';
 import { performanceProfile } from '../shared/performance';
 import { initLog, log, logDir } from './log';
@@ -65,6 +67,20 @@ const RENDERER_DIR = join(__dirname, '..', 'renderer');
 const VARIANT = detectVariant();
 const PRODUCT = PRODUCT_NAMES[VARIANT];
 const ICON_PNG = join(app.getAppPath(), 'build', VARIANT === 'clipper' ? 'icon-clipper.png' : 'icon.png');
+/** Volné místo na disku, kde leží složka; když to nejde zjistit, -1. */
+function freeDiskBytes(dir: string): number {
+  try {
+    const st = statfsSync(dir);
+    return Number(st.bavail) * Number(st.bsize);
+  } catch {
+    return -1;
+  }
+}
+
+function mimeFor(file: string): string {
+  const ext = extname(file).toLowerCase();
+  return ext === '.gif' ? 'image/gif' : ext === '.webm' ? 'video/webm' : ext === '.mp4' ? 'video/mp4' : 'application/octet-stream';
+}
 
 // Pro zkoušky: vlastní složka s daty, ať se nesahá na skutečné nastavení.
 if (process.env.KINE_USER_DATA) app.setPath('userData', process.env.KINE_USER_DATA);
@@ -84,6 +100,8 @@ class KineApp {
   capture!: CaptureManager;
   games!: GameWatcher;
   gameEvents!: GameEvents;
+  /** Má ikona u hodin právě červenou tečku (nahrávání)? Ať se obrázek nemění při každém rebuildTray. */
+  private trayDotShown = false;
   auth!: Auth;
   uploader!: Uploader;
   toast!: Toast;
@@ -158,7 +176,7 @@ class KineApp {
     // Kine Clipper jen klipuje. Starší nastavení (kde se režim volil) se srovná.
     const mode = modeForVariant(VARIANT);
     if (this.settings.get().appMode !== mode || !this.settings.get().appModeChosen) this.settings.update({ appMode: mode, appModeChosen: true });
-    this.library = new ClipLibrary(this.settings.clipsDir());
+    this.library = new ClipLibrary(this.settings.clipsDir(), log);
     this.library.load();
 
     this.auth = new Auth(() => this.settings.get().siteUrl);
@@ -207,9 +225,11 @@ class KineApp {
       settings: () => this.settings.get(),
       updateSettings: (patch) => this.settings.update(patch),
       steamLibraries: () => this.games.steamLibraries(),
-      onClip: (_count, labelKey) => void this.onClipHotkey({ auto: true, label: this.t(labelKey) }),
+      // Název klipu: "Triple kill · Mirage 7:5" (CS2), "Double kill · Crystal Maiden" (Dota 2).
+      onClip: (_count, labelKey, _game, context) => void this.onClipHotkey({ auto: true, label: context ? `${this.t(labelKey)} · ${context}` : this.t(labelKey) }),
       onStateChange: () => this.pushStatus(),
       lolPollMs: () => this.profile().lolPollMs,
+      minecraftCommandLine: () => this.games.minecraftCommandLine(),
     });
 
     this.hotkeys = new HotkeyManager({
@@ -227,6 +247,9 @@ class KineApp {
       // Popis pod videem: odkud klip je a kde se appka bere - diváci klipu se tak dostanou k appce.
       describe: (clip) => {
         const download = `${this.settings.get().siteUrl}/download`;
+        if (clip.kind === 'recording') {
+          return clip.game ? this.t('uploadDescriptionRecordingGame', { game: clip.game, url: download }) : this.t('uploadDescriptionRecording', { url: download });
+        }
         return clip.game ? this.t('uploadDescriptionGame', { game: clip.game, url: download }) : this.t('uploadDescription', { url: download });
       },
     });
@@ -287,6 +310,11 @@ class KineApp {
     // Plán (předplatné) a barva se občas srovnají podle Kine - když Klipy
     // Plus vyprší, automatické nahrávání se samo vrátí na ruční.
     setInterval(() => void this.auth.refresh(), 6 * 60 * 60 * 1000);
+    // Koš: co v něm leží déle než týden, zmizí samo.
+    setInterval(() => {
+      const n = this.library.purgeExpired();
+      if (n > 0) log(`koš: ${n} klipů smazáno po ${TRASH_DAYS} dnech`);
+    }, 60 * 60 * 1000);
 
     const hidden = process.argv.includes('--hidden');
     const s = this.settings.get();
@@ -338,7 +366,7 @@ class KineApp {
     for (const win of [this.settingsWindow, this.reviewWindow]) {
       if (win && !win.isDestroyed()) win.setIcon(icon);
     }
-    this.tray?.setImage(trayIcon(icon));
+    this.tray?.setImage(trayIcon(icon, !!this.capture.recordingInfo()));
   }
 
   /** Po aktualizaci jednou řekne, že běží nová verze (poprvé po instalaci nic). */
@@ -359,7 +387,7 @@ class KineApp {
     const s = this.settings.get();
     this.pushStatus();
     this.uploader.kick();
-    this.gameEvents.onGame(game?.exe ?? null);
+    this.gameEvents.onGame(game?.exe ?? null, game?.name ?? null);
     const announce = (g: DetectedGame) => void this.toast.show(this.t('toastGameDetected', { game: g.name, hotkey: hotkeyLabel(s.clipHotkey) }), 'ok');
 
     if (game && !prev) {
@@ -377,6 +405,8 @@ class KineApp {
     }
 
     if (!game && prev) {
+      // Nahrávaný zápas skončil s hrou - uložit, ať je v okýnku po hře.
+      if (this.capture.recordingInfo()) await this.finishRecording('game-ended');
       if (s.detection === 'games') await this.capture.stop().catch(() => undefined);
       this.sleepKineView(false);
       // Aktualizace, která vyšla během hry, se stáhne teď.
@@ -393,7 +423,8 @@ class KineApp {
     if (clips.length === 0) return;
     const mode = this.effectiveAfterGame();
     if (mode === 'auto') {
-      this.uploader.enqueue(clips.map((c) => ({ clipId: c.id, visibility: s.visibility })));
+      // Samo se nahrávají jen klipy; nahrávka celého zápasu (hodiny, gigabajty) čeká na hráče v knihovně.
+      this.uploader.enqueue(clips.filter((c) => c.kind !== 'recording').map((c) => ({ clipId: c.id, visibility: s.visibility })));
     } else if (mode === 'review') {
       this.openReview(this.sessionId);
     }
@@ -403,7 +434,89 @@ class KineApp {
 
   private onHotkey(id: HotkeyId): void {
     if (id === 'clip') void this.onClipHotkey();
+    else if (id === 'record') void this.toggleRecording();
     else void this.onToggleHotkey();
+  }
+
+  // ---- nahrávání celého zápasu ----------------------------------------------------
+
+  /**
+   * Start / stop nahrávání celého zápasu (zkratka, karta stavu, lišta).
+   * Zásobník musí běžet - nahrávka jsou jeho kousky, které se nemažou.
+   */
+  async toggleRecording(): Promise<void> {
+    if (this.capture.recordingInfo()) {
+      await this.finishRecording('user');
+      return;
+    }
+    const s = this.settings.get();
+    if (this.capture.state !== 'on') {
+      const key: Key = s.detection === 'manual' ? 'toastNotCapturingManual' : 'toastNotCapturing';
+      void this.toast.show(this.t(key, { hotkey: hotkeyLabel(s.toggleHotkey) }), 'warn');
+      return;
+    }
+    try {
+      await this.capture.startRecording(this.games.current()?.name ?? null);
+      this.capture.onRecordingAutoStop((reason) => void this.finishRecording(reason));
+      void this.toast.show(s.recordHotkey ? this.t('toastRecordingStarted', { hotkey: hotkeyLabel(s.recordHotkey) }) : this.t('toastRecordingStartedNoKey'), 'ok');
+    } catch (e) {
+      void this.toast.show(this.t('toastClipFailed', { message: (e as Error).message }), 'error');
+    }
+    this.pushStatus();
+  }
+
+  /**
+   * Uloží běžící nahrávku jako dlouhý klip. Volá se ze zkratky, při konci
+   * hry, před zastavením zásobníku (změna nastavení, pauza, konec appky)
+   * a když se nahrávání zastaví samo (délka, místo na disku).
+   */
+  async finishRecording(reason: 'user' | 'game-ended' | 'buffer-off' | 'quit' | 'max' | 'disk'): Promise<Clip | null> {
+    const info = this.capture.recordingInfo();
+    if (!info) return null;
+    const s = this.settings.get();
+    const game = info.game ?? this.games.current()?.name ?? null;
+    try {
+      const result = await this.capture.stopRecording(this.settings.clipsDir(), join(app.getPath('userData'), 'thumbs'));
+      const baseTitle = defaultClipTitle(new Date(info.since), game, this.t('recordingWord'));
+      const clip: Clip = {
+        id: randomUUID(),
+        file: result.file,
+        thumb: result.thumb,
+        title: baseTitle,
+        game,
+        createdAt: new Date(info.since).toISOString(),
+        durationSeconds: result.durationSeconds,
+        sizeBytes: result.sizeBytes,
+        width: result.width,
+        height: result.height,
+        sessionId: game ? this.sessionId : 'no-game-' + this.sessionId,
+        upload: null,
+        kind: 'recording',
+      };
+      this.library.add(clip);
+      const minutes = Math.round(result.durationSeconds / 60);
+      const key: Key = reason === 'disk' ? 'toastRecordingSavedDisk' : reason === 'max' ? 'toastRecordingSavedMax' : 'toastRecordingSaved';
+      void this.toast.show(this.t(key, { minutes: Math.max(1, minutes) }), 'ok', { notification: !s.toast || reason !== 'user' });
+      log(`nahrávka zápasu uložena (${reason}): ${result.file}`);
+      this.pushStatus();
+      return clip;
+    } catch (e) {
+      const message = (e as Error).message;
+      if (message !== 'too-early' && message !== 'not-capturing') {
+        void this.toast.show(this.t('toastClipFailed', { message }), 'error', { notification: true });
+      } else if (reason === 'user') {
+        void this.toast.show(this.t('toastTooEarly'), 'warn');
+      }
+      log(`nahrávka zápasu se nepovedla (${reason}): ${message}`);
+      this.pushStatus();
+      return null;
+    }
+  }
+
+  /** Zastaví zásobník, ale nejdřív uloží rozjetou nahrávku - jinak by kousky zmizely s ním. */
+  private async stopCapture(reason: 'game-ended' | 'buffer-off' | 'quit'): Promise<void> {
+    if (this.capture.recordingInfo()) await this.finishRecording(reason);
+    await this.capture.stop();
   }
 
   /**
@@ -464,7 +577,7 @@ class KineApp {
   async onToggleHotkey(): Promise<void> {
     const s = this.settings.get();
     if (this.capture.state === 'on' || this.capture.state === 'starting') {
-      await this.capture.stop();
+      await this.stopCapture('buffer-off');
       void this.toast.show(this.t('toastBufferOff'), 'warn');
     } else {
       await this.capture.start().catch(() => undefined);
@@ -479,15 +592,21 @@ class KineApp {
   // ---- nastavení ----------------------------------------------------------------
 
   private onSettingsChanged(s: Settings, prev: Settings): void {
-    if (s.clipHotkey !== prev.clipHotkey || s.toggleHotkey !== prev.toggleHotkey) this.registerHotkeys();
+    if (s.clipHotkey !== prev.clipHotkey || s.toggleHotkey !== prev.toggleHotkey || s.recordHotkey !== prev.recordHotkey) this.registerHotkeys();
     if (s.startWithSystem !== prev.startWithSystem) this.applyLoginItem();
     if (s.clipsDir !== prev.clipsDir) this.library.load(this.settings.clipsDir());
     const captureKeys: (keyof Settings)[] = ['maxHeight', 'fps', 'codec', 'videoMbps', 'systemAudio', 'microphone', 'displayId'];
-    if (captureKeys.some((k) => s[k] !== prev[k])) void this.capture.restartIfOn();
+    if (captureKeys.some((k) => s[k] !== prev[k])) {
+      // Změna kvality = nový start zásobníku; rozjetá nahrávka se nejdřív uloží.
+      void (async () => {
+        if (this.capture.recordingInfo()) await this.finishRecording('buffer-off');
+        await this.capture.restartIfOn();
+      })();
+    }
     if (s.detection !== prev.detection) {
       if (s.detection === 'always') void this.capture.start().catch(() => undefined);
-      else if (s.detection === 'games' && !this.games.current()) void this.capture.stop();
-      else if (s.detection === 'manual') void this.capture.stop();
+      else if (s.detection === 'games' && !this.games.current()) void this.stopCapture('buffer-off');
+      else if (s.detection === 'manual') void this.stopCapture('buffer-off');
     }
     if (s.detectFullscreen !== prev.detectFullscreen) void this.games.refresh();
     if (s.appMode !== prev.appMode && s.appMode === 'clipper') this.destroyKineView();
@@ -506,7 +625,7 @@ class KineApp {
 
   private registerHotkeys(): void {
     const s = this.settings.get();
-    const problems = this.hotkeys.apply({ clip: s.clipHotkey, toggle: s.toggleHotkey });
+    const problems = this.hotkeys.apply({ clip: s.clipHotkey, toggle: s.toggleHotkey, record: s.recordHotkey });
     for (const p of problems) {
       // Hráč musí vědět, že F8 nic neudělá - jinak by to vypadalo jako rozbitá appka.
       if (p.reason === 'helper-down') continue; // pomocník teprve nabíhá; kdyby nenaběhl, uvidí to v nastavení
@@ -577,6 +696,8 @@ class KineApp {
   statusLine(): string {
     const s = this.settings.get();
     const game = this.games.current();
+    const rec = this.capture.recordingInfo();
+    if (rec) return this.t('trayRecording', { game: game?.name ?? rec.game ?? '' }).replace(/\s*·\s*$/, '');
     if (this.paused) return this.t('trayPaused');
     if (this.capture.state === 'on' || this.capture.state === 'starting') {
       return game ? this.t('trayCapturing', { game: game.name }) : this.t('trayCapturingNoGame');
@@ -600,6 +721,11 @@ class KineApp {
     items.push(
       { type: 'separator' },
       { label: this.t('trayClipNow', { hotkey: hotkeyLabel(s.clipHotkey) }), click: () => void this.onClipHotkey(), enabled: this.capture.state === 'on' },
+      {
+        label: this.capture.recordingInfo() ? this.t('trayRecordStop') : this.t('trayRecordStart', { hotkey: s.recordHotkey ? hotkeyLabel(s.recordHotkey) : '' }).replace(/\s*\(\)$/, ''),
+        click: () => void this.toggleRecording(),
+        enabled: this.capture.state === 'on',
+      },
       { label: this.t('trayLibrary'), click: () => this.openSettings('clips') },
       { label: this.t('traySettings'), click: () => this.openSettings('settings') },
       { label: this.paused ? this.t('trayResume') : this.t('trayPause'), click: () => void this.togglePause() },
@@ -609,11 +735,17 @@ class KineApp {
     );
     this.tray.setContextMenu(Menu.buildFromTemplate(items));
     this.tray.setToolTip(`${PRODUCT} · ${this.statusLine()}`);
+    // Červená tečka na ikoně, dokud běží nahrávání zápasu.
+    const recording = !!this.capture.recordingInfo();
+    if (recording !== this.trayDotShown) {
+      this.trayDotShown = recording;
+      this.tray.setImage(trayIcon(this.appIcon(), recording));
+    }
   }
 
   private async togglePause(): Promise<void> {
     this.paused = !this.paused;
-    if (this.paused) await this.capture.stop();
+    if (this.paused) await this.stopCapture('buffer-off');
     else if (this.settings.get().detection === 'always' || (this.settings.get().detection === 'games' && this.games.current())) {
       await this.capture.start().catch(() => undefined);
     }
@@ -990,6 +1122,7 @@ class KineApp {
       version: app.getVersion(),
       variant: VARIANT,
       autoClipsLive: this.gameEvents.live(),
+      recordingSince: this.capture.recordingInfo()?.since ?? null,
     };
   }
 
@@ -999,7 +1132,13 @@ class KineApp {
   }
 
   pushClips(): void {
-    this.broadcast('clips', this.library.list());
+    this.broadcast('clips', this.library.listAll());
+  }
+
+  /** Kolik místa berou klipy, koš a zásobník a kolik je na disku volno (panel Úložiště). */
+  storageInfo(): { clipsBytes: number; clipsCount: number; trashBytes: number; trashCount: number; bufferBytes: number; freeBytes: number; clipsDir: string } {
+    const usage = this.library.usage();
+    return { ...usage, bufferBytes: this.capture.bufferBytes(), freeBytes: freeDiskBytes(this.settings.clipsDir()), clipsDir: this.settings.clipsDir() };
   }
 
   /**
@@ -1008,7 +1147,7 @@ class KineApp {
    * ať při chybě nezůstane rozbitý soubor). Průběh chodí oknům jako
    * "clips:trimProgress".
    */
-  async trimClip(id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' }): Promise<Clip> {
+  async trimClip(id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur' }): Promise<Clip> {
     const clip = this.library.get(id);
     if (!clip) throw new Error('clip not found');
     const s = this.settings.get();
@@ -1018,7 +1157,7 @@ class KineApp {
     const progress = (percent: number) => this.broadcast('clips:trimProgress', { id, percent });
     // Konec nejdál na konci klipu (když délku neznáme, věří se stránce).
     const total = clip.durationSeconds > 0 ? clip.durationSeconds : Infinity;
-    const vertical = opts.vertical === 'left' || opts.vertical === 'center' || opts.vertical === 'right' ? opts.vertical : undefined;
+    const vertical = opts.vertical === 'left' || opts.vertical === 'center' || opts.vertical === 'right' || opts.vertical === 'blur' ? opts.vertical : undefined;
     const options = {
       start: Math.max(0, Number(opts.start) || 0),
       end: Math.min(total, Number(opts.end) || total),
@@ -1109,19 +1248,46 @@ class KineApp {
    * Nahraný klip na Discord přes webhook z nastavení: jedna zpráva s názvem
    * a odkazem (Discord si z odkazu na Kine udělá náhled sám).
    */
+  /**
+   * Klip na Discord (webhook z nastavení): nahraný klip jako odkaz na Kine,
+   * nenahraný rovnou jako soubor - když se vejde do limitu Discordu
+   * (DISCORD_FILE_MAX_BYTES). Větší se musí nejdřív nahrát na Kine.
+   */
   async shareToDiscord(id: string): Promise<void> {
     const clip = this.library.get(id);
     const webhook = this.settings.get().discordWebhook;
-    if (!clip || clip.upload?.state !== 'done') throw new Error('not uploaded');
+    if (!clip) throw new Error('not found');
     if (!webhook) throw new Error('no webhook');
-    const res = await fetch(webhook, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: `**${clip.title}**\n${clip.upload.url}` }),
-      signal: AbortSignal.timeout(15000),
-    });
+    if (clip.upload?.state === 'done') {
+      const res = await fetch(webhook, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: `**${clip.title}**\n${clip.upload.url}` }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      log(`klip poslán na Discord: ${clip.title}`);
+      return;
+    }
+    await this.shareFileToDiscord(clip.file, clip.title);
+  }
+
+  /** Soubor (klip do limitu, GIF) přímo do kanálu na Discordu přes webhook. */
+  async shareFileToDiscord(file: string, title: string): Promise<void> {
+    const webhook = this.settings.get().discordWebhook;
+    if (!webhook) throw new Error('no webhook');
+    const dir = this.settings.clipsDir();
+    // Jen soubory ze složky s klipy (okno nesmí poslat cokoli z disku).
+    if (!file.startsWith(dir) || !existsSync(file)) throw new Error('not found');
+    const size = statSync(file).size;
+    if (size > DISCORD_FILE_MAX_BYTES) throw new Error('too-large');
+    const form = new FormData();
+    form.append('payload_json', JSON.stringify({ content: title ? `**${title}**` : '' }));
+    form.append('files[0]', new Blob([readFileSync(file)], { type: mimeFor(file) }), basename(file));
+    const res = await fetch(webhook, { method: 'POST', body: form, signal: AbortSignal.timeout(120000) });
+    if (res.status === 413) throw new Error('too-large');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    log(`klip poslán na Discord: ${clip.title}`);
+    log(`soubor poslán na Discord: ${basename(file)} (${Math.round(size / 1024)} kB)`);
   }
 
   /**
@@ -1198,6 +1364,31 @@ class KineApp {
     return result;
   }
 
+  /**
+   * Náhled klipu ze snímku v čase `atSeconds` (tlačítko v přehrávači). Nový
+   * soubor s jiným názvem, ať okno neukazuje starý z mezipaměti; starý se smaže.
+   */
+  async setThumbnailFrame(id: string, atSeconds: number): Promise<Clip | null> {
+    const clip = this.library.get(id);
+    if (!clip) throw new Error('clip not found');
+    const at = Math.max(0, Math.min(Number(atSeconds) || 0, Math.max(0, clip.durationSeconds - 0.1)));
+    const thumbsDir = join(app.getPath('userData'), 'thumbs');
+    mkdirSync(thumbsDir, { recursive: true });
+    const stem = basename(clip.file, extname(clip.file));
+    const thumb = join(thumbsDir, `${safeFilePart(stem)}-${Date.now().toString(36)}.jpg`);
+    const ok = await makeThumbnail(clip.file, thumb, at);
+    if (!ok) throw new Error('thumbnail failed');
+    if (clip.thumb && clip.thumb !== thumb) {
+      try {
+        unlinkSync(clip.thumb);
+      } catch {
+        // starý náhled už není
+      }
+    }
+    log(`náhled klipu ze snímku ${at.toFixed(1)} s: ${thumb}`);
+    return this.library.update(id, { thumb });
+  }
+
   /** Ukázat soubor ve složce - jen soubory ve složce s klipy (nic jiného okno nesmí otvírat). */
   revealFile(file: string): void {
     const dir = this.settings.clipsDir();
@@ -1229,7 +1420,10 @@ class KineApp {
     ipcMain.handle('status:get', () => this.status());
     ipcMain.handle('platform', () => process.platform);
 
-    ipcMain.handle('clips:list', () => this.library.list());
+    ipcMain.handle('clips:list', () => this.library.listAll());
+    ipcMain.handle('clips:restore', (_e, id: string) => this.library.restore(String(id)));
+    ipcMain.handle('clips:emptyTrash', () => this.library.emptyTrash());
+    ipcMain.handle('storage:info', () => this.storageInfo());
     ipcMain.handle('clips:delete', (_e, id: string) => this.library.remove(id));
     ipcMain.handle('clips:rename', (_e, id: string, title: string) => this.library.update(id, { title: String(title).trim().slice(0, 150) || this.t('clipDefaultName') }));
     ipcMain.handle('clips:setGame', (_e, id: string, game: string | null) => {
@@ -1260,14 +1454,36 @@ class KineApp {
       return result.filePaths[0];
     });
     ipcMain.handle('clips:clipNow', () => this.onClipHotkey());
-    ipcMain.handle('clips:trim', (_e, id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' }) => this.trimClip(id, opts));
+    ipcMain.handle('clips:trim', (_e, id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur' }) => this.trimClip(id, opts));
     ipcMain.handle('app:copy', (_e, text: string) => clipboard.writeText(String(text ?? '')));
     ipcMain.handle('clips:discord', (_e, id: string) => this.shareToDiscord(id));
+    ipcMain.handle('clips:discordFile', (_e, file: string, title: string) => this.shareFileToDiscord(String(file ?? ''), String(title ?? '')));
     ipcMain.handle('clips:favorite', (_e, id: string, favorite: boolean) => this.library.update(id, { favorite: Boolean(favorite) }));
     ipcMain.handle('clips:merge', (_e, ids: string[]) => this.mergeSelected(Array.isArray(ids) ? ids.map(String) : []));
     ipcMain.handle('clips:gif', (_e, id: string, range: { start: number; end: number }) => this.gifFromClip(id, range ?? { start: 0, end: 0 }));
     ipcMain.handle('clips:revealFile', (_e, file: string) => this.revealFile(file));
+    ipcMain.handle('clips:thumbFrame', (_e, id: string, atSeconds: number) => this.setThumbnailFrame(String(id), Number(atSeconds)));
+    // Tažení karty klipu ven z okna: systémové drag & drop se souborem (Discord, prohlížeč, Průzkumník).
+    ipcMain.on('clips:dragStart', (e, id: string) => {
+      const clip = this.library.get(String(id));
+      if (!clip || !existsSync(clip.file)) return;
+      let icon = this.appIcon();
+      try {
+        if (clip.thumb && existsSync(clip.thumb)) {
+          const img = nativeImage.createFromPath(clip.thumb);
+          if (!img.isEmpty()) icon = img.resize({ width: 128 });
+        }
+      } catch {
+        // zůstane ikona appky
+      }
+      try {
+        e.sender.startDrag({ file: clip.file, icon });
+      } catch (err) {
+        log(`tažení klipu: ${(err as Error).message}`);
+      }
+    });
     ipcMain.handle('capture:pause', () => this.togglePause());
+    ipcMain.handle('capture:record', () => this.toggleRecording());
 
     ipcMain.handle('auth:loginBrowser', async () => {
       this.browserLoginWaiting = true;
@@ -1381,11 +1597,13 @@ class KineApp {
     log('konec');
     this.helper?.stop();
     void this.gameEvents.stop();
-    void this.capture.stop().finally(() => {
+    // Rozjetá nahrávka se před koncem uloží (dlouhá může chvíli trvat - proto delší strop).
+    const recording = !!this.capture.recordingInfo();
+    void this.stopCapture('quit').finally(() => {
       this.toast.destroy();
       app.exit(0);
     });
-    setTimeout(() => app.exit(0), 4000);
+    setTimeout(() => app.exit(0), recording ? 5 * 60 * 1000 : 4000);
   }
 }
 

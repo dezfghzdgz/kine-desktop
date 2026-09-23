@@ -52,6 +52,8 @@ export class GameWatcher {
   private steamPath: string | null | undefined;
   private steamNames = new Map<number, string>();
   private minecraftCheck: { at: number; result: boolean } | null = null;
+  /** Příkazová řádka běžícího Minecraftu (kvůli --gameDir pro sledování logu). */
+  private minecraftCmdline = '';
   private busy = false;
   private lastForegroundExe = '';
 
@@ -258,10 +260,18 @@ export class GameWatcher {
         "Get-CimInstance Win32_Process -Filter \"Name='javaw.exe' or Name='java.exe'\" | Select-Object -ExpandProperty CommandLine",
       ], 15000);
       result = isMinecraftCommandLine(out);
+      this.minecraftCmdline = result ? out : '';
     } else {
-      result = isMinecraftCommandLine(await run('ps', ['-eo', 'args=']));
+      const out = await run('ps', ['-eo', 'args=']);
+      result = isMinecraftCommandLine(out);
+      this.minecraftCmdline = result ? out : '';
     }
     this.minecraftCheck = { at: Date.now(), result };
     return result;
+  }
+
+  /** Příkazová řádka Minecraftu, když běží (jinak prázdné). */
+  minecraftCommandLine(): string {
+    return this.minecraftCmdline;
   }
 }

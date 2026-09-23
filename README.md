@@ -201,6 +201,27 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   ukazuje „Nahráno · Kine ho zpracovává…“ a teprve po `ready` „✓ Na Kine“
   s oznámením; po restartu se čekání naváže (`upload.ready === false`).
   Web má k tomu záchranu na své straně (`sweepProcessing`, viz repo Kine).
+- **Zvuk hry** (`src/renderer/capture.ts`): na Windows se bere „zvuk systému“
+  - Chromium loopback **výchozího výstupního zařízení Windows** (`audio:
+  'loopback'` v `setDisplayMediaRequestHandler`). Když hra hraje jinam
+  (jiné sluchátka zvolené ve hře nebo ve Windows > Zvuk > hlasitost
+  aplikací), nahrává se ticho, i když hráč hru slyší. Proto: v Záznamu
+  jsou **živé měřáky** zvuku hry a mikrofonu (AnalyserNode na každé stopě
+  před smícháním, hlášení jednou za sekundu jako `levels`), pod nimi
+  „Zvuk hry se bere z: <zařízení>“ (název výchozího výstupu z
+  `enumerateDevices`), a když je zvuk hry 10 s digitální nula, nápověda co
+  s tím; při běžící hře a 20 s ticha jednou upozornění (`toastSystemAudioSilent`,
+  klik otevře Záznam) a varování v postranním panelu. Hráč může zvuk hry
+  brát i **z jiného záznamového zařízení** (`systemAudioDevice`: Stereo
+  Mix, „What U Hear“, VB-Cable), vybrat **mikrofon** (`microphoneDevice`) a
+  nastavit **hlasitost hry a mikrofonu v klipu** (`systemGain`, `micGain`,
+  GainNode 0-200 %). Když je jen jedna stopa beze změny hlasitosti, jde do
+  záznamu rovnou (bez Web Audio - nejméně věcí, co se může pokazit); jinak
+  se stopy smíchají v AudioContextu (`resume()`, kdyby byl uspaný). Změna
+  výchozího výstupu Windows za běhu (`devicechange`) snímání rozjede znovu,
+  protože loopback zůstává na starém zařízení. Zkouška `KINE_TEST_FAKE_AUDIO=1`
+  (a `=mix`) dá Chromiu falešný mikrofon s tónem a ověří měřáky i to, že
+  klip má opravdu slyšitelný zvuk (`volumedetect`).
 - **Kine v prohlížeči (Kine Clipper):** „Otevřít na Kine“ jde přes
   `/connect/app` s jednorázovým tokenem, takže se prohlížeč přihlásí
   stejným účtem jako appka - čerstvě nahraný (soukromý) klip je hned

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { CaptureCommand, CaptureEvent, Clip, DisplayInfo, GameSource, ProcessInfo, Settings, Status, UploadRequest } from '../shared/types';
+import type { AudioLevels, CaptureCommand, CaptureEvent, Clip, DisplayInfo, GameSource, ProcessInfo, Settings, Status, UploadRequest } from '../shared/types';
 
 /**
  * Most mezi stránkami a hlavním procesem. Stránky nemají Node ani
@@ -106,6 +106,10 @@ const kine = {
   quit: (): Promise<void> => ipcRenderer.invoke('app:quit'),
 
   onToast: (cb: (t: { message: string; kind: string }) => void) => on<{ message: string; kind: string }>('toast:show', cb),
+  /** Hladiny zvuku hry a mikrofonu ze snímání (zhruba každou sekundu, jen když zásobník běží). */
+  onAudioLevels: (cb: (levels: AudioLevels) => void) => on<AudioLevels>('audio:levels', cb),
+  /** Poslední známé hladiny (null = zásobník neběží). */
+  getAudioLevels: (): Promise<AudioLevels | null> => ipcRenderer.invoke('audio:levels'),
 };
 
 const kineCapture = {

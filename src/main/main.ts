@@ -18,7 +18,7 @@ import {
   session,
   shell,
 } from 'electron';
-import { CATEGORY_KEYS, TRASH_DAYS, VISIBILITIES, type CaptureEvent, type Clip, type DisplayInfo, type Settings, type Status, type UploadRequest, type Visibility } from '../shared/types';
+import { CATEGORY_KEYS, TRASH_DAYS, VISIBILITIES, type AudioLevels, type CaptureEvent, type Clip, type DisplayInfo, type Settings, type Status, type UploadRequest, type Visibility } from '../shared/types';
 import { parseHashtags } from '../shared/upload';
 import { hexToRgbTriplet } from '../shared/plan';
 import { makeT, type Key } from '../shared/i18n';
@@ -134,6 +134,11 @@ class KineApp {
   gameEvents!: GameEvents;
   /** Má ikona u hodin právě červenou tečku (nahrávání)? Ať se obrázek nemění při každém rebuildTray. */
   private trayDotShown = false;
+  /** Výchozí výstup zvuku se změnil během nahrávání zápasu - po uložení nahrávky se snímání rozjede znovu. */
+  private restartAfterRecording = false;
+  /** Kdy se naposledy hlásilo ticho zvuku hry (jednou za start zásobníku stačí). */
+  private silenceWarnedFor: number | null = null;
+  private lastAudioRestart = 0;
   auth!: Auth;
   uploader!: Uploader;
   toast!: Toast;
@@ -233,7 +238,26 @@ class KineApp {
         // Jednou za běh appky - ne při každém startu zásobníku.
         if (this.warnedOnce.has(kind)) return;
         this.warnedOnce.add(kind);
-        void this.toast.show(this.t('toastMicUnavailable', { message: message.replace(/^\w*Error:\s*/, '') }), 'warn', { notification: true });
+        const clean = message.replace(/^\w*Error:\s*/, '');
+        if (kind === 'systemAudio') {
+          void this.toast.show(this.t('toastSystemAudioDevice', { message: clean }), 'warn', { notification: true, onClick: () => this.openSettings('settings') });
+          return;
+        }
+        void this.toast.show(this.t('toastMicUnavailable', { message: clean }), 'warn', { notification: true });
+      },
+      onLevels: (levels) => this.onAudioLevels(levels),
+      onDefaultOutputChanged: (device) => {
+        // Loopback zůstal na starém zařízení - rozjet znovu, ale ne pod rozjetou nahrávkou zápasu (ta by se rozpadla).
+        if (this.capture.recordingInfo()) {
+          log(`výchozí výstup zvuku se změnil na "${device}" během nahrávání zápasu - snímání se rozjede znovu až po něm`);
+          this.restartAfterRecording = true;
+          return;
+        }
+        // Windows hlásí změnu zařízení i několikrát za sebou - jeden restart za 5 s stačí.
+        if (Date.now() - this.lastAudioRestart < 5000) return;
+        this.lastAudioRestart = Date.now();
+        log(`výchozí výstup zvuku se změnil na "${device}" - snímání se rozjede znovu`);
+        void this.capture.restartIfOn();
       },
       // Každá appka svou složku zásobníku - Kine a Kine Clipper si nesmí mazat kousky.
       bufferName: VARIANT === 'clipper' ? 'kine-clipper-buffer' : 'kine-buffer',
@@ -537,6 +561,10 @@ class KineApp {
       void this.toast.show(this.t(key, { minutes: Math.max(1, minutes) }), 'ok', { notification: !s.toast || reason !== 'user' });
       log(`nahrávka zápasu uložena (${reason}): ${result.file}`);
       this.pushStatus();
+      if (this.restartAfterRecording && reason !== 'quit' && reason !== 'buffer-off') {
+        this.restartAfterRecording = false;
+        void this.capture.restartIfOn();
+      }
       return clip;
     } catch (e) {
       const message = (e as Error).message;
@@ -633,7 +661,7 @@ class KineApp {
     if (s.clipHotkey !== prev.clipHotkey || s.toggleHotkey !== prev.toggleHotkey || s.recordHotkey !== prev.recordHotkey) this.registerHotkeys();
     if (s.startWithSystem !== prev.startWithSystem) this.applyLoginItem();
     if (s.clipsDir !== prev.clipsDir) this.library.load(this.settings.clipsDir());
-    const captureKeys: (keyof Settings)[] = ['maxHeight', 'fps', 'codec', 'videoMbps', 'systemAudio', 'microphone', 'displayId'];
+    const captureKeys: (keyof Settings)[] = ['maxHeight', 'fps', 'codec', 'videoMbps', 'systemAudio', 'systemAudioDevice', 'microphone', 'microphoneDevice', 'systemGain', 'micGain', 'displayId'];
     if (captureKeys.some((k) => s[k] !== prev[k])) {
       // Změna kvality = nový start zásobníku; rozjetá nahrávka se nejdřív uloží.
       void (async () => {
@@ -729,6 +757,23 @@ class KineApp {
     this.tray.on('click', open);
     this.tray.on('double-click', open);
     this.rebuildTray();
+  }
+
+  /**
+   * Hladiny zvuku ze snímací stránky: okna dostanou měřáky (kanál
+   * "audio:levels", ne přes status - ten přestavuje i nabídku u hodin).
+   * Když hra běží a zvuk hry je 20 s úplně tichý, hráč dostane jednou
+   * upozornění, odkud appka zvuk bere (výchozí výstup Windows) - typicky
+   * hra hraje do jiného zařízení, než je ve Windows výchozí.
+   */
+  private onAudioLevels(levels: AudioLevels): void {
+    this.broadcast('audio:levels', levels);
+    const game = this.games.current();
+    if (levels.system !== null && game && levels.systemSilentSeconds >= 20 && this.silenceWarnedFor !== this.capture.captureSession()) {
+      this.silenceWarnedFor = this.capture.captureSession();
+      const device = levels.systemDevice || this.t('audioDefaultDevice');
+      void this.toast.show(this.t('toastSystemAudioSilent', { game: game.name, device }), 'warn', { notification: true, onClick: () => this.openSettings('settings') });
+    }
   }
 
   statusLine(): string {
@@ -1521,6 +1566,7 @@ class KineApp {
       }
     });
     ipcMain.handle('capture:pause', () => this.togglePause());
+    ipcMain.handle('audio:levels', () => this.capture.levels);
     ipcMain.handle('capture:record', () => this.toggleRecording());
 
     ipcMain.handle('auth:loginBrowser', async () => {
@@ -1668,6 +1714,10 @@ app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   kine.helper?.stop();
 });
+
+// Zkouška bez zvukové karty (Xvfb): Chromium podstrčí falešný mikrofon s tónem,
+// ať se dá ověřit míchání zvuku, měřáky a že klip zvuk opravdu má.
+if (process.env.KINE_TEST_FAKE_AUDIO) app.commandLine.appendSwitch('use-fake-device-for-media-stream');
 
 void app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock?.hide();

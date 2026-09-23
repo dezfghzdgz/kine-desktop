@@ -1,5 +1,5 @@
 import type { KineBridge } from '../preload/preload';
-import type { Clip, DisplayInfo, GameSource, Lang, ProcessInfo, Settings, Status, UploadRequest } from '../shared/types';
+import type { AudioDevice, AudioLevels, Clip, DisplayInfo, GameSource, Lang, ProcessInfo, Settings, Status, UploadRequest } from '../shared/types';
 import { CATEGORY_KEYS, LANGS, TRASH_DAYS, VISIBILITIES } from '../shared/types';
 import { LANG_NAMES, makeT, type Key } from '../shared/i18n';
 import { HotkeyRecorder, formatHotkey, hotkeyLabel } from '../shared/hotkeys';
@@ -129,6 +129,24 @@ async function init() {
   kine.onAuthWaiting((w) => {
     authWaiting = w;
     scheduleRender();
+  });
+  // Měřáky zvuku: jen proužky, celá stránka se překreslí až když se změní, co je k vidění (ticho / zvuk).
+  void kine.getAudioLevels().then((l) => {
+    audioLevels = l;
+    updateMeters();
+  });
+  kine.onAudioLevels((l) => {
+    const before = audioLevels;
+    audioLevels = l;
+    const silentBefore = !!before && before.system !== null && before.systemSilentSeconds >= 10;
+    const silentNow = l.system !== null && l.systemSilentSeconds >= 10;
+    const trackChanged = !before || (before.system === null) !== (l.system === null) || (before.mic === null) !== (l.mic === null) || before.systemDevice !== l.systemDevice;
+    if (silentBefore !== silentNow || trackChanged) scheduleRender();
+    else updateMeters();
+  });
+  navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+    audioDevicesAt = 0;
+    void refreshAudioDevices();
   });
   kine.onNavigate((target) => {
     if (visibleTabs().includes(target as Tab)) {
@@ -636,6 +654,10 @@ function renderSide() {
         ? h('div', { class: 'side-sub' }, status.uploadsPaused ? t('trayUploadsPaused', { count: status.uploadsPending }) : t('trayUploads', { count: status.uploadsPending }))
         : null,
       ...status.hotkeyProblems.map((p) => h('div', { class: 'side-sub warn' }, '⚠ ' + p)),
+      // Hra běží, ale zvuk hry je ticho - nejčastěji hraje do jiného zařízení, než Windows nahrává.
+      capturing && status.game && audioLevels && audioLevels.system !== null && audioLevels.systemSilentSeconds >= 10
+        ? h('button', { class: 'side-sub warn side-audio-warn', onclick: () => { tab = 'settings'; render(); } }, '⚠ ' + t('sideAudioSilent'))
+        : null,
       h(
         'div',
         { class: 'side-actions' },
@@ -1015,13 +1037,7 @@ function renderSettings() {
         )
       )
     ),
-    h(
-      'div',
-      { class: 'panel stack' },
-      h('h2', {}, t('audioTitle')),
-      checkbox('systemAudio', t('systemAudio'), win ? undefined : t('windowsOnly'), !win),
-      checkbox('microphone', t('microphone'), t('microphoneHint'))
-    ),
+    audioPanel(win),
     h(
       'div',
       { class: 'panel stack' },
@@ -1089,6 +1105,149 @@ function storageRows() {
       h('b', { class: low ? 'error' : '' }, info.freeBytes >= 0 ? formatBytes(info.freeBytes) : '?')
     ),
     h('p', { class: 'hint', style: 'margin:0' }, low ? t('storageLowHint') : t('storageHint', { days: TRASH_DAYS }))
+  );
+}
+
+// ---- zvuk -----------------------------------------------------------------------------
+
+let audioLevels: AudioLevels | null = null;
+let audioDevices: AudioDevice[] = [];
+let audioDevicesAt = 0;
+
+/**
+ * Zvuková zařízení pro výběr (vstupy: mikrofony i "Stereo Mix" a spol.).
+ * Popisky dává Chromium jen s oprávněním k médiím - to má okno od
+ * hlavního procesu; bez popisků se ukáže aspoň druh zařízení.
+ */
+async function refreshAudioDevices(): Promise<void> {
+  if (Date.now() - audioDevicesAt < 5000) return;
+  audioDevicesAt = Date.now();
+  try {
+    const list = await navigator.mediaDevices.enumerateDevices();
+    const next: AudioDevice[] = [];
+    for (const d of list) {
+      if (d.kind !== 'audioinput' && d.kind !== 'audiooutput') continue;
+      if (d.deviceId === 'default' || d.deviceId === 'communications' || !d.deviceId) continue;
+      next.push({ id: d.deviceId, label: d.label || (d.kind === 'audioinput' ? t('audioUnnamedInput') : t('audioUnnamedOutput')), kind: d.kind === 'audioinput' ? 'input' : 'output' });
+    }
+    const changed = JSON.stringify(next) !== JSON.stringify(audioDevices);
+    audioDevices = next;
+    if (changed) scheduleRender();
+  } catch {
+    // Bez zařízení (nebo bez oprávnění) zůstane jen výchozí volba.
+  }
+}
+
+/** Měřák hladiny 0-1: proužek v logaritmickém měřítku, ať je slyšitelný zvuk vidět. */
+function meter(value: number | null, cls: string) {
+  const db = value && value > 0 ? 20 * Math.log10(value) : -100;
+  const percent = value === null ? 0 : Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
+  return h('div', { class: `progress meter ${cls} ${value === null ? 'off' : ''}` }, h('span', { style: `width:${percent}%` }));
+}
+
+/** Živě překreslované měřáky (jen proužky, ne celá stránka). */
+function updateMeters() {
+  const l = audioLevels;
+  const sys = app.querySelector('.meter.system > span') as HTMLElement | null;
+  const mic = app.querySelector('.meter.mic > span') as HTMLElement | null;
+  const set = (el: HTMLElement | null, value: number | null | undefined) => {
+    if (!el) return;
+    const v = value ?? null;
+    const db = v && v > 0 ? 20 * Math.log10(v) : -100;
+    el.style.width = `${v === null ? 0 : Math.max(0, Math.min(100, ((db + 60) / 60) * 100))}%`;
+  };
+  set(sys, l?.system);
+  set(mic, l?.mic);
+  const note = app.querySelector('.audio-live-note') as HTMLElement | null;
+  if (note) note.textContent = audioLiveNote();
+}
+
+/** Věta pod měřáky: odkud jde zvuk hry a jestli je ticho. */
+function audioLiveNote(): string {
+  const l = audioLevels;
+  if (status.capture !== 'on' || !l) return t('audioMetersIdle');
+  if (l.system === null) return settings.systemAudio ? t('audioNoSystemTrack') : t('audioSystemOff');
+  const device = l.systemDevice || t('audioDefaultDevice');
+  if (l.systemSilentSeconds >= 10) return t('audioSilentNote', { device, seconds: l.systemSilentSeconds });
+  return t('audioSourceNote', { device });
+}
+
+function audioPanel(win: boolean) {
+  void refreshAudioDevices();
+  const inputs = audioDevices.filter((d) => d.kind === 'input');
+  const gainSlider = (field: 'systemGain' | 'micGain', label: string) => {
+    const value = settings[field];
+    const out = h('b', { style: 'min-width:44px;text-align:right' }, `${Math.round(value * 100)} %`);
+    return h(
+      'label',
+      { class: 'gain' },
+      h('span', {}, label),
+      h('input', {
+        type: 'range',
+        min: '0',
+        max: '200',
+        step: '5',
+        value: String(Math.round(value * 100)),
+        oninput: (e: Event) => (out.textContent = `${(e.target as HTMLInputElement).value} %`),
+        onchange: (e: Event) => update({ [field]: Number((e.target as HTMLInputElement).value) / 100 } as Partial<Settings>),
+      }),
+      out
+    );
+  };
+  // Ticho se ukáže i bez rozpoznané hry - hráč se sem dívá právě proto, že něco nehraje.
+  const silent = status.capture === 'on' && !!audioLevels && audioLevels.system !== null && audioLevels.systemSilentSeconds >= 10;
+  return h(
+    'div',
+    { class: 'panel stack audio-panel' },
+    h('h2', {}, t('audioTitle')),
+    // Měřáky: hned je vidět, jestli do klipu jde zvuk hry a mikrofon.
+    h(
+      'div',
+      { class: 'meters' },
+      h('span', { class: 'faint' }, '🔊 ' + t('audioMeterSystem')),
+      meter(audioLevels?.system ?? null, 'system'),
+      h('span', { class: 'faint' }, '🎤 ' + t('audioMeterMic')),
+      meter(audioLevels?.mic ?? null, 'mic')
+    ),
+    h('p', { class: `hint audio-live-note ${silent ? 'error' : ''}`, style: 'margin:0' }, audioLiveNote()),
+    silent ? h('p', { class: 'hint audio-silent-help', style: 'margin:0' }, t('audioSilentHelp')) : null,
+    checkbox('systemAudio', t('systemAudio'), win ? undefined : t('windowsOnly'), !win),
+    settings.systemAudio && win
+      ? h(
+          'label',
+          {},
+          t('systemAudioDevice'),
+          h(
+            'select',
+            { class: 'system-audio-device', onchange: (e: Event) => update({ systemAudioDevice: (e.target as HTMLSelectElement).value }) },
+            h('option', { value: '', selected: settings.systemAudioDevice === '' }, t('systemAudioLoopback')),
+            ...inputs.map((d) => h('option', { value: d.id, selected: settings.systemAudioDevice === d.id }, d.label)),
+            settings.systemAudioDevice && !inputs.some((d) => d.id === settings.systemAudioDevice)
+              ? h('option', { value: settings.systemAudioDevice, selected: true }, t('audioMissingDevice'))
+              : null
+          ),
+          h('span', { class: 'sub hint', style: 'margin-top:4px;display:block' }, t('systemAudioDeviceHint'))
+        )
+      : null,
+    checkbox('microphone', t('microphone'), t('microphoneHint')),
+    settings.microphone
+      ? h(
+          'label',
+          {},
+          t('microphoneDevice'),
+          h(
+            'select',
+            { class: 'microphone-device', onchange: (e: Event) => update({ microphoneDevice: (e.target as HTMLSelectElement).value }) },
+            h('option', { value: '', selected: settings.microphoneDevice === '' }, t('microphoneDefault')),
+            ...inputs.map((d) => h('option', { value: d.id, selected: settings.microphoneDevice === d.id }, d.label)),
+            settings.microphoneDevice && !inputs.some((d) => d.id === settings.microphoneDevice)
+              ? h('option', { value: settings.microphoneDevice, selected: true }, t('audioMissingDevice'))
+              : null
+          )
+        )
+      : null,
+    h('div', { class: 'stack', style: 'gap:6px' }, settings.systemAudio ? gainSlider('systemGain', t('systemGain')) : null, settings.microphone ? gainSlider('micGain', t('micGain')) : null),
+    h('p', { class: 'hint', style: 'margin:0' }, t('audioGainHint'))
   );
 }
 

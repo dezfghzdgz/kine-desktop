@@ -102,7 +102,19 @@ export type Settings = {
   /** Datový tok obrazu v Mb/s. */
   videoMbps: number;
   systemAudio: boolean;
+  /**
+   * Odkud brát zvuk hry: '' = zvuk systému Windows (loopback výchozího
+   * výstupního zařízení), jinak id vstupního zařízení (Stereo Mix, VB-Cable,
+   * "What U Hear"…) - záloha, když hra hraje jinam než na výchozí výstup.
+   */
+  systemAudioDevice: string;
   microphone: boolean;
+  /** Id mikrofonu ('' = výchozí mikrofon Windows). */
+  microphoneDevice: string;
+  /** Hlasitost zvuku hry v klipu (1 = beze změny, 0-2). */
+  systemGain: number;
+  /** Hlasitost mikrofonu v klipu (1 = beze změny, 0-2). */
+  micGain: number;
   /** Prázdné = hlavní obrazovka. Jinak id obrazovky z Electronu. */
   displayId: string;
   detection: DetectionMode;
@@ -267,4 +279,23 @@ export type CaptureEvent =
   | { type: 'stopped'; generation: number; at: number }
   | { type: 'error'; generation: number; message: string }
   /** Něco nejde, ale nahrává se dál (třeba mikrofon není). */
-  | { type: 'warning'; generation: number; kind: 'microphone'; message: string };
+  | { type: 'warning'; generation: number; kind: 'microphone' | 'systemAudio'; message: string }
+  /** Hladiny zvuku (0-1, RMS) zhruba každou sekundu - měřáky v nastavení a hlídání ticha. */
+  | { type: 'levels'; generation: number; levels: AudioLevels }
+  /** Změnilo se výchozí výstupní zařízení Windows (nový název) - loopback je přilepený na staré, snímání se má rozjet znovu. */
+  | { type: 'defaultOutputChanged'; generation: number; device: string };
+
+/** Co právě teče do zvuku klipu. */
+export type AudioLevels = {
+  /** Hladina zvuku hry / systému (0-1), null = stopa není (vypnuto, není Windows, nepovedlo se). */
+  system: number | null;
+  /** Hladina mikrofonu (0-1), null = mikrofon není. */
+  mic: number | null;
+  /** Název zařízení, ze kterého se bere zvuk hry (výchozí výstup Windows, nebo zvolené vstupní zařízení). */
+  systemDevice: string;
+  /** Jak dlouho (s) je zvuk hry úplně tichý (digitální nula) - když hra běží, něco je špatně. */
+  systemSilentSeconds: number;
+};
+
+/** Zvukové zařízení pro výběr v nastavení (z enumerateDevices v okně). */
+export type AudioDevice = { id: string; label: string; kind: 'input' | 'output' };

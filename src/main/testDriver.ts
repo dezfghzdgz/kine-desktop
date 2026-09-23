@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { BrowserWindow, app } from 'electron';
 import { log } from './log';
 import { trayIcon } from './icon';
+import { probe, runFfmpeg } from './ffmpeg';
 
 /**
  * Samočinná zkouška celé appky bez člověka (KINE_TEST=1).
@@ -53,6 +54,8 @@ export async function runTestDriver(kine: {
     const clipperApp = (kine as any).variant === 'clipper';
     result.variant = clipperApp ? 'clipper' : 'full';
     kine.settings.update({ detection: 'always', clipSeconds, onboarded: true, toast: true, afterGame: 'review' });
+    // KINE_TEST_FAKE_AUDIO=mix: hlasitost mikrofonu 50 % -> zvuk jde přes míchání ve Web Audio, ne rovnou ze stopy.
+    if (process.env.KINE_TEST_FAKE_AUDIO === 'mix') kine.settings.update({ micGain: 0.5 });
 
     await sleep(500);
     await kine.capture.start();
@@ -61,9 +64,34 @@ export async function runTestDriver(kine: {
     await sleep(waitMs);
     result.bufferedSeconds = kine.capture.bufferedSeconds();
 
+    // Falešný mikrofon (KINE_TEST_FAKE_AUDIO): hladina mikrofonu ze snímací stránky musí být > 0
+    // a klip musí mít zvukovou stopu (míchání přes Web Audio doopravdy něco nahrává).
+    if (process.env.KINE_TEST_FAKE_AUDIO) {
+      let levels: any = null;
+      for (let i = 0; i < 20 && !(levels && levels.mic !== null && levels.mic > 0.01); i++) {
+        await sleep(300);
+        levels = (kine as any).capture.levels;
+      }
+      result.fakeAudioLevels = levels;
+      result.fakeAudioMeter = !!levels && levels.mic !== null && levels.mic > 0.01 && levels.system === null;
+    }
     await kine.toast.show('Test toastu', 'ok');
     const clip1 = await kine.onClipHotkey();
     result.clip1 = clip1;
+    if (process.env.KINE_TEST_FAKE_AUDIO && clip1) {
+      const info = await probe(clip1.file);
+      // Stopa nestačí - musí v ní být slyšet tón (ne ticho z uspaného Web Audio): střední hlasitost nad -50 dB.
+      let mean = -100;
+      try {
+        const out = await runFfmpeg(['-i', clip1.file, '-af', 'volumedetect', '-vn', '-f', 'null', '-'], 30000);
+        const m = /mean_volume:\s*(-?\d+(?:\.\d+)?) dB/.exec(out);
+        if (m) mean = Number(m[1]);
+      } catch (e) {
+        log(`[test] volumedetect: ${(e as Error).message}`);
+      }
+      result.fakeAudioMeanDb = mean;
+      result.fakeAudioClip = info.hasAudio && mean > -50;
+    }
     await sleep(3500);
     const clip2 = await kine.onClipHotkey();
     result.clip2 = clip2;
@@ -685,6 +713,34 @@ export async function runTestDriver(kine: {
       await shot(storageWin, 'settings-storage');
     }
 
+    // Zvuk: měřáky hry a mikrofonu v Záznamu; hladiny ze snímací stránky se propíšou do proužků a do věty "odkud jde zvuk".
+    kine.openSettings('settings');
+    await sleep(800);
+    const audioWin = kine.settingsWindow;
+    if (audioWin && !audioWin.isDestroyed()) {
+      const panel = await audioWin.webContents.executeJavaScript(`(() => { const p = document.querySelector('.audio-panel'); return !!p && p.querySelectorAll('.meter').length === 2 && !!p.querySelector('.audio-live-note') && !!p.querySelector('.microphone-device') && p.querySelectorAll('.gain input[type=range]').length >= 1; })()`);
+      if (process.env.KINE_TEST_FAKE_AUDIO) {
+        // Skutečné hladiny z falešného mikrofonu: proužek mikrofonu se hýbe, hra žádná (Linux).
+        await sleep(1500);
+        const real = await audioWin.webContents.executeJavaScript(`(() => { const m = document.querySelector('.meter.mic > span'); const s = document.querySelector('.meter.system'); return { mic: m ? parseFloat(m.style.width) : -1, systemOff: !!s && s.classList.contains('off') }; })()`);
+        await shot(audioWin, 'settings-audio');
+        result.audioDebug = { panel, real };
+        result.audioPanel = panel && real.mic > 5 && real.systemOff;
+      } else {
+      // Hladiny jako by přišly ze snímací stránky (v Xvfb žádný zvuk není).
+      (kine as any).capture.handleEvent({ type: 'levels', generation: 0, levels: { system: 0.25, mic: 0.05, systemDevice: 'Test Speakers', systemSilentSeconds: 0 } });
+      await sleep(600);
+      const live = await audioWin.webContents.executeJavaScript(`(() => { const s = document.querySelector('.meter.system > span'); const n = document.querySelector('.audio-live-note'); return { width: s ? s.style.width : null, note: n ? n.textContent : null }; })()`);
+      (kine as any).capture.handleEvent({ type: 'levels', generation: 0, levels: { system: 0, mic: 0.05, systemDevice: 'Test Speakers', systemSilentSeconds: 25 } });
+      await sleep(600);
+      const silent = await audioWin.webContents.executeJavaScript(`(() => { const n = document.querySelector('.audio-live-note'); return { note: n ? n.textContent : null, error: !!n && n.classList.contains('error'), help: !!document.querySelector('.audio-silent-help') }; })()`);
+      await audioWin.webContents.executeJavaScript(`(() => { const p = document.querySelector('.audio-panel'); if (p) p.scrollIntoView({ block: 'start' }); return true; })()`);
+      await shot(audioWin, 'settings-audio');
+      result.audioDebug = { panel, live, silent };
+      result.audioPanel = panel && !!live.width && parseFloat(live.width) > 50 && /Test Speakers/.test(live.note ?? '') && /Test Speakers/.test(silent.note ?? '') && /25/.test(silent.note ?? '') && silent.error && silent.help;
+      }
+    }
+
     // O appce: "Zkontrolovat aktualizace" ukáže stav (při vývoji "dev"), ne jen chybu.
     kine.openSettings('about');
     await sleep(700);
@@ -713,10 +769,11 @@ export async function runTestDriver(kine: {
       'inlinePlayer', 'gridUntouched', 'trimPanel', 'trimNewClip', 'trimReplace', 'vertical', 'verticalUi', 'autoClip', 'overlayClosed', 'filters',
       'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks', 'reviewMerge', 'updateUi',
       'playerNav', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
-      'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings',
+      'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel',
       'colorPicker', 'brandIcon', 'brandMarkSvg',
     ];
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];
+    if (process.env.KINE_TEST_FAKE_AUDIO) checks.push('fakeAudioMeter', 'fakeAudioClip');
     result.failed = checks.filter((k) => result[k] !== true);
     result.ok = !!clip1 && !!clip2 && kine.capture.state === 'on' && (result.failed as string[]).length === 0 && result.brandColor === '#a34ff7';
   } catch (e) {

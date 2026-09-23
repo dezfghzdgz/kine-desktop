@@ -22,6 +22,11 @@ let generation = 0;
 let sendChain: Promise<void> = Promise.resolve();
 let mimeType = '';
 let audioContext: AudioContext | null = null;
+/** Měření hladin: analyzátory na stopě hry a mikrofonu (před smícháním). */
+let meters: { system: AnalyserNode | null; mic: AnalyserNode | null; timer: ReturnType<typeof setInterval>; silentSince: number | null } | null = null;
+/** Název výchozího výstupního zařízení Windows ve chvíli startu (loopback na něm visí). */
+let defaultOutputAtStart = '';
+let systemDeviceLabel = '';
 
 function report(event: Parameters<KineCaptureBridge['event']>[0]) {
   bridge.event(event);
@@ -38,8 +43,39 @@ function chooseMime(codec: Settings['codec']): string {
   return 'video/webm';
 }
 
+/**
+ * Název výchozího výstupního zařízení Windows ("Sluchátka (Realtek Audio)").
+ * Chromium ho dává jako položku "default" s popiskem "Default - …"; bez
+ * oprávnění k médiím jsou popisky prázdné - pak se vrátí prázdný řetězec.
+ */
+async function defaultOutputLabel(): Promise<string> {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const def = devices.find((d) => d.kind === 'audiooutput' && d.deviceId === 'default');
+    const label = (def?.label ?? '').replace(/^(Default|Výchozí|Standard)\s*-\s*/i, '').trim();
+    if (label) return label;
+    // Bez popisků aspoň podle skupiny: výchozí výstup má stejné groupId jako některý pojmenovaný.
+    const named = devices.find((d) => d.kind === 'audiooutput' && d.deviceId !== 'default' && d.deviceId !== 'communications' && d.label);
+    return named?.label ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/** Popisek zařízení podle id (pro zvolený vstup místo loopbacku). */
+async function deviceLabel(id: string): Promise<string> {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.find((d) => d.deviceId === id)?.label ?? '';
+  } catch {
+    return '';
+  }
+}
+
 async function getStream(settings: Settings): Promise<MediaStream> {
-  const wantAudio = settings.systemAudio && bridge.platform === 'win32';
+  // Zvuk hry z Windows (loopback výchozího výstupu), nebo ze zvoleného vstupního zařízení (Stereo Mix, VB-Cable…).
+  const viaDevice = settings.systemAudio && !!settings.systemAudioDevice;
+  const wantAudio = settings.systemAudio && bridge.platform === 'win32' && !viaDevice;
   const video: MediaTrackConstraints = {
     frameRate: { ideal: settings.fps, max: settings.fps },
   };
@@ -80,25 +116,156 @@ async function getStream(settings: Settings): Promise<MediaStream> {
     }
   }
 
-  if (!settings.microphone) return display;
-
-  // Mikrofon se smíchá se zvukem systému do jedné stopy.
-  try {
-    const mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-    audioContext = new AudioContext();
-    const destination = audioContext.createMediaStreamDestination();
-    if (display.getAudioTracks().length > 0) {
-      audioContext.createMediaStreamSource(new MediaStream(display.getAudioTracks())).connect(destination);
+  acquired.length = 0;
+  acquired.push(...display.getTracks());
+  // Zvuk hry ze zvoleného vstupního zařízení (bez úprav - je to už hotový mix, ne řeč).
+  let systemTrack: MediaStreamTrack | null = display.getAudioTracks()[0] ?? null;
+  systemDeviceLabel = '';
+  if (viaDevice) {
+    try {
+      const source = await navigator.mediaDevices.getUserMedia({
+        audio: { deviceId: { exact: settings.systemAudioDevice }, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      });
+      systemTrack = source.getAudioTracks()[0] ?? null;
+      acquired.push(...source.getTracks());
+      systemDeviceLabel = (await deviceLabel(settings.systemAudioDevice)) || settings.systemAudioDevice;
+    } catch (e) {
+      // Zařízení není (odpojené, přejmenované) - klip bude bez zvuku hry, hráč dostane upozornění.
+      report({ type: 'warning', generation, kind: 'systemAudio', message: String(e) });
+      systemTrack = null;
     }
-    audioContext.createMediaStreamSource(mic).connect(destination);
-    const mixed = new MediaStream([...display.getVideoTracks(), ...destination.stream.getAudioTracks()]);
-    return mixed;
-  } catch (e) {
-    // Bez mikrofonu se nahrává dál - hráč jen dostane upozornění, ne "chybu".
-    report({ type: 'warning', generation, kind: 'microphone', message: String(e) });
-    return display;
+  } else if (systemTrack) {
+    defaultOutputAtStart = await defaultOutputLabel();
+    systemDeviceLabel = defaultOutputAtStart;
   }
+
+  // Mikrofon (zvolený nebo výchozí) - bez něj se nahrává dál, hráč jen dostane upozornění.
+  let micTrack: MediaStreamTrack | null = null;
+  if (settings.microphone) {
+    try {
+      const constraints: MediaTrackConstraints = { echoCancellation: true, noiseSuppression: true };
+      if (settings.microphoneDevice) constraints.deviceId = { exact: settings.microphoneDevice };
+      let mic: MediaStream;
+      try {
+        mic = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+      } catch (e) {
+        // Zvolený mikrofon není - vezme se výchozí, ať klip nezůstane bez hlasu.
+        if (!settings.microphoneDevice) throw e;
+        mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+      }
+      micTrack = mic.getAudioTracks()[0] ?? null;
+      acquired.push(...mic.getTracks());
+    } catch (e) {
+      report({ type: 'warning', generation, kind: 'microphone', message: String(e) });
+    }
+  }
+
+  // Jedna stopa zvuku pro MediaRecorder: hra a mikrofon smíchané, každý se svou hlasitostí; měřáky před smícháním.
+  if (!systemTrack && !micTrack) {
+    stopMeters();
+    return new MediaStream(display.getVideoTracks());
+  }
+  const systemGain = clampGain(settings.systemGain);
+  const micGain = clampGain(settings.micGain);
+  // Jedna stopa beze změny hlasitosti jde do záznamu rovnou (bez Web Audio) -
+  // nejméně věcí, co se může pokazit; Web Audio pak jen měří hladinu.
+  const direct = systemTrack && !micTrack && systemGain === 1 ? systemTrack : !systemTrack && micTrack && micGain === 1 ? micTrack : null;
+  let recorded: MediaStreamTrack[] = direct ? [direct] : [];
+  try {
+    audioContext = new AudioContext();
+    if (audioContext.state !== 'running') await audioContext.resume().catch(() => undefined);
+    const destination = audioContext.createMediaStreamDestination();
+    const analyser = (track: MediaStreamTrack, gainValue: number): AnalyserNode => {
+      const source = audioContext!.createMediaStreamSource(new MediaStream([track]));
+      const node = audioContext!.createAnalyser();
+      node.fftSize = 1024;
+      source.connect(node);
+      if (!direct) {
+        const gain = audioContext!.createGain();
+        gain.gain.value = gainValue;
+        source.connect(gain);
+        gain.connect(destination);
+      }
+      return node;
+    };
+    const systemMeter = systemTrack ? analyser(systemTrack, systemGain) : null;
+    const micMeter = micTrack ? analyser(micTrack, micGain) : null;
+    startMeters(systemMeter, micMeter);
+    if (!direct) recorded = destination.stream.getAudioTracks();
+  } catch (e) {
+    // Web Audio nejde (nemělo by se stát): bez měřáků a bez míchání, do klipu jde zvuk hry, jinak mikrofon.
+    report({ type: 'warning', generation, kind: 'systemAudio', message: `Web Audio: ${String(e)}` });
+    stopMeters();
+    recorded = [systemTrack ?? micTrack!];
+  }
+  return new MediaStream([...display.getVideoTracks(), ...recorded]);
 }
+
+function clampGain(value: number | undefined): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.min(2, Math.round(n * 100) / 100)) : 1;
+}
+
+// ---- měřáky a hlídání ticha ----------------------------------------------------------------
+
+/** RMS hladina 0-1 z analyzátoru (0 = digitální ticho). */
+function level(node: AnalyserNode, buffer: Float32Array): number {
+  node.getFloatTimeDomainData(buffer as Float32Array<ArrayBuffer>);
+  let sum = 0;
+  for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
+  return Math.sqrt(sum / buffer.length);
+}
+
+function startMeters(system: AnalyserNode | null, mic: AnalyserNode | null) {
+  stopMeters();
+  const buffer = new Float32Array(1024);
+  let peakSystem = 0;
+  let peakMic = 0;
+  let ticks = 0;
+  const timer = setInterval(() => {
+    if (!meters) return;
+    // Čte se 5x za sekundu, hlásí se jednou za sekundu maximum - ať krátký výstřel nezapadne.
+    if (system) peakSystem = Math.max(peakSystem, level(system, buffer));
+    if (mic) peakMic = Math.max(peakMic, level(mic, buffer));
+    ticks += 1;
+    if (ticks < 5) return;
+    ticks = 0;
+    const now = Date.now();
+    if (system) {
+      if (peakSystem < 1e-5) meters.silentSince ??= now;
+      else meters.silentSince = null;
+    }
+    report({
+      type: 'levels',
+      generation,
+      levels: {
+        system: system ? Math.min(1, peakSystem) : null,
+        mic: mic ? Math.min(1, peakMic) : null,
+        systemDevice: systemDeviceLabel,
+        systemSilentSeconds: system && meters.silentSince ? Math.round((now - meters.silentSince) / 1000) : 0,
+      },
+    });
+    peakSystem = 0;
+    peakMic = 0;
+  }, 200);
+  meters = { system, mic, timer, silentSince: null };
+}
+
+function stopMeters() {
+  if (meters) clearInterval(meters.timer);
+  meters = null;
+}
+
+// Výchozí výstup Windows se změnil (sluchátka, jiný monitor): loopback zůstal
+// na starém zařízení a nahrával by ticho - hlavní proces snímání rozjede znovu.
+navigator.mediaDevices.addEventListener('devicechange', () => {
+  if (!stream || !defaultOutputAtStart || !currentSettings?.systemAudio || currentSettings.systemAudioDevice) return;
+  void defaultOutputLabel().then((label) => {
+    if (label && label !== defaultOutputAtStart) {
+      report({ type: 'defaultOutputChanged', generation, device: label });
+    }
+  });
+});
 
 function startRecorder(settings: Settings, gen: number) {
   if (!stream) throw new Error('není stream');
@@ -134,11 +301,25 @@ function startRecorder(settings: Settings, gen: number) {
   report({ type: 'started', generation: myGen, at: Date.now(), mimeType: rec.mimeType || mimeType, audio: stream.getAudioTracks().length > 0 });
 }
 
+/** Původní stopy (obraz, hra, mikrofon) - ať se při konci zastaví i ty, co nejsou ve výsledném streamu. */
+const sourceTracks: MediaStreamTrack[] = [];
+/** Stopy získané při posledním getStream (plní getStream, bere collectSourceTracks). */
+const acquired: MediaStreamTrack[] = [];
+function collectSourceTracks(): MediaStreamTrack[] {
+  const list = [...acquired];
+  acquired.length = 0;
+  return list;
+}
+
 function stopAll() {
   if (recorder && recorder.state !== 'inactive') recorder.stop();
   recorder = null;
+  stopMeters();
   for (const track of stream?.getTracks() ?? []) track.stop();
+  for (const track of sourceTracks) track.stop();
+  sourceTracks.length = 0;
   stream = null;
+  defaultOutputAtStart = '';
   void audioContext?.close();
   audioContext = null;
 }
@@ -151,6 +332,8 @@ bridge.onCommand(async (command: CaptureCommand) => {
       stopAll();
       currentSettings = command.settings;
       stream = await getStream(command.settings);
+      // Stopy zdrojů (obrazovka, mikrofon) drží jen AudioContext - při konci se musí zastavit ručně.
+      sourceTracks.push(...collectSourceTracks());
       stream.getVideoTracks()[0]?.addEventListener('ended', () => {
         report({ type: 'error', generation, message: 'obrazovka přestala posílat obraz' });
       });

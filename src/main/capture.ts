@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, statfsSync, unl
 import { basename, join } from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { BrowserWindow, app } from 'electron';
-import type { CaptureCommand, CaptureEvent, CaptureState, Settings } from '../shared/types';
+import type { AudioLevels, CaptureCommand, CaptureEvent, CaptureState, Settings } from '../shared/types';
 import { clipFileBase } from '../shared/clipNaming';
 import { log } from './log';
 import { probe, runFfmpeg, spawnFfmpeg } from './ffmpeg';
@@ -79,6 +79,8 @@ export class CaptureManager {
   private recordingStopHandler: ((reason: 'max' | 'disk') => void) | null = null;
   /** Kdy se naposledy měřilo volné místo při nahrávání (statfs jednou za 30 s stačí). */
   private lastDiskCheck = 0;
+  /** Poslední hladiny zvuku ze snímací stránky (null = zásobník neběží / ještě nic nepřišlo). */
+  levels: AudioLevels | null = null;
   private csvTimer: ReturnType<typeof setInterval> | null = null;
   private waiters = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
   /** Složka se zásobníkem (kousky videa). Každá appka svou; když je zamčená, vezme se jiná. */
@@ -91,7 +93,11 @@ export class CaptureManager {
       preload: string;
       rendererDir: string;
       onState: (state: CaptureState, error: string | null) => void;
-      onWarning?: (kind: 'microphone', message: string) => void;
+      onWarning?: (kind: 'microphone' | 'systemAudio', message: string) => void;
+      /** Hladiny zvuku ze snímací stránky (zhruba každou sekundu). */
+      onLevels?: (levels: AudioLevels) => void;
+      /** Výchozí výstup Windows se změnil - snímání se má rozjet znovu (loopback visí na starém). */
+      onDefaultOutputChanged?: (device: string) => void;
       /** Název složky v %TEMP% - Kine a Kine Clipper mají každá svou, ať si nesahají na kousky. */
       bufferName?: string;
     }
@@ -146,10 +152,10 @@ export class CaptureManager {
   private setState(state: CaptureState, error: string | null = null): void {
     this._state = state;
     this._error = error;
+    if (state !== 'on') this.levels = null;
     this.deps.onState(state, error);
   }
 
-  /** Běží nahrávání celého zápasu? Od kdy (ms), pro kterou hru. */
   /** Kolik místa zabírají kousky v zásobníku (všechny generace). */
   bufferBytes(): number {
     let total = 0;
@@ -182,8 +188,15 @@ export class CaptureManager {
 
   // ---- start / stop ----------------------------------------------------------
 
+  /** Pořadové číslo startu zásobníku (upozornění "jednou za start"). */
+  private sessionCounter = 0;
+  captureSession(): number {
+    return this.sessionCounter;
+  }
+
   async start(): Promise<void> {
     if (this._state === 'on' || this._state === 'starting') return;
+    this.sessionCounter += 1;
     this.setState('starting');
     try {
       this.prepareBufferDir();
@@ -378,6 +391,16 @@ export class CaptureManager {
     if (event.type === 'warning') {
       log(`snímací stránka upozorňuje (gen ${event.generation}): ${event.kind}: ${event.message}`);
       this.deps.onWarning?.(event.kind, event.message);
+      return;
+    }
+    if (event.type === 'levels') {
+      this.levels = event.levels;
+      this.deps.onLevels?.(event.levels);
+      return;
+    }
+    if (event.type === 'defaultOutputChanged') {
+      log(`výchozí výstup zvuku se změnil: ${event.device}`);
+      this.deps.onDefaultOutputChanged?.(event.device);
       return;
     }
     if (event.type === 'error') {

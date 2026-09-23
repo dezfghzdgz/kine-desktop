@@ -469,6 +469,16 @@ button.seg.active { color: var(--brand); box-shadow: inset 0 0 0 1px rgba(var(--
 .spin { display: inline-block; width: 11px; height: 11px; border-radius: 50%; border: 2px solid rgba(255, 200, 87, 0.3); border-top-color: var(--warn); animation: spin 0.9s linear infinite; flex: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .upload-options { width: 32px; padding: 0 !important; }
+/* Zvuk: měřáky hry a mikrofonu, posuvníky hlasitosti. */
+button.side-audio-warn { background: none; box-shadow: none; padding: 0; min-height: 0; text-align: left; border-radius: 0; font-size: inherit; cursor: pointer; }
+button.side-audio-warn:hover { text-decoration: underline; background: none; }
+.meters { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; font-size: var(--fs-sm); }
+.meter { height: 8px; border-radius: 4px; }
+.meter > span { transition: width 180ms linear; background: linear-gradient(90deg, var(--brand) 0%, var(--brand) 70%, var(--warn) 88%, var(--danger) 100%); }
+.meter.off { opacity: 0.35; }
+.gain { display: grid; grid-template-columns: 180px 1fr max-content; gap: 12px; align-items: center; font-size: var(--fs-sm); color: var(--text-dim); }
+.gain input[type="range"] { width: 100%; accent-color: var(--brand); margin: 0; }
+.gain b { color: var(--text); font-variant-numeric: tabular-nums; }
 
 /* ---------- Nastavení nahrání (vrstva jako přehrávač) ---------- */
 .upload-dialog { width: min(720px, 100%); }

@@ -23,6 +23,10 @@ export const DEFAULT_SETTINGS: Settings = {
   codec: 'auto',
   videoMbps: 8,
   systemAudio: true,
+  systemAudioDevice: '',
+  microphoneDevice: '',
+  systemGain: 1,
+  micGain: 1,
   // Mikrofon od začátku - hráč nemá co nastavovat, klip má i jeho hlas.
   microphone: true,
   displayId: '',
@@ -56,6 +60,13 @@ export const CLIP_SECONDS_MAX = 300;
 
 function oneOf<T extends string | number>(value: unknown, allowed: readonly T[], fallback: T): T {
   return (allowed as readonly unknown[]).includes(value) ? (value as T) : fallback;
+}
+
+/** Hlasitost 0-2 (1 = beze změny), zaokrouhlená na setiny. */
+function gain(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.round(Math.max(0, Math.min(2, n)) * 100) / 100;
 }
 
 function bool(value: unknown, fallback: boolean): boolean {
@@ -106,6 +117,10 @@ export function sanitizeSettings(input: unknown): Settings {
     codec: oneOf(raw.codec, ['auto', 'h264', 'vp9', 'vp8'] as const, d.codec),
     videoMbps: Number.isFinite(videoMbps) ? Math.min(50, Math.max(1, videoMbps)) : d.videoMbps,
     systemAudio: bool(raw.systemAudio, d.systemAudio),
+    systemAudioDevice: text(raw.systemAudioDevice, d.systemAudioDevice, 200),
+    microphoneDevice: text(raw.microphoneDevice, d.microphoneDevice, 200),
+    systemGain: gain(raw.systemGain, d.systemGain),
+    micGain: gain(raw.micGain, d.micGain),
     microphone: upgrade ? true : bool(raw.microphone, d.microphone),
     displayId: text(raw.displayId, d.displayId, 100),
     detection: oneOf(raw.detection, ['games', 'always', 'manual'] as const, d.detection),

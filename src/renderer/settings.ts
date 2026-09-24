@@ -50,7 +50,7 @@ let tab: Tab = 'clips';
 let wizardStep: number | null = null;
 let authWaiting = false;
 let authError: string | null = null;
-let hotkeyRecording: 'clipHotkey' | 'toggleHotkey' | 'recordHotkey' | null = null;
+let hotkeyRecording: 'clipHotkey' | 'toggleHotkey' | 'recordHotkey' | 'screenshotHotkey' | null = null;
 let hotkeyError: string | null = null;
 const recorder = new HotkeyRecorder();
 let updateResult: { status: string; version?: string; url?: string; message?: string; source?: string; waitingForGame?: boolean } | null = null;
@@ -449,7 +449,7 @@ function stopPadPoll() {
   padTimer = null;
 }
 
-function hotkeyField(field: 'clipHotkey' | 'toggleHotkey' | 'recordHotkey', label: string, hint?: string, options: { clearable?: boolean } = {}) {
+function hotkeyField(field: 'clipHotkey' | 'toggleHotkey' | 'recordHotkey' | 'screenshotHotkey', label: string, hint?: string, options: { clearable?: boolean } = {}) {
   const recording = hotkeyRecording === field;
   const held = recording ? recorder.current() : null;
   const heldText = held && held.mods.length + held.keys.length + held.mouse.length + held.pad.length > 0 ? hotkeyLabel(formatHotkey(held)) : '';
@@ -697,7 +697,13 @@ function renderSide() {
               'button',
               { class: 'small quiet side-record', disabled: !capturing, title: settings.recordHotkey ? hotkeyLabel(settings.recordHotkey) : '', onclick: () => void kine.toggleRecording() },
               '⏺ ' + t('sideRecord')
-            )
+            ),
+        // Snímek obrazovky jde vždycky (i bez hry a zásobníku).
+        h(
+          'button',
+          { class: 'small quiet side-shot', title: settings.screenshotHotkey ? `${t('screenshotHotkey')} (${hotkeyLabel(settings.screenshotHotkey)})` : t('screenshotHotkey'), onclick: () => void kine.takeScreenshot() },
+          '📷'
+        )
       ),
       account
         ? h(
@@ -938,6 +944,7 @@ function renderSettings() {
       hotkeyField('clipHotkey', t('clipHotkey'), t('clipHotkeyHint')),
       hotkeyField('toggleHotkey', t('toggleHotkey')),
       hotkeyField('recordHotkey', '⏺ ' + t('recordHotkey'), t('recordHotkeyHint'), { clearable: true }),
+      hotkeyField('screenshotHotkey', '📷 ' + t('screenshotHotkey'), t('screenshotHotkeyHint'), { clearable: true }),
       win ? h('p', { class: 'hint' }, '🎮 ' + t('hotkeyPadHint')) : null,
       win && !status.chordsSupported ? h('p', { class: 'hint warn' }, t('hotkeyHelperDown')) : null,
       !win ? h('p', { class: 'hint' }, t('hotkeyChordUnsupported')) : null,
@@ -2022,7 +2029,12 @@ function renderClips() {
       'div',
       { class: 'spread' },
       h('div', { class: 'row' }, h('h1', { style: 'margin:0' }, t('clipsTitle')), h('span', { class: 'faint' }, t('clipsCount', { count: list.length }))),
-      h('div', { class: 'row' }, h('button', { class: 'small', onclick: () => void kine.openClipsDir() }, t('clipsDirOpen')))
+      h(
+        'div',
+        { class: 'row' },
+        h('button', { class: 'small quiet', onclick: () => void kine.openScreenshotsDir() }, '📷 ' + t('screenshotsOpen')),
+        h('button', { class: 'small', onclick: () => void kine.openClipsDir() }, t('clipsDirOpen'))
+      )
     ),
     h('datalist', { id: 'game-names' }, ...gameNames.map((name) => h('option', { value: name })))
   );
@@ -2279,7 +2291,13 @@ function renderClips() {
       // Náhledy se načítají, až když se karta dostane na obrazovku - u stovek klipů to šetří paměť i disk.
       ...thumbImages(clip),
       h('span', { class: 'play-badge' }, '▶'),
-      clip.kind === 'recording' ? h('span', { class: 'kind-badge' }, '⏺ ' + t('libraryRecordingBadge')) : null,
+      clip.kind === 'recording'
+        ? h(
+            'span',
+            { class: 'kind-badge', title: clip.markers?.length ? t('libraryMoments', { count: clip.markers.length }) : '' },
+            '⏺ ' + t('libraryRecordingBadge') + (clip.markers?.length ? ` · 🚩 ${clip.markers.length}` : '')
+          )
+        : null,
       h('span', { class: 'dur' }, formatDuration(clip.durationSeconds))
     );
     thumb.addEventListener('mouseenter', () => startPreview(thumb, clip));

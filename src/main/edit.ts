@@ -1,11 +1,12 @@
 import { statSync } from 'node:fs';
 import { spawnFfmpeg, probe, runFfmpeg } from './ffmpeg';
-import { GIF_FPS, GIF_WIDTH, gifArgs, mergePlan, progressPercent, trimAudioPlan, verticalCropFilter, type AudioChoice, type AudioTrackKind, type MergeInput } from './editPlan';
+import { GIF_FPS, GIF_WIDTH, gifArgs, mergePlan, normalizeSpeed, progressPercent, trimArgs, type AudioChoice, type AudioTrackKind, type MergeInput, type TextPosition } from './editPlan';
 import { log } from './log';
 
 /**
  * Lehké úpravy klipu: zkrácení (začátek/konec), ztlumení zvuku, výřez na
- * výšku, sestřih několika klipů do jednoho a GIF z úseku.
+ * výšku, rychlost (zpomalení / zrychlení), text přes video, sestřih
+ * několika klipů do jednoho a GIF z úseku.
  *
  * Řez je přesný na snímek, takže se obraz překóduje (libx264, rychlý
  * preset) - u minutového klipu to na běžném procesoru trvá pár sekund.
@@ -31,6 +32,10 @@ export type TrimOptions = {
   audio?: AudioChoice;
   /** Stopy zdroje (Clip.audioTracks) - podle nich se pozná, kde je hra a kde mikrofon. */
   audioTracks?: AudioTrackKind[];
+  /** Rychlost: 0,5 zpomalí na polovinu, 2 zrychlí dvakrát (zvuk se přizpůsobí, výška hlasu zůstane). */
+  speed?: number;
+  /** Text přes video (PNG s průhledností, nakreslený oknem) a kde leží. */
+  overlay?: { file: string; position: TextPosition } | null;
 };
 
 export type TrimResult = { file: string; durationSeconds: number; sizeBytes: number; width: number | null; height: number | null; audioTracks?: AudioTrackKind[] | null };
@@ -89,28 +94,26 @@ async function describe(output: string, fallbackSeconds: number): Promise<TrimRe
 }
 
 export async function trimClip(input: string, output: string, options: TrimOptions, onProgress?: (percent: number) => void): Promise<TrimResult> {
-  const start = Math.max(0, options.start);
-  const length = Math.max(0.2, options.end - start);
-  const isWebm = /\.webm$/i.test(output);
-  const args = ['-y', '-ss', start.toFixed(3), '-i', input, '-t', length.toFixed(3), '-progress', 'pipe:1', '-nostats', '-loglevel', 'error'];
-  const crop = verticalCropFilter(options.vertical);
-  if (crop) args.push('-vf', crop);
-  if (isWebm) {
-    args.push('-c:v', 'libvpx', '-b:v', `${Math.max(1, Math.round(options.videoMbps))}M`, '-deadline', 'realtime', '-cpu-used', '8');
-  } else {
-    args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart');
-  }
-  // Obraz vždycky první video stopa; zvuk podle volby (všechny stopy / jen hra / jen mikrofon / nic).
-  const audio = trimAudioPlan(options.audioTracks, options.mute ? 'none' : options.audio);
-  args.push('-map', '0:v:0', ...audio.maps);
-  if (audio.maps.length === 0) args.push('-an');
-  else args.push('-c:a', isWebm ? 'libopus' : 'aac', '-b:a', isWebm ? '128k' : '192k');
-  args.push(output);
-
-  await runWithProgress(args, length, 'zkrácení klipu', onProgress);
-  const result = await describe(output, length);
+  const speed = normalizeSpeed(options.speed ?? 1);
+  // Po změně rychlosti se výsledek srovná na snímkovou frekvenci zdroje (zrychlení by ze 60 fps udělalo 120).
+  const sourceFps = speed !== 1 ? (await probe(input).catch(() => null))?.fps ?? null : null;
+  const plan = trimArgs(input, output, {
+    start: options.start,
+    end: options.end,
+    mute: options.mute,
+    videoMbps: options.videoMbps,
+    vertical: options.vertical,
+    audio: options.audio,
+    audioTracks: options.audioTracks,
+    speed,
+    sourceFps,
+    overlay: options.overlay ?? null,
+    webm: /\.webm$/i.test(output),
+  });
+  await runWithProgress(plan.args, plan.outputSeconds, 'zkrácení klipu', onProgress);
+  const result = await describe(output, plan.outputSeconds);
   onProgress?.(100);
-  return { ...result, audioTracks: audio.tracks };
+  return { ...result, audioTracks: plan.tracks };
 }
 
 /**

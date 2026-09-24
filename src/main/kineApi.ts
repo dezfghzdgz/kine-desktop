@@ -29,6 +29,8 @@ export type ConfirmInput = {
   width: number | null;
   height: number | null;
   hashtags: string[];
+  /** Kapitoly (s od začátku) - Kine je ukáže na časové ose videa. */
+  chapters?: { time: number; title: string }[];
   category: string;
   madeForKids: boolean;
   hasPaidPromotion: boolean;
@@ -91,7 +93,7 @@ export function createKineApi(deps: {
         scheduledAt: null,
         width: input.width,
         height: input.height,
-        chapters: [],
+        chapters: input.chapters ?? [],
         captions: [],
         hashtags: input.hashtags,
       });

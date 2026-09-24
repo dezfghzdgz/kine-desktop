@@ -72,6 +72,8 @@ export class Uploader {
       prepareFile?: (clip: Clip) => Promise<{ file: string; fresh: boolean }>;
       /** Nahrávání klipu skončilo (hotovo nebo chyba) - kopie z prepareFile může pryč. */
       releaseFile?: (clip: Clip) => void;
+      /** Kapitoly videa na Kine (značky z nahrávky zápasu); prázdné = žádné. */
+      chapters?: (clip: Clip) => { time: number; title: string }[];
     }
   ) {}
 
@@ -331,6 +333,7 @@ export class Uploader {
       madeForKids: request.madeForKids ?? false,
       hasPaidPromotion: request.hasPaidPromotion ?? false,
       isAiGenerated: request.isAiGenerated ?? false,
+      chapters: this.deps.chapters?.(clip) ?? [],
     });
 
     const url = `${api.siteUrl()}/watch/${id}`;

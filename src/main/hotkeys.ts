@@ -12,14 +12,15 @@ import { log } from './log';
  * Který motor se použije, řeší tahle třída; zbytek appky jen dostane
  * "zkratka X stisknuta".
  */
-export type HotkeyId = 'clip' | 'toggle' | 'record';
+export type HotkeyId = 'clip' | 'toggle' | 'record' | 'screenshot';
+const HOTKEY_IDS: HotkeyId[] = ['clip', 'toggle', 'record', 'screenshot'];
 
 export type HotkeyProblem = { id: HotkeyId; hotkey: string; reason: HotkeyReason };
 export type HotkeyReason = 'in-use' | 'unsupported' | 'helper-down' | 'invalid';
 
 export class HotkeyManager {
   private chordIds: HotkeyId[] = [];
-  private wanted: Record<HotkeyId, string> = { clip: '', toggle: '', record: '' };
+  private wanted: Record<HotkeyId, string> = { clip: '', toggle: '', record: '', screenshot: '' };
   private problems: HotkeyProblem[] = [];
   private registered = new Set<string>();
 
@@ -51,7 +52,7 @@ export class HotkeyManager {
     return this.problems;
   }
 
-  /** Zaregistruje zkratky (klip, zásobník, nahrávání); co nejde, skončí v problems (a hráč to uvidí). */
+  /** Zaregistruje zkratky (klip, zásobník, nahrávání, snímek obrazovky); co nejde, skončí v problems (a hráč to uvidí). */
   apply(hotkeys: Record<HotkeyId, string>): HotkeyProblem[] {
     this.wanted = { ...hotkeys };
     globalShortcut.unregisterAll();
@@ -59,7 +60,7 @@ export class HotkeyManager {
     const chords: number[][] = [];
     this.chordIds = [];
 
-    for (const id of ['clip', 'toggle', 'record'] as HotkeyId[]) {
+    for (const id of HOTKEY_IDS) {
       const text = hotkeys[id];
       const parsed = parseHotkey(text);
       if (!parsed) continue;
@@ -85,7 +86,7 @@ export class HotkeyManager {
 
   private recomputeProblems(): void {
     const problems: HotkeyProblem[] = [];
-    for (const id of ['clip', 'toggle', 'record'] as HotkeyId[]) {
+    for (const id of HOTKEY_IDS) {
       const text = this.wanted[id];
       if (!text) continue;
       const parsed = parseHotkey(text);
@@ -110,7 +111,7 @@ export class HotkeyManager {
    */
   retry(): boolean {
     let changed = false;
-    for (const id of ['clip', 'toggle', 'record'] as HotkeyId[]) {
+    for (const id of HOTKEY_IDS) {
       const text = this.wanted[id];
       if (!text || this.registered.has(text)) continue;
       const parsed = parseHotkey(text);

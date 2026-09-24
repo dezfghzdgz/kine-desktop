@@ -536,3 +536,13 @@ button.side-audio-warn:hover { text-decoration: underline; background: none; }
 .toast .msg { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .toast .logo { width: 22px; height: 22px; border-radius: var(--radius-xs); background: #0a0a0b; display: grid; place-items: center; flex: none; }
 .toast .logo::after { content: ''; border-left: 9px solid var(--brand); border-top: 5.5px solid transparent; border-bottom: 5.5px solid transparent; margin-left: 2px; }
+
+/* Úpravy: text přes video (náhled), rychlost, momenty nahrávky */
+.player-stage .text-preview { position: absolute; pointer-events: none; z-index: 2; }
+.player-stage .text-preview canvas { display: block; width: 100%; height: 100%; }
+.player-markers { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 16px; border-top: 1px solid var(--border); max-height: 92px; overflow-y: auto; }
+.player-markers .marker-chip b { font-variant-numeric: tabular-nums; color: var(--text); }
+.tl-ticks { position: absolute; left: 0; right: 0; top: 0; bottom: 0; pointer-events: none; }
+.tl-tick { position: absolute; top: 10px; width: 3px; height: 24px; margin-left: -1px; border-radius: 2px; background: #ffd23f; box-shadow: 0 0 3px rgba(0, 0, 0, 0.6); z-index: 2; }
+.trim-text { flex: 1 1 220px; min-width: 180px; width: auto; min-height: 32px; padding: 4px 10px; }
+.side-actions button.side-shot { flex: 0 0 auto; width: 40px; padding: 4px 0; }

@@ -17,6 +17,7 @@ export const DEFAULT_SETTINGS: Settings = {
   clipHotkey: 'F8',
   toggleHotkey: 'Ctrl+F9',
   recordHotkey: 'Ctrl+F8',
+  screenshotHotkey: 'Alt+F8',
   clipSeconds: 30,
   maxHeight: 1080,
   fps: 60,
@@ -122,6 +123,7 @@ export function sanitizeSettings(input: unknown): Settings {
     toggleHotkey: isHotkey(raw.toggleHotkey) ? (raw.toggleHotkey as string) : d.toggleHotkey,
     // Prázdné = nahrávání zápasu bez zkratky (jen tlačítkem); chybějící klíč ze starší verze = výchozí.
     recordHotkey: raw.recordHotkey === '' ? '' : isHotkey(raw.recordHotkey) ? (raw.recordHotkey as string) : d.recordHotkey,
+    screenshotHotkey: raw.screenshotHotkey === '' ? '' : isHotkey(raw.screenshotHotkey) ? (raw.screenshotHotkey as string) : d.screenshotHotkey,
     clipSeconds: Number.isFinite(clipSeconds)
       ? Math.min(CLIP_SECONDS_MAX, Math.max(CLIP_SECONDS_MIN, Math.round(clipSeconds)))
       : d.clipSeconds,

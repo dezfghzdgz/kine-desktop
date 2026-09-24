@@ -177,7 +177,43 @@ test('výkon appky: tři profily, neplatná hodnota = vyvážený, řazení knih
   assert.equal(sanitizeSettings({ lastVersion: 'abc' }).lastVersion, '');
 });
 
-import { parseHashtags, formatHashtags } from '../dist/esm/upload.js';
+import { parseHashtags, formatHashtags, markerChapters, chaptersText, chapterTime, MARKER_LEAD_SECONDS } from '../dist/esm/upload.js';
+
+test('snímek obrazovky: výchozí zkratka Alt+F8, jde vypnout, nesmysl = výchozí', () => {
+  assert.equal(DEFAULT_SETTINGS.screenshotHotkey, 'Alt+F8');
+  assert.equal(sanitizeSettings({ screenshotHotkey: '' }).screenshotHotkey, '');
+  assert.equal(sanitizeSettings({ screenshotHotkey: 'Ctrl+F9' }).screenshotHotkey, 'Ctrl+F9');
+  assert.equal(sanitizeSettings({ screenshotHotkey: 'Ctrl+' }).screenshotHotkey, 'Alt+F8');
+  assert.equal(sanitizeSettings({}).screenshotHotkey, 'Alt+F8');
+});
+
+test('momenty nahrávky -> kapitoly: začátek, kousek před uložením, aspoň 10 s od sebe, jen uvnitř nahrávky', () => {
+  assert.equal(MARKER_LEAD_SECONDS, 10);
+  assert.deepEqual(markerChapters(undefined, 'Začátek'), []);
+  assert.deepEqual(markerChapters([], 'Začátek'), []);
+  // Moment v prvních 20 s by byl před začátkem - nic, tedy méně než dvě kapitoly.
+  assert.deepEqual(markerChapters([{ time: 12, label: 'Klip 1' }], 'Začátek'), []);
+  const chapters = markerChapters(
+    [
+      { time: 305, label: 'Triple kill' },
+      { time: 95.6, label: 'Klip 1' },
+      { time: 99, label: 'Klip 2' }, // 3 s po předchozím - stejná kapitola
+      { time: 4000, label: 'Mimo' }, // za koncem nahrávky
+      { time: 200, label: '   ' }, // bez popisku
+    ],
+    'Začátek',
+    3600
+  );
+  assert.deepEqual(chapters, [
+    { time: 0, title: 'Začátek' },
+    { time: 85, title: 'Klip 1' },
+    { time: 190, title: 'Začátek' },
+    { time: 295, title: 'Triple kill' },
+  ]);
+  assert.equal(chaptersText(chapters), '0:00 Začátek\n1:25 Klip 1\n3:10 Začátek\n4:55 Triple kill');
+  assert.equal(chapterTime(3725), '1:02:05');
+  assert.equal(chapterTime(65), '1:05');
+});
 
 test('hashtagy: bez #, malými písmeny, bez dvojic a mezer, s diakritikou, nejvýš 15', () => {
   assert.deepEqual(parseHashtags('#Klip, cs2 mirage #klip  hráč!'), ['klip', 'cs2', 'mirage', 'hráč']);

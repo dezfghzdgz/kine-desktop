@@ -93,6 +93,8 @@ export type Settings = {
   toggleHotkey: string;
   /** Zkratka start/stop nahrávání celého zápasu (prázdné = vypnuto). */
   recordHotkey: string;
+  /** Zkratka na snímek obrazovky (PNG do složky Screenshots + do schránky; prázdné = vypnuto). */
+  screenshotHotkey: string;
   /** Kolik sekund zpět klip sahá. */
   clipSeconds: number;
   /** Výška obrazu: 0 = jako obrazovka. */
@@ -202,6 +204,11 @@ export type Clip = {
   favorite?: boolean;
   /** 'recording' = nahrávka celého zápasu (start/stop), jinak klip ze zásobníku. */
   kind?: 'clip' | 'recording';
+  /**
+   * Značky v nahrávce zápasu (s od začátku): klip uložený během nahrávání,
+   * zabití ze hry... Přehrávač je ukáže na ose a na Kine z nich budou kapitoly.
+   */
+  markers?: { time: number; label: string }[];
   /** V koši od (ISO) - soubor leží ve složce .trash, po TRASH_DAYS dnech se smaže nadobro. */
   deletedAt?: string;
   /** S čím se klip nahrává / nahrál (ať se po restartu appky neztratí hashtagy a spol.). */

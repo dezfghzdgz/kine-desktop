@@ -99,6 +99,17 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   V úpravách je i **Náhled z tohohle snímku**: snímek, na kterém
   přehrávač stojí, se stane náhledem klipu (`clips:thumbFrame`, ffmpeg
   `-ss`; nový soubor náhledu, starý se smaže).
+  **Rychlost** 0,5× – 2× (zpomalení i zrychlení): obraz `setpts` + `fps`
+  zdroje (bez toho by zpomalení ztrácelo snímky a zrychlení mělo 120 fps),
+  zvuk `atempo` (hlas nezmění výšku), délka se omezuje už při čtení (`-t`
+  před `-i`); náhled v úpravách hraje zvolenou rychlostí.
+  **Text ve videu** (nahoře / uprostřed / dole; obrys, tmavý pruh, žlutý
+  pruh; tři velikosti): přibalený ffmpeg nemá `drawtext`, proto text
+  kreslí okno na canvas písmem Inter (nejvýš tři řádky, dlouhý se zmenší)
+  a hlavní proces ho jako PNG jen položí na obraz (`overlay`, po výřezu
+  9:16 i po změně rychlosti – vše jedním `-filter_complex`,
+  `editPlan.trimArgs`). Náhled textu ve vrstvě je přesně ten obrázek,
+  který se uloží.
   **GIF** (třetí formát): úsek do 15 s, 480 px, 15 fps, paleta +
   dithering (`editPlan.gifArgs`), bez zvuku, soubor `.gif` vedle klipu
   (do knihovny nepatří - tam jsou jen videa), tlačítko „Ukázat ve složce“.
@@ -107,6 +118,16 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   „3 / 24“, u nahraného klipu „Kopírovat odkaz“. Klávesy: mezerník,
   ← → (±1 s, se Shiftem 5 s), M ztlumí, F celá obrazovka, I/O v úpravách.
   Hlasitost si přehrávač pamatuje.
+- **Snímek obrazovky** (zkratka Alt+F8, tlačítko 📷 v panelu, položka
+  v liště): celá obrazovka, ze které se nahrává, v plném rozlišení jako
+  PNG do `Videa\Kine\Screenshots` a rovnou do schránky (vložit do
+  Discordu). Jde i bez hry a bez běžícího zásobníku (`desktopCapturer`).
+- **Momenty v nahrávce zápasu**: každý klip uložený během nahrávání
+  (zkratkou i sám ze zabití) je značka v nahrávce. V přehrávači jsou pod
+  videem jako tlačítka (skok 10 s před okamžik uložení), v úpravách
+  žluté značky na časové ose, na kartě „🚩 3“. Na Kine jdou jako
+  **kapitoly** videa (i do popisu: „0:00 Začátek / 4:55 Triple kill“),
+  po zkrácení se posunou (`editPlan.shiftMarkers`).
 - **Knihovna klipů** (`src/renderer/settings.ts`): řazení (nejnovější,
   nejstarší, nejdelší, největší), `/` skočí do hledání; najetí myší na kartu
   tiše přehrává klip (jeden náhled naráz, po odjetí se pustí z ruky);
@@ -386,8 +407,8 @@ src/main/        hlavní proces (Electron, Node)
   games.ts       hlídání her (procesy, Steam, popředí), gamesParse.ts čistá část (test)
   gameEvents.ts  klipy samy z událostí: CS2 Game State Integration (lokální server + cfg), LoL Live Client API
   gameEventsParse.ts  čistá část: rozbor událostí CS2/LoL, série zabití, obsah cfg (test)
-  edit.ts        zkrácení / ztlumení / výřez 9:16, sestřih víc klipů, GIF (ffmpeg), náhled k upravenému klipu
-  editPlan.ts    čistá část úprav: slepení klipu se stopami zvuku, sestřih, GIF, rozbor hlavičky ffmpeg (test)
+  edit.ts        zkrácení / ztlumení / výřez 9:16 / rychlost / text, sestřih víc klipů, GIF (ffmpeg), náhled k upravenému klipu
+  editPlan.ts    čistá část úprav: slepení klipu se stopami zvuku, zkrácení (trimArgs), sestřih, GIF, momenty, rozbor hlavičky ffmpeg (test)
   winHelper.ts   pomocník pro Windows (PowerShell + C# přes Add-Type): okno v popředí, procesy, okna, Steam, stav kláves
   hotkeys.ts     zkratky: systémové (Electron) + složené přes pomocníka
   clips.ts       knihovna klipů (index.json ve složce s klipy)
@@ -399,7 +420,7 @@ src/main/        hlavní proces (Electron, Node)
   toast.ts       okénko „Klip uložen“ v rohu
 src/renderer/    stránky oken: settings (postranní panel s kartou stavu, záložka Kine s lištou,
                  klipy s filtry / oblíbenými / výběrem a sestřihem, nastavení, průvodce),
-                 player (přehrávač + úpravy klipu ve vrstvě: řez, 9:16, GIF), review
+                 player (přehrávač + úpravy klipu ve vrstvě: řez, 9:16, GIF, rychlost, text, momenty), review
                  (okýnko po hře), toast, capture (skrytá snímací)
 src/preload/     most window.kine / window.kineCapture
 src/shared/      typy, překlady (i18n/: en cs sk de pl es fr uk), názvy klipů, zkratky, plány, výkon (performance.ts)

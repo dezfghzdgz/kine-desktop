@@ -305,3 +305,131 @@ export function trimAudioPlan(layout: AudioTrackKind[] | undefined, choice: Audi
   if (idx < 0) return { maps: ['-map', '0:a:0?'], tracks: known.slice(0, 1) };
   return { maps: ['-map', `0:a:${idx}`], tracks: [choice] };
 }
+
+// ---- zkrácení klipu: rychlost, text, výřez, zvuk -----------------------------------------
+
+/** Rychlosti v úpravách (zpomalení i zrychlení); 1 = beze změny. */
+export const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
+
+/** Rychlost z okna na jednu z povolených (nesmysl = 1). */
+export function normalizeSpeed(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  let best: number = 1;
+  for (const s of SPEEDS) if (Math.abs(s - n) < Math.abs(best - n)) best = s;
+  return best;
+}
+
+/** atempo zvládne 0,5-100; pomalejší by se muselo řetězit - tady stačí jeden článek. */
+export function atempoChain(speed: number): string | null {
+  if (Math.abs(speed - 1) < 0.001) return null;
+  const parts: string[] = [];
+  let rest = speed;
+  while (rest < 0.5) {
+    parts.push('atempo=0.5');
+    rest /= 0.5;
+  }
+  parts.push(`atempo=${Number(rest.toFixed(4))}`);
+  return parts.join(',');
+}
+
+export type TextPosition = 'top' | 'center' | 'bottom';
+
+/** Kde leží obrázek s textem (PNG ze stránky) ve výsledném snímku: vodorovně uprostřed, svisle podle volby. */
+export function textOverlayPosition(position: TextPosition): string {
+  const y = position === 'top' ? 'H*0.07' : position === 'center' ? '(H-h)/2' : 'H-h-H*0.08';
+  return `x='(W-w)/2':y='${y}'`;
+}
+
+export type TrimPlanOptions = {
+  /** Sekundy od začátku původního klipu. */
+  start: number;
+  end: number;
+  mute: boolean;
+  /** Datový tok obrazu (Mb/s) pro WebM - stejný jako při nahrávání. */
+  videoMbps: number;
+  vertical?: VerticalMode;
+  audio?: AudioChoice;
+  audioTracks?: AudioTrackKind[];
+  /** Rychlost (0,5 = zpomalení na polovinu, 2 = dvakrát rychleji). */
+  speed?: number;
+  /** Snímková frekvence zdroje - po změně rychlosti se na ni výsledek srovná (neznámá = 60). */
+  sourceFps?: number | null;
+  /** Text přes video: PNG s průhledností (nakreslený ve stránce) a kde má ležet. */
+  overlay?: { file: string; position: TextPosition } | null;
+  webm: boolean;
+};
+
+export type TrimPlan = {
+  args: string[];
+  /** Délka výsledku (s) - po změně rychlosti jiná než výběr. */
+  outputSeconds: number;
+  tracks: AudioTrackKind[] | null;
+};
+
+/**
+ * Argumenty ffmpeg pro zkrácení klipu. Řez je přesný na snímek (obraz se
+ * překóduje). Výřez na výšku, text a rychlost jdou jedním filtrem; délka
+ * se omezuje už při čtení (-t před -i), takže sedí i po zpomalení.
+ */
+export function trimArgs(input: string, output: string, o: TrimPlanOptions): TrimPlan {
+  const start = Math.max(0, o.start);
+  const length = Math.max(0.2, o.end - start);
+  const speed = normalizeSpeed(o.speed ?? 1);
+  const outputSeconds = length / speed;
+  const args = ['-y', '-ss', start.toFixed(3), '-t', length.toFixed(3), '-i', input];
+  if (o.overlay) args.push('-i', o.overlay.file);
+  args.push('-progress', 'pipe:1', '-nostats', '-loglevel', 'error');
+
+  // Obraz: [výřez] -> [rychlost] -> [text]. Bez textu stačí jednoduchý filtr.
+  const crop = verticalCropFilter(o.vertical);
+  const speedFilters: string[] = [];
+  if (speed !== 1) {
+    // Po setpts neví kodér snímkovou frekvenci (a vzal by 25 fps, zpomalení by ztrácelo snímky) - srovná se na frekvenci zdroje.
+    speedFilters.push(`setpts=(PTS-STARTPTS)/${speed}`, `fps=${Math.min(120, Math.max(1, Math.round(o.sourceFps ?? 60)))}`);
+  }
+  if (o.overlay) {
+    const chains: string[] = [];
+    let label = '[0:v:0]';
+    if (crop) {
+      chains.push(`${label}${crop}[vc]`);
+      label = '[vc]';
+    }
+    if (speedFilters.length) {
+      chains.push(`${label}${speedFilters.join(',')}[vs]`);
+      label = '[vs]';
+    }
+    chains.push(`${label}[1:v]overlay=${textOverlayPosition(o.overlay.position)}[vout]`);
+    args.push('-filter_complex', chains.join(';'), '-map', '[vout]');
+  } else {
+    const vf = [crop, ...speedFilters].filter((f): f is string => !!f);
+    if (vf.length) args.push('-vf', vf.join(','));
+    args.push('-map', '0:v:0');
+  }
+  if (o.webm) {
+    args.push('-c:v', 'libvpx', '-b:v', `${Math.max(1, Math.round(o.videoMbps))}M`, '-deadline', 'realtime', '-cpu-used', '8');
+  } else {
+    args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart');
+  }
+  // Zvuk podle volby (všechny stopy / jen hra / jen mikrofon / nic); rychlost přes atempo (výška hlasu zůstane).
+  const audio = trimAudioPlan(o.audioTracks, o.mute ? 'none' : o.audio);
+  args.push(...audio.maps);
+  if (audio.maps.length === 0) args.push('-an');
+  else {
+    const tempo = atempoChain(speed);
+    if (tempo) args.push('-af', tempo);
+    args.push('-c:a', o.webm ? 'libopus' : 'aac', '-b:a', o.webm ? '128k' : '192k');
+  }
+  args.push(output);
+  return { args, outputSeconds, tracks: audio.tracks };
+}
+
+/** Značky nahrávky po zkrácení: jen ty uvnitř výběru, posunuté na nový začátek (a přepočtené rychlostí). */
+export function shiftMarkers(markers: { time: number; label: string }[] | undefined, start: number, end: number, speed = 1): { time: number; label: string }[] | undefined {
+  if (!markers || markers.length === 0) return undefined;
+  const s = normalizeSpeed(speed);
+  const out = markers
+    .filter((m) => m.time >= start && m.time <= end)
+    .map((m) => ({ time: Math.round(((m.time - start) / s) * 10) / 10, label: m.label }));
+  return out.length > 0 ? out : undefined;
+}

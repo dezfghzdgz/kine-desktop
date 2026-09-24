@@ -2,7 +2,7 @@ import { appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, rmSync, wri
 import { homedir } from 'node:os';
 import { request as httpRequest } from 'node:http';
 import { basename, dirname, join } from 'node:path';
-import { BrowserWindow, app, clipboard } from 'electron';
+import { BrowserWindow, app, clipboard, nativeImage } from 'electron';
 import { log } from './log';
 import { trayIcon } from './icon';
 import { probe, runFfmpeg } from './ffmpeg';
@@ -302,6 +302,62 @@ export async function runTestDriver(kine: {
         const blur = await (kine as any).trimClip(clip1.id, { start: 0, end: 2, mute: false, mode: 'new', vertical: 'blur' });
         result.verticalBlurSize = `${blur.width}x${blur.height}`;
         result.verticalBlur = !!blur.width && !!blur.height && Math.abs(blur.width - Math.round((blur.height * 9) / 16)) <= 2 && blur.height === vertical.height && blur.durationSeconds > 1.5;
+      }
+
+      // Rychlost a text: přehrávač, Upravit, 2×, text ve žlutém pruhu dole -> nový klip poloviční
+      // délky a v obraze žlutý pruh (horní okraj pruhu bez písmen musí být žlutý).
+      {
+        const before = new Set(kine.library.list().map((c) => c.id));
+        await win.webContents.executeJavaScript(`(() => { const t = document.querySelector('.clip .thumb'); if (t) t.click(); return !!t; })()`);
+        let ready = false;
+        for (let i = 0; i < 20 && !ready; i++) {
+          await sleep(300);
+          ready = await win.webContents.executeJavaScript(`(() => { const v = document.querySelector('.overlay .player-box video'); return !!v && v.readyState >= 1 && v.videoWidth > 0; })()`);
+        }
+        await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head button')].find((x) => !x.disabled && x.textContent && !x.classList.contains('player-close') && !x.classList.contains('hidden')); if (b) b.click(); return !!b; })()`);
+        await sleep(400);
+        const speedSet: boolean = await win.webContents.executeJavaScript(
+          `(() => { const b = [...document.querySelectorAll('.trim-speed button.seg')].find((x) => x.textContent.trim() === '2×'); if (b) b.click(); return !!b && b.classList.contains('active'); })()`
+        );
+        const rate: number = await win.webContents.executeJavaScript(`document.querySelector('.overlay video').playbackRate`);
+        await win.webContents.executeJavaScript(
+          `(() => { const i = document.querySelector('input.trim-text'); i.value = 'E2E TEXT'; i.dispatchEvent(new Event('input', { bubbles: true })); const s = document.querySelector('select.trim-text-style'); s.value = 'yellow'; s.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`
+        );
+        let preview = false;
+        for (let i = 0; i < 20 && !preview; i++) {
+          await sleep(200);
+          preview = await win.webContents.executeJavaScript(`(() => { const c = document.querySelector('.text-preview:not(.hidden) canvas'); return !!c && c.getBoundingClientRect().width > 20; })()`);
+        }
+        const lens: string = await win.webContents.executeJavaScript(`[...document.querySelectorAll('.trim-vals b')][2]?.textContent ?? ''`);
+        await shot(win, 'settings-clips-text');
+        await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.trim-actions button')][0]; if (b && !b.disabled) b.click(); return !!b && !b.disabled; })()`);
+        let made: any = null;
+        for (let i = 0; i < 80 && !made; i++) {
+          await sleep(500);
+          made = kine.library.list().find((c) => !before.has(c.id));
+        }
+        const expected = Number(/→\s*([\d.]+)/.exec(lens)?.[1] ?? NaN);
+        let pixel: number[] | null = null;
+        if (made) {
+          const framePath = join(outDir, 'text-frame.png');
+          await runFfmpeg(['-loglevel', 'error', '-ss', '0.3', '-i', made.file, '-frames:v', '1', framePath], 30000).catch(() => undefined);
+          const img = nativeImage.createFromPath(framePath);
+          const { width: W, height: H } = img.getSize();
+          if (W > 0 && H > 0) {
+            const font = Math.round(H * 0.065);
+            const py = Math.round(font * 0.3);
+            const boxH = Math.round(font * 1.2) + 2 * py;
+            const y = Math.round(H - boxH - H * 0.08 + py / 2);
+            const bmp = img.toBitmap();
+            const i = (y * W + Math.round(W / 2)) * 4;
+            pixel = [bmp[i + 2], bmp[i + 1], bmp[i]];
+          }
+        }
+        result.textSpeed = { speedSet, rate, preview, lens, expected, duration: made?.durationSeconds, pixel };
+        result.textSpeedOk =
+          speedSet && rate === 2 && preview && !!made && Math.abs(made.durationSeconds - expected) < 0.4 && !!pixel && pixel[0] > 190 && pixel[1] > 150 && pixel[2] < 120;
+        await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        await sleep(300);
       }
 
       // Automatické klipy: falešné zprávy CS2 (Game State Integration) na lokální
@@ -652,7 +708,10 @@ export async function runTestDriver(kine: {
       await sleep(1200);
       const timer = await recWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-record.recording'); const t = b && b.querySelector('.rec-time'); return !!t && /^0:0[1-9]$/.test(t.textContent.trim()); })()`);
       await shot(recWin, 'settings-recording');
-      await sleep(4500);
+      // Klip během nahrávání = moment v nahrávce (značka, na Kine kapitola).
+      const markedAt = Date.now();
+      await (kine as any).onClipHotkey();
+      await sleep(Math.max(0, 4500 - (Date.now() - markedAt)));
       // Pád uprostřed zápasu (appka nebo Windows): kopie rozjeté složky zásobníku jako po jiném, mrtvém
       // procesu (<název>-99999) - při dalším startu se z ní má slepit nahrávka "obnoveno po pádu".
       const bufDir: string = (kine as any).capture.bufferDir;
@@ -686,6 +745,23 @@ export async function runTestDriver(kine: {
       const red = (p: number[]) => p[2] >= 240 && p[1] <= 90 && p[0] <= 90;
       result.trayDot = red(corner) && !red(opposite);
       result.recording = started && running && timer && !!rec && rec.durationSeconds >= 4 && /recording/i.test(rec.title) && badge && !(kine as any).capture.recordingInfo() && kine.capture.state === 'on';
+      // Moment z klipu během nahrávání: v knihovně, na kartě (🚩 1) a v přehrávači jako tlačítko.
+      if (rec) {
+        const recCard = await recWin.webContents.executeJavaScript(
+          `(() => { const c = document.querySelector('.clip[data-id="${rec.id}"]'); const b = c && c.querySelector('.kind-badge'); const t = c && c.querySelector('.thumb'); if (t) t.click(); return !!b && b.textContent.includes('🚩 1'); })()`
+        );
+        let chips = 0;
+        for (let i = 0; i < 20 && chips === 0; i++) {
+          await sleep(250);
+          chips = await recWin.webContents.executeJavaScript(`document.querySelectorAll('.player-markers:not(.hidden) .marker-chip').length`);
+        }
+        await shot(recWin, 'settings-recording-moments');
+        await recWin.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        await sleep(300);
+        const m = rec.markers ?? [];
+        result.recordingMarkers = { markers: m, recCard, chips };
+        result.recordingMarkersOk = m.length === 1 && m[0].time > 0.5 && m[0].time < rec.durationSeconds && recCard && chips === 1;
+      }
 
       // Obnova po pádu: složka mrtvého procesu se odloží a slepí; nic nezůstane v dočasné složce.
       const { moved, waiting } = (kine as any).capture.salvageLeftovers();
@@ -736,7 +812,14 @@ export async function runTestDriver(kine: {
       await sleep(waitMs);
       kine.openSettings('settings');
       await sleep(700);
-      result.recordHotkeyField = await recWin.webContents.executeJavaScript(`document.querySelectorAll('.panel .field .hotkey').length === 3`);
+      result.recordHotkeyField = await recWin.webContents.executeJavaScript(`document.querySelectorAll('.panel .field .hotkey').length === 4`);
+      // Snímek obrazovky: PNG v plném rozlišení do složky Screenshots vedle klipů (a do schránky).
+      const shotFile: string | null = await (kine as any).takeScreenshot();
+      const shotImage = shotFile ? nativeImage.createFromPath(shotFile) : null;
+      const shotSize = shotImage?.getSize();
+      const clipboardImage = await clipboard.has('image/png').catch(() => false);
+      result.screenshot = { file: shotFile, size: shotSize, clipboardImage };
+      result.screenshotOk = !!shotFile && existsSync(shotFile) && !!shotSize && shotSize.width >= 640 && shotSize.height >= 360 && /[\\/]Screenshots$/.test(dirname(shotFile)) && clipboardImage;
     }
 
     // Kvalita: předvolba "Doporučené (1080p60)", řádek o tom, kdo kóduje (grafika / procesor), a posun zvuku ±300 ms.
@@ -941,7 +1024,7 @@ export async function runTestDriver(kine: {
       'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks', 'reviewMerge', 'updateUi',
       'playerNav', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
       'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
-      'colorPicker', 'brandIcon', 'brandMarkSvg',
+      'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'screenshotOk',
     ];
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];
     if (process.env.KINE_TEST_FAKE_AUDIO) checks.push('fakeAudioMeter', 'fakeAudioClip');

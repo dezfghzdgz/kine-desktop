@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergePlan, gifArgs, parseProbe, progressPercent, verticalCropFilter, GIF_MAX_SECONDS } from '../dist/esm/editPlan.js';
+import { mergePlan, gifArgs, parseProbe, progressPercent, verticalCropFilter, GIF_MAX_SECONDS, trimArgs, normalizeSpeed, atempoChain, shiftMarkers, textOverlayPosition, SPEEDS } from '../dist/esm/editPlan.js';
 
 const HEADER = `Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'a.mp4':
   Duration: 00:00:07.33, start: 0.000000, bitrate: 36 kb/s
@@ -169,4 +169,92 @@ test('úprava klipu: zvuk všechno / jen hra / jen mikrofon / nic podle stop zdr
   // Starší klip (stopy neznámé): všechno jako dřív; "jen mikrofon" u klipu bez mikrofonu = první stopa.
   assert.deepEqual(trimAudioPlan(undefined, 'mic'), { maps: ['-map', '0:a?'], tracks: null });
   assert.deepEqual(trimAudioPlan(['game'], 'mic'), { maps: ['-map', '0:a:0?'], tracks: ['game'] });
+});
+
+test('rychlost: jen povolené hodnoty, atempo pro zvuk', () => {
+  assert.deepEqual([...SPEEDS], [0.5, 0.75, 1, 1.25, 1.5, 2]);
+  assert.equal(normalizeSpeed(2), 2);
+  assert.equal(normalizeSpeed('0.5'), 0.5);
+  assert.equal(normalizeSpeed(1.9), 2);
+  assert.equal(normalizeSpeed(10), 2);
+  assert.equal(normalizeSpeed(0.1), 0.5);
+  assert.equal(normalizeSpeed(-1), 1);
+  assert.equal(normalizeSpeed('abc'), 1);
+  assert.equal(atempoChain(1), null);
+  assert.equal(atempoChain(2), 'atempo=2');
+  assert.equal(atempoChain(0.75), 'atempo=0.75');
+  assert.equal(atempoChain(0.25), 'atempo=0.5,atempo=0.5');
+});
+
+test('zkrácení: délka se omezuje už při čtení (-t před -i), obraz jen první stopa, zvuk všechny', () => {
+  const plan = trimArgs('in.mp4', 'out.mp4', { start: 1, end: 4, mute: false, videoMbps: 20, webm: false, audioTracks: ['mix', 'game', 'mic'] });
+  const a = plan.args;
+  assert.equal(plan.outputSeconds, 3);
+  assert.ok(a.indexOf('-t') < a.indexOf('-i'));
+  assert.deepEqual(a.slice(0, 7), ['-y', '-ss', '1.000', '-t', '3.000', '-i', 'in.mp4']);
+  assert.ok(!a.includes('-vf') && !a.includes('-filter_complex') && !a.includes('-af'));
+  assert.ok(a.join(' ').includes('-map 0:v:0 -c:v libx264'));
+  assert.ok(a.join(' ').includes('-map 0:a?'));
+  assert.deepEqual(plan.tracks, ['mix', 'game', 'mic']);
+  assert.equal(a[a.length - 1], 'out.mp4');
+});
+
+test('zkrácení s rychlostí: setpts + fps zdroje, atempo, výsledek kratší/delší', () => {
+  const fast = trimArgs('in.mp4', 'out.mp4', { start: 0, end: 6, mute: false, videoMbps: 20, webm: false, speed: 2, sourceFps: 59.94 });
+  assert.equal(fast.outputSeconds, 3);
+  const vf = fast.args[fast.args.indexOf('-vf') + 1];
+  assert.equal(vf, 'setpts=(PTS-STARTPTS)/2,fps=60');
+  assert.equal(fast.args[fast.args.indexOf('-af') + 1], 'atempo=2');
+  const slow = trimArgs('in.mp4', 'out.mp4', { start: 0, end: 2, mute: false, videoMbps: 20, webm: false, speed: 0.5 });
+  assert.equal(slow.outputSeconds, 4);
+  assert.equal(slow.args[slow.args.indexOf('-vf') + 1], 'setpts=(PTS-STARTPTS)/0.5,fps=60');
+  // Bez zvuku žádné atempo.
+  const muted = trimArgs('in.mp4', 'out.mp4', { start: 0, end: 2, mute: true, videoMbps: 20, webm: false, speed: 2 });
+  assert.ok(muted.args.includes('-an') && !muted.args.includes('-af'));
+  // Výřez na výšku a rychlost jedním filtrem.
+  const vert = trimArgs('in.mp4', 'out.mp4', { start: 0, end: 2, mute: false, videoMbps: 20, webm: false, speed: 1.5, sourceFps: 30, vertical: 'left' });
+  assert.equal(vert.args[vert.args.indexOf('-vf') + 1], `${verticalCropFilter('left')},setpts=(PTS-STARTPTS)/1.5,fps=30`);
+});
+
+test('zkrácení s textem: PNG jako druhý vstup, overlay po výřezu a rychlosti, výstup [vout]', () => {
+  const plan = trimArgs('in.mp4', 'out.webm', {
+    start: 0,
+    end: 2,
+    mute: false,
+    videoMbps: 8,
+    webm: true,
+    speed: 2,
+    sourceFps: 60,
+    vertical: 'blur',
+    overlay: { file: 'text.png', position: 'top' },
+  });
+  const a = plan.args;
+  assert.deepEqual(a.slice(5, 9), ['-i', 'in.mp4', '-i', 'text.png']);
+  const fc = a[a.indexOf('-filter_complex') + 1];
+  assert.ok(fc.startsWith('[0:v:0]split[bg][fg];'), fc);
+  assert.ok(fc.includes("[bgb][fgs]overlay=x='(W-w)/2':y='(H-h)/2'[vc];[vc]setpts=(PTS-STARTPTS)/2,fps=60[vs];[vs][1:v]overlay=x='(W-w)/2':y='H*0.07'[vout]"), fc);
+  assert.ok(a.join(' ').includes('-map [vout]'));
+  assert.ok(!a.includes('-vf'));
+  assert.ok(a.join(' ').includes('-c:v libvpx'));
+  assert.ok(a.join(' ').includes('-af atempo=2 -c:a libopus'));
+  // Jen text: přímo [0:v:0] -> overlay.
+  const onlyText = trimArgs('in.mp4', 'out.mp4', { start: 0, end: 2, mute: false, videoMbps: 8, webm: false, overlay: { file: 't.png', position: 'bottom' } });
+  assert.equal(onlyText.args[onlyText.args.indexOf('-filter_complex') + 1], "[0:v:0][1:v]overlay=x='(W-w)/2':y='H-h-H*0.08'[vout]");
+  assert.equal(textOverlayPosition('center'), "x='(W-w)/2':y='(H-h)/2'");
+});
+
+test('momenty po zkrácení: jen uvnitř výběru, posunuté a přepočtené rychlostí', () => {
+  const markers = [
+    { time: 5, label: 'a' },
+    { time: 12, label: 'b' },
+    { time: 30, label: 'c' },
+  ];
+  assert.deepEqual(shiftMarkers(markers, 10, 20), [{ time: 2, label: 'b' }]);
+  assert.deepEqual(shiftMarkers(markers, 0, 40, 2), [
+    { time: 2.5, label: 'a' },
+    { time: 6, label: 'b' },
+    { time: 15, label: 'c' },
+  ]);
+  assert.equal(shiftMarkers(markers, 13, 20), undefined);
+  assert.equal(shiftMarkers(undefined, 0, 10), undefined);
 });

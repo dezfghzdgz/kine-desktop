@@ -39,8 +39,23 @@ const kine = {
   openClipsDir: (): Promise<string> => ipcRenderer.invoke('clips:openDir'),
   pickClipsDir: (): Promise<string | null> => ipcRenderer.invoke('clips:pickDir'),
   clipNow: (): Promise<Clip | null> => ipcRenderer.invoke('clips:clipNow'),
-  /** Zkrácení / ztlumení klipu; 'new' = nový klip vedle, 'replace' = přepsat původní. */
-  trimClip: (id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur'; audio?: 'mix' | 'game' | 'mic' | 'none' }): Promise<Clip> => ipcRenderer.invoke('clips:trim', id, opts),
+  /** Úprava klipu (výběr, zvuk, formát, rychlost, text jako PNG); 'new' = nový klip vedle, 'replace' = přepsat původní. */
+  trimClip: (
+    id: string,
+    opts: {
+      start: number;
+      end: number;
+      mute: boolean;
+      mode: 'new' | 'replace';
+      vertical?: 'left' | 'center' | 'right' | 'blur';
+      audio?: 'mix' | 'game' | 'mic' | 'none';
+      speed?: number;
+      text?: { png: Uint8Array; position: 'top' | 'center' | 'bottom' } | null;
+    }
+  ): Promise<Clip> => ipcRenderer.invoke('clips:trim', id, opts),
+  /** Snímek obrazovky (jako zkratka): PNG do složky Screenshots a do schránky. Vrací cestu, nebo null. */
+  takeScreenshot: (): Promise<string | null> => ipcRenderer.invoke('screenshot:take'),
+  openScreenshotsDir: (): Promise<string> => ipcRenderer.invoke('screenshot:openDir'),
   /** Text do schránky (odkaz na klip). */
   copyText: (text: string): Promise<void> => ipcRenderer.invoke('app:copy', text),
   /** Klip na Discord (webhook z nastavení): nahraný jako odkaz, jinak jako soubor do 10 MB. */

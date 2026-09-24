@@ -2,7 +2,7 @@ import type { Clip, Settings, UploadRequest, Visibility } from '../shared/types'
 import { CATEGORY_KEYS, VISIBILITIES } from '../shared/types';
 import type { Key } from '../shared/i18n';
 import { gameHashtag } from '../shared/clipNaming';
-import { formatHashtags, parseHashtags } from '../shared/upload';
+import { chaptersText, formatHashtags, markerChapters, parseHashtags } from '../shared/upload';
 import { clear, h, isPortrait, thumbImages } from './ui';
 
 /**
@@ -46,7 +46,10 @@ export const VIDEO_LANGS: [string, string][] = [
 export function defaultDescription(clip: Clip, settings: Settings, t: T): string {
   const url = `${settings.siteUrl}/download`;
   if (clip.kind === 'recording') {
-    return clip.game ? t('uploadDescriptionRecordingGame', { game: clip.game, url }) : t('uploadDescriptionRecording', { url });
+    const base = clip.game ? t('uploadDescriptionRecordingGame', { game: clip.game, url }) : t('uploadDescriptionRecording', { url });
+    // Momenty z nahrávky (uložené klipy) jako kapitoly - stejně jako v hlavním procesu.
+    const chapters = markerChapters(clip.markers, t('markerStart'), clip.durationSeconds);
+    return chapters.length > 0 ? `${base}\n\n${chaptersText(chapters)}` : base;
   }
   return clip.game ? t('uploadDescriptionGame', { game: clip.game, url }) : t('uploadDescription', { url });
 }

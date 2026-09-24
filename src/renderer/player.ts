@@ -1,5 +1,6 @@
 import type { Clip } from '../shared/types';
 import type { Key } from '../shared/i18n';
+import { chapterTime, MARKER_LEAD_SECONDS } from '../shared/upload';
 import { clear, errorText, fileUrl, formatBytes, h } from './ui';
 
 /**
@@ -11,14 +12,38 @@ import { clear, errorText, fileUrl, formatBytes, h } from './ui';
  * Úpravy (jako v Medalu): tlačítko "Upravit" rozbalí časovou osu se dvěma
  * úchyty (začátek/konec), klávesy I a O je nastaví v místě přehrávání,
  * mezerník přehrává, přehrávání se v úpravách točí uvnitř výběru.
- * Zvuk jde odstranit. Uložit lze jako nový klip vedle, nebo přepsat
- * původní - řez dělá hlavní proces (ffmpeg), sem chodí jen průběh.
+ * Zvuk jde odstranit, klip zpomalit / zrychlit a přidat do něj text (kreslí
+ * se tady na canvas písmem appky a hlavní proces ho jen položí na obraz -
+ * přibalený ffmpeg neumí psát text). Uložit lze jako nový klip vedle, nebo
+ * přepsat původní - řez dělá hlavní proces (ffmpeg), sem chodí jen průběh.
+ *
+ * Nahrávka zápasu má "momenty" - místa, kde hráč během hraní uložil klip;
+ * pod videem jsou jako tlačítka a na časové ose úprav jako značky.
  *
  * Vrstva je vždy nejvýš jedna; otevření dalšího klipu tu první zavře.
  */
 type T = (key: Key, vars?: Record<string, string | number>) => string;
 
-export type TrimRequest = { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur'; audio?: AudioChoice };
+export type TrimRequest = {
+  start: number;
+  end: number;
+  mute: boolean;
+  mode: 'new' | 'replace';
+  vertical?: 'left' | 'center' | 'right' | 'blur';
+  audio?: AudioChoice;
+  /** Rychlost (0,5 = zpomalení, 2 = dvakrát rychleji). */
+  speed?: number;
+  /** Text přes video: PNG v rozměru výsledku (jen oblast textu) a kde leží. */
+  text?: { png: Uint8Array; position: TextPosition } | null;
+};
+type TextPosition = 'top' | 'center' | 'bottom';
+type TextStyle = 'outline' | 'box' | 'yellow';
+type TextSize = 's' | 'm' | 'l';
+/** Rychlosti v úpravách - stejné jako v hlavním procesu (editPlan.SPEEDS). */
+const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
+/** Výška písma vůči výšce výsledného videa. */
+const TEXT_SIZES: Record<TextSize, number> = { s: 0.045, m: 0.065, l: 0.09 };
+const TEXT_MAX = 80;
 /** Zvuk ukládaného klipu (klip se samostatnými stopami hra / mikrofon). */
 type AudioChoice = 'mix' | 'game' | 'mic' | 'none';
 type CropAnchor = 'left' | 'center' | 'right' | 'blur';
@@ -117,6 +142,87 @@ export function formatTime(seconds: number): string {
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
+/** Rozměr výsledného videa - jako ffmpeg: výřez 9:16 má šířku trunc(min(iw, ih*9/16)/2)*2, výška zůstává. */
+export function outputSize(width: number, height: number, vertical: boolean): { w: number; h: number } {
+  if (!vertical) return { w: width, h: height };
+  return { w: Math.max(2, Math.floor(Math.min(width, (height * 9) / 16) / 2) * 2), h: height };
+}
+
+/** Rozdělí text do řádků podle šířky (slovo delší než řádek zůstane samo - písmo se pak zmenší). */
+function wrapLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const lines: string[] = [];
+  let line = '';
+  for (const word of text.split(' ')) {
+    const next = line ? `${line} ${word}` : word;
+    if (line && ctx.measureText(next).width > maxWidth) {
+      lines.push(line);
+      line = word;
+    } else line = next;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+let fontReady: Promise<unknown> | null = null;
+/** Písmo Inter se načítá líně - před kreslením musí být připravené, jinak by canvas vzal náhradní. */
+function ensureFont(): Promise<unknown> {
+  fontReady ??= document.fonts.load("800 64px 'Inter'").catch(() => undefined);
+  return fontReady;
+}
+
+/**
+ * Text do videa jako obrázek s průhledností v pixelech výsledného videa:
+ * nejvýš tři řádky na 90 % šířky (dlouhý text se zmenší), styl obrys /
+ * tmavý pruh / žlutý pruh. null = žádný text.
+ */
+export function drawTextImage(text: string, style: TextStyle, size: TextSize, outW: number, outH: number): HTMLCanvasElement | null {
+  const clean = text.replace(/\s+/g, ' ').trim().slice(0, TEXT_MAX);
+  if (!clean || outW <= 0 || outH <= 0) return null;
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  const fontOf = (px: number) => `800 ${px}px 'Inter', 'Segoe UI', sans-serif`;
+  const padFor = (px: number) => Math.round(px * (style === 'outline' ? 0.25 : 0.5));
+  const maxWidth = outW * 0.9;
+  let font = Math.max(10, Math.round(outH * TEXT_SIZES[size]));
+  let lines: string[] = [clean];
+  let widest = 0;
+  for (let i = 0; i < 16; i++) {
+    ctx.font = fontOf(font);
+    lines = wrapLines(ctx, clean, maxWidth - padFor(font) * 2);
+    widest = Math.max(...lines.map((l) => ctx.measureText(l).width));
+    if ((lines.length <= 3 && widest + padFor(font) * 2 <= maxWidth) || font <= 10) break;
+    font = Math.max(10, Math.floor(font * 0.88));
+  }
+  const px = padFor(font);
+  const py = Math.round(font * (style === 'outline' ? 0.2 : 0.3));
+  const lineHeight = Math.round(font * 1.2);
+  canvas.width = Math.max(1, Math.ceil(Math.min(outW, widest + px * 2)));
+  canvas.height = Math.max(1, Math.ceil(lines.length * lineHeight + py * 2));
+  ctx.font = fontOf(font);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  if (style !== 'outline') {
+    ctx.fillStyle = style === 'yellow' ? '#ffd23f' : 'rgba(10, 10, 14, 0.72)';
+    ctx.beginPath();
+    ctx.roundRect(0, 0, canvas.width, canvas.height, Math.round(font * 0.3));
+    ctx.fill();
+  }
+  lines.forEach((line, i) => {
+    const x = canvas.width / 2;
+    const y = py + lineHeight * (i + 0.5);
+    if (style === 'outline') {
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = Math.max(2, font * 0.16);
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.92)';
+      ctx.strokeText(line, x, y);
+    }
+    ctx.fillStyle = style === 'yellow' ? '#111' : '#fff';
+    ctx.fillText(line, x, y);
+  });
+  return canvas;
+}
+
 export function openPlayer(options: PlayerOptions): PlayerHandle {
   current?.close();
   const { t, edit } = options;
@@ -131,6 +237,15 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   let vertical: CropAnchor | null = null;
   /** Formát GIF (bez zvuku, soubor vedle klipu, ne do knihovny). */
   let gif = false;
+  /** Rychlost výsledku - náhled v úpravách hraje stejnou rychlostí. */
+  let speed = 1;
+  /** Text přes video (prázdný = žádný) a jak vypadá. */
+  let overlayText = '';
+  let textPosition: TextPosition = 'bottom';
+  let textStyle: TextStyle = 'outline';
+  let textSize: TextSize = 'm';
+  /** Nakreslený text v pixelech výsledku - stejný obrázek pro náhled i uložení. */
+  let textImage: HTMLCanvasElement | null = null;
   let editing = false;
   let saving: { mode: 'new' | 'replace' | 'gif'; percent: number } | null = null;
   let confirmReplace = false;
@@ -145,7 +260,11 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   // Stínování mimo výřez 9:16 (jen v úpravách s formátem na výšku).
   const shadeLeft = h('div', { class: 'crop-shade hidden' });
   const shadeRight = h('div', { class: 'crop-shade hidden' });
-  const stage = h('div', { class: 'player-stage' }, video, shadeLeft, shadeRight);
+  // Náhled textu (v úpravách) - přesně ten obrázek, který se pak položí do videa.
+  const textLayer = h('div', { class: 'text-preview hidden' });
+  const stage = h('div', { class: 'player-stage' }, video, shadeLeft, shadeRight, textLayer);
+  /** Momenty nahrávky (uložené klipy během hraní) - skok kousek před ně. */
+  const markersRow = h('div', { class: 'player-markers hidden' });
   const titleEl = h('div', { class: 'title' });
   /** "3 / 24" - kde v seznamu klip je (jen se sousedy). */
   const positionEl = h('span', { class: 'player-pos faint hidden' });
@@ -170,6 +289,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       )
     ),
     stage,
+    markersRow,
     trim,
     note
   );
@@ -211,6 +331,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     note.classList.add('hidden');
     syncAudioChoice();
     loadVideo(false);
+    renderMarkers();
     layout();
     refreshNav();
   }
@@ -228,7 +349,9 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const handleStart = h('div', { class: 'tl-handle start', title: t('trimStart') });
   const handleEnd = h('div', { class: 'tl-handle end', title: t('trimEnd') });
   const playhead = h('div', { class: 'tl-playhead' });
-  const timeline = h('div', { class: 'tl' }, track, range, handleStart, handleEnd, playhead);
+  /** Značky momentů nahrávky na časové ose (kde hráč zmáčkl klip). */
+  const ticks = h('div', { class: 'tl-ticks' });
+  const timeline = h('div', { class: 'tl' }, track, ticks, range, handleStart, handleEnd, playhead);
   const startVal = h('b', {});
   const endVal = h('b', {});
   const lenVal = h('b', {});
@@ -285,6 +408,56 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const progress = h('div', { class: 'progress trim-progress hidden' }, progressBar);
   const progressText = h('span', { class: 'faint hidden' });
   const uploadedNote = h('p', { class: 'hint hidden' }, t('trimUploadedNote'));
+
+  // Rychlost: zpomalení / zrychlení (náhled hraje stejně rychle).
+  const numberFormat = new Intl.NumberFormat(document.documentElement.lang || undefined, { maximumFractionDigits: 2 });
+  const speedBtns = SPEEDS.map(
+    (value) => h('button', { class: `small quiet seg ${value === 1 ? 'active' : ''}`, onclick: () => setSpeed(value) }, `${numberFormat.format(value)}×`) as HTMLButtonElement
+  );
+  const speedRow = h('div', { class: 'row trim-speed', style: 'gap:6px', title: t('trimSpeedHint') }, h('span', { class: 'faint', style: 'margin-right:4px' }, t('trimSpeed')), ...speedBtns);
+  // Text přes video: pole, poloha, styl, velikost.
+  const textInput = h('input', {
+    type: 'text',
+    class: 'trim-text',
+    maxlength: String(TEXT_MAX),
+    placeholder: t('trimTextPlaceholder'),
+    oninput: (e: Event) => {
+      overlayText = (e.target as HTMLInputElement).value;
+      void refreshText();
+    },
+  }) as HTMLInputElement;
+  const positionBtns: Record<TextPosition, HTMLButtonElement> = {
+    top: h('button', { class: 'small quiet seg', onclick: () => setTextPosition('top') }, t('trimTextTop')),
+    center: h('button', { class: 'small quiet seg', onclick: () => setTextPosition('center') }, t('trimTextCenter')),
+    bottom: h('button', { class: 'small quiet seg active', onclick: () => setTextPosition('bottom') }, t('trimTextBottom')),
+  };
+  const selectStyle = 'width:auto;min-height:32px;padding:4px 10px';
+  const styleSelect = h(
+    'select',
+    { class: 'trim-text-style', style: selectStyle, onchange: (e: Event) => { textStyle = (e.target as HTMLSelectElement).value as TextStyle; void refreshText(); } },
+    h('option', { value: 'outline' }, t('trimTextStyleOutline')),
+    h('option', { value: 'box' }, t('trimTextStyleBox')),
+    h('option', { value: 'yellow' }, t('trimTextStyleYellow'))
+  ) as HTMLSelectElement;
+  const sizeSelect = h(
+    'select',
+    { class: 'trim-text-size', style: selectStyle, onchange: (e: Event) => { textSize = (e.target as HTMLSelectElement).value as TextSize; void refreshText(); } },
+    h('option', { value: 's' }, t('trimTextSizeS')),
+    h('option', { value: 'm' }, t('trimTextSizeM')),
+    h('option', { value: 'l' }, t('trimTextSizeL'))
+  ) as HTMLSelectElement;
+  sizeSelect.value = 'm';
+  const textRow = h(
+    'div',
+    { class: 'row trim-text-row', style: 'gap:6px' },
+    h('span', { class: 'faint', style: 'margin-right:4px' }, t('trimText')),
+    textInput,
+    positionBtns.top,
+    positionBtns.center,
+    positionBtns.bottom,
+    styleSelect,
+    sizeSelect
+  );
   trim.append(
     timeline,
     h(
@@ -305,6 +478,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     h('div', { class: 'row', style: 'gap:6px' }, h('span', { class: 'faint', style: 'margin-right:4px' }, t('exportFormat')), formatBtns.original, formatBtns.vertical, edit?.gif ? formatBtns.gif : null),
     anchorRow,
     gifHint,
+    speedRow,
+    textRow,
     uploadedNote,
     h('div', { class: 'row trim-actions' }, saveNewBtn, replaceBtn, progress, progressText)
   );
@@ -331,7 +506,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     broken = false;
     editBtn.disabled = false;
     clear(stage);
-    stage.append(video, shadeLeft, shadeRight);
+    stage.append(video, shadeLeft, shadeRight, textLayer);
     if (guard) clearTimeout(guard);
     video.src = fileUrl(clip.file) + (bust ? `?v=${Date.now()}` : '');
     video.load();
@@ -354,6 +529,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       end = clamp(end, Math.min(duration, start + MIN_LENGTH), duration);
     }
     layout();
+    layoutTicks();
+    if (overlayText.trim()) void refreshText();
   });
   const tick = () => {
     raf = 0;
@@ -408,6 +585,86 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     shadeRight.style.left = `${offX + cropX + cropW}px`;
     shadeRight.style.width = `${Math.max(0, dw - cropX - cropW)}px`;
   }
+  /** Náhled textu: kde obrázek leží ve výsledku (vodorovně uprostřed, svisle podle volby), přepočtené na video v okně. */
+  function layoutText() {
+    const on = editing && !gif && !!textImage && video.videoWidth > 0 && video.videoHeight > 0;
+    textLayer.classList.toggle('hidden', !on);
+    if (!on || !textImage) return;
+    const box = video.getBoundingClientRect();
+    const stageBox = stage.getBoundingClientRect();
+    const scale = Math.min(box.width / video.videoWidth, box.height / video.videoHeight);
+    const dw = video.videoWidth * scale;
+    const dh = video.videoHeight * scale;
+    const offX = box.left - stageBox.left + (box.width - dw) / 2;
+    const offY = box.top - stageBox.top + (box.height - dh) / 2;
+    const out = outputSize(video.videoWidth, video.videoHeight, !!vertical);
+    const k = vertical === 'left' ? 0 : vertical === 'right' ? 1 : 0.5;
+    const regionX = offX + (dw - out.w * scale) * k;
+    const x = (out.w - textImage.width) / 2;
+    const y = textPosition === 'top' ? out.h * 0.07 : textPosition === 'center' ? (out.h - textImage.height) / 2 : out.h - textImage.height - out.h * 0.08;
+    textLayer.style.left = `${regionX + x * scale}px`;
+    textLayer.style.top = `${offY + y * scale}px`;
+    textLayer.style.width = `${textImage.width * scale}px`;
+    textLayer.style.height = `${textImage.height * scale}px`;
+  }
+  /** Text znovu nakreslit (změna textu, stylu, velikosti nebo formátu - na výšku je užší). */
+  async function refreshText() {
+    await ensureFont();
+    if (closed) return;
+    const vw = video.videoWidth || clip.width || 0;
+    const vh = video.videoHeight || clip.height || 0;
+    const out = outputSize(vw, vh, !!vertical);
+    textImage = overlayText.trim() && vw > 0 && vh > 0 ? drawTextImage(overlayText, textStyle, textSize, out.w, out.h) : null;
+    clear(textLayer);
+    if (textImage) textLayer.append(textImage);
+    layoutText();
+    refreshButtons();
+  }
+  function setTextPosition(position: TextPosition) {
+    textPosition = position;
+    for (const [key, btn] of Object.entries(positionBtns)) btn.classList.toggle('active', key === position);
+    layoutText();
+  }
+  function setSpeed(value: number) {
+    speed = value;
+    speedBtns.forEach((btn, i) => btn.classList.toggle('active', SPEEDS[i] === value));
+    if (editing) video.playbackRate = value;
+    layout();
+  }
+  function markerList() {
+    return (clip.markers ?? []).filter((m) => m && Number.isFinite(m.time) && m.time >= 0).sort((a, b) => a.time - b.time);
+  }
+  function renderMarkers() {
+    const list = markerList();
+    clear(markersRow);
+    markersRow.classList.toggle('hidden', list.length === 0);
+    if (list.length > 0) markersRow.append(h('span', { class: 'faint', title: t('playerMarkersHint') }, '🚩 ' + t('playerMarkers')));
+    for (const m of list) {
+      const at = Math.max(0, m.time - MARKER_LEAD_SECONDS);
+      markersRow.append(
+        h(
+          'button',
+          {
+            class: 'small quiet marker-chip',
+            title: t('playerMarkersHint'),
+            onclick: () => {
+              if (broken) return;
+              video.currentTime = at;
+              void video.play().catch(() => undefined);
+            },
+          },
+          h('b', {}, chapterTime(at)),
+          ' ' + String(m.label ?? '')
+        )
+      );
+    }
+    layoutTicks();
+  }
+  function layoutTicks() {
+    clear(ticks);
+    if (duration <= 0) return;
+    for (const m of markerList()) ticks.append(h('span', { class: 'tl-tick', style: `left:${pct(m.time)}`, title: String(m.label ?? '') }));
+  }
   function setVertical(anchor: CropAnchor | null) {
     vertical = anchor;
     if (anchor) gif = false;
@@ -419,6 +676,9 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     for (const [key, btn] of Object.entries(anchorBtns)) btn.classList.toggle('active', key === anchor);
     anchorHint.textContent = anchor === 'blur' ? t('exportBlurHint') : t('exportVerticalHint');
     layoutCrop();
+    // Na výšku je výsledek užší - text se musí zalomit znovu.
+    if (overlayText.trim()) void refreshText();
+    else layoutText();
     refreshButtons();
   }
   function setFormat(format: ExportFormat) {
@@ -429,7 +689,11 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     gif = format === 'gif';
     setVertical(null);
   }
-  window.addEventListener('resize', layoutCrop);
+  const onResize = () => {
+    layoutCrop();
+    layoutText();
+  };
+  window.addEventListener('resize', onResize);
 
   function layout() {
     range.style.left = pct(start);
@@ -438,7 +702,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     handleEnd.style.left = pct(end);
     startVal.textContent = formatTime(start);
     endVal.textContent = formatTime(end);
-    lenVal.textContent = `${(end - start).toFixed(1)} s`;
+    // Po změně rychlosti má výsledek jinou délku než výběr.
+    lenVal.textContent = speed !== 1 ? `${(end - start).toFixed(1)} s → ${((end - start) / speed).toFixed(1)} s` : `${(end - start).toFixed(1)} s`;
     layoutPlayhead();
     layoutCrop();
     refreshButtons();
@@ -528,12 +793,20 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       syncAudioChoice();
       confirmReplace = false;
       gif = false;
+      overlayText = '';
+      textInput.value = '';
+      textImage = null;
+      clear(textLayer);
+      setSpeed(1);
       setVertical(null);
+    } else {
+      video.playbackRate = 1;
+      layoutText();
     }
     layout();
   }
   function nothingToDo(): boolean {
-    return start <= 0.05 && end >= duration - 0.05 && !mute && audioChoice === 'mix' && !vertical && !gif;
+    return start <= 0.05 && end >= duration - 0.05 && !mute && audioChoice === 'mix' && !vertical && !gif && speed === 1 && !textImage;
   }
   /** GIF: úsek musí být nejvýš GIF_MAX_SECONDS. */
   function gifTooLong(): boolean {
@@ -548,6 +821,9 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     replaceBtn.classList.toggle('hidden', gif);
     muteBox.disabled = gif;
     audioSelect.disabled = gif;
+    // GIF je bez rychlosti a textu (krátká smyčka) - volby se schovají.
+    speedRow.classList.toggle('hidden', gif);
+    textRow.classList.toggle('hidden', gif);
     saveNewBtn.title = nothingToDo() ? t('trimNothingToDo') : gifTooLong() ? t('gifTooLong', { max: GIF_MAX_SECONDS }) : '';
     replaceBtn.title = nothingToDo() ? t('trimNothingToDo') : '';
     replaceBtn.textContent = confirmReplace ? t('trimReplaceConfirm') : t('trimReplace');
@@ -658,8 +934,16 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       video.load();
     }
     try {
-      const result = await edit.run(original, { start, end, mute, mode, vertical: vertical ?? undefined, audio: audioChoice });
+      // Text jako PNG (stejný obrázek jako v náhledu); ffmpeg ho jen položí na obraz.
+      let text: TrimRequest['text'] = null;
+      if (textImage) {
+        const image = textImage;
+        const blob = await new Promise<Blob | null>((resolve) => image.toBlob(resolve, 'image/png'));
+        if (blob) text = { png: new Uint8Array(await blob.arrayBuffer()), position: textPosition };
+      }
+      const result = await edit.run(original, { start, end, mute, mode, vertical: vertical ?? undefined, audio: audioChoice, speed, text });
       clip = result;
+      renderMarkers();
       titleEl.textContent = clip.title;
       titleEl.title = clip.title;
       showNote(t('trimDone', { title: clip.title }), 'ok');
@@ -729,7 +1013,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     if (closed) return;
     closed = true;
     document.removeEventListener('keydown', onKey, true);
-    window.removeEventListener('resize', layoutCrop);
+    window.removeEventListener('resize', onResize);
     if (raf) cancelAnimationFrame(raf);
     if (guard) clearTimeout(guard);
     if (confirmTimer) clearTimeout(confirmTimer);
@@ -760,6 +1044,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       clip = { ...fresh };
       titleEl.textContent = clip.title;
       titleEl.title = clip.title;
+      renderMarkers();
       uploadedNote.classList.toggle('hidden', clip.upload?.state !== 'done');
       copyBtn.classList.toggle('hidden', clip.upload?.state !== 'done');
       refreshNav();
@@ -772,6 +1057,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   copyBtn.classList.toggle('hidden', clip.upload?.state !== 'done');
   document.body.append(overlay);
   loadVideo(false);
+  renderMarkers();
   if (options.startEditing && edit) toggleEdit(true);
   layout();
   refreshNav();

@@ -236,6 +236,33 @@ test('bez vlastního nastavení jdou výchozí hodnoty: hashtagy z nastavení, k
   assert.equal(meta.category, 'catMusic');
   assert.equal(meta.description, 'Popis pro Counter-Strike 2');
   assert.equal(meta.visibility, 'public');
+  // Bez značek žádné kapitoly.
+  assert.deepEqual(meta.chapters, []);
+  uploader.stopWaiting();
+  mock.server.close();
+});
+
+test('momenty nahrávky jdou na Kine jako kapitoly videa', async () => {
+  const mock = await startMockServer();
+  const { library } = makeLibrary(1024);
+  const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${mock.port}`, getToken: async () => 'token-123' });
+  const chapters = [
+    { time: 0, title: 'Začátek' },
+    { time: 95, title: 'Triple kill' },
+  ];
+  const uploader = new Uploader({
+    library,
+    api,
+    blocked: () => null,
+    settings: () => settings,
+    log: () => {},
+    readySchedule: fast,
+    chapters: () => chapters,
+  });
+  const done = new Promise((resolve) => uploader.on((e) => e.type === 'done' && resolve(e)));
+  uploader.enqueue([{ clipId: 'c1', visibility: 'public' }]);
+  await done;
+  assert.deepEqual(mock.confirmed[0].chapters, chapters);
   uploader.stopWaiting();
   mock.server.close();
 });

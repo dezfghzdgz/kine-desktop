@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { cpus, homedir, release, totalmem } from 'node:os';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, statfsSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, statfsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import {
   BrowserWindow,
+  ClipboardItem,
   Menu,
   Tray,
   WebContentsView,
@@ -20,7 +21,7 @@ import {
   shell,
 } from 'electron';
 import { CATEGORY_KEYS, TRASH_DAYS, VISIBILITIES, type AudioLevels, type CaptureEvent, type Clip, type DisplayInfo, type Settings, type Status, type UploadRequest, type Visibility } from '../shared/types';
-import { parseHashtags } from '../shared/upload';
+import { chaptersText, markerChapters, parseHashtags } from '../shared/upload';
 import { hexToRgbTriplet } from '../shared/plan';
 import { makeT, type Key } from '../shared/i18n';
 import { hotkeyLabel } from '../shared/hotkeys';
@@ -44,7 +45,7 @@ import { runTestDriver } from './testDriver';
 import { WinHelper } from './winHelper';
 import { makeGif, makeThumbnail, mergeClips, trimClip } from './edit';
 import { runFfmpeg } from './ffmpeg';
-import { GIF_MAX_SECONDS } from './editPlan';
+import { GIF_MAX_SECONDS, normalizeSpeed, shiftMarkers, type TextPosition } from './editPlan';
 import { APP_USER_MODEL_IDS, PRODUCT_NAMES, detectVariant, modeForVariant, siblingExe } from './variant';
 import { brandIcon, trayIcon } from './icon';
 import { HotkeyManager, type HotkeyId, type HotkeyReason } from './hotkeys';
@@ -69,6 +70,19 @@ const RENDERER_DIR = join(__dirname, '..', 'renderer');
 /** Která ze dvou appek běží (Kine do PC / Kine Clipper) - viz variant.ts. */
 const VARIANT = detectVariant();
 const PRODUCT = PRODUCT_NAMES[VARIANT];
+
+/** Úprava klipu z okna (přehrávač): výběr, zvuk, formát, rychlost, text. */
+type TrimIpcRequest = {
+  start: number;
+  end: number;
+  mute: boolean;
+  mode: 'new' | 'replace';
+  vertical?: 'left' | 'center' | 'right' | 'blur';
+  audio?: 'mix' | 'game' | 'mic' | 'none';
+  speed?: number;
+  /** Text přes video jako PNG (nakreslené oknem) a kde leží. */
+  text?: { png: Uint8Array | ArrayBuffer; position: TextPosition } | null;
+};
 const ICON_PNG = join(app.getAppPath(), 'build', VARIANT === 'clipper' ? 'icon-clipper.png' : 'icon.png');
 /** Volné místo na disku, kde leží složka; když to nejde zjistit, -1. */
 function freeDiskBytes(dir: string): number {
@@ -320,11 +334,15 @@ class KineApp {
       describe: (clip) => {
         const download = `${this.settings.get().siteUrl}/download`;
         if (clip.kind === 'recording') {
-          return clip.game ? this.t('uploadDescriptionRecordingGame', { game: clip.game, url: download }) : this.t('uploadDescriptionRecording', { url: download });
+          const base = clip.game ? this.t('uploadDescriptionRecordingGame', { game: clip.game, url: download }) : this.t('uploadDescriptionRecording', { url: download });
+          // Značky z nahrávky jako kapitoly (Kine je ukáže na časové ose videa).
+          const chapters = markerChapters(clip.markers, this.t('markerStart'), clip.durationSeconds);
+          return chapters.length > 0 ? `${base}\n\n${chaptersText(chapters)}` : base;
         }
         return clip.game ? this.t('uploadDescriptionGame', { game: clip.game, url: download }) : this.t('uploadDescription', { url: download });
       },
       uploadThumbnail: (videoId, file) => this.auth.uploadThumbnail(videoId, file),
+      chapters: (clip) => markerChapters(clip.markers, this.t('markerStart'), clip.durationSeconds),
       prepareFile: (clip) => this.uploadFileFor(clip),
       releaseFile: (clip) => this.releaseUploadFile(clip.id),
     });
@@ -520,8 +538,63 @@ class KineApp {
   private onHotkey(id: HotkeyId): void {
     if (id === 'clip') void this.onClipHotkey();
     else if (id === 'record') void this.toggleRecording();
+    else if (id === 'screenshot') void this.takeScreenshot();
     else void this.onToggleHotkey();
   }
+
+  /**
+   * Snímek obrazovky (zkratka, výchozí Alt+F8): celá obrazovka, ze které se
+   * nahrává, v plném rozlišení (ne zmenšená jako klip) jako PNG do složky
+   * Screenshots vedle klipů - a rovnou do schránky, ať jde vložit do
+   * Discordu. Funguje i bez běžícího zásobníku.
+   */
+  async takeScreenshot(): Promise<string | null> {
+    const s = this.settings.get();
+    try {
+      const displays = screen.getAllDisplays();
+      const display = displays.find((d) => String(d.id) === s.displayId && s.displayId) ?? screen.getPrimaryDisplay();
+      const size = {
+        width: Math.round(display.size.width * display.scaleFactor),
+        height: Math.round(display.size.height * display.scaleFactor),
+      };
+      const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: size });
+      const source = sources.find((x) => x.display_id === String(display.id)) ?? sources[0];
+      if (!source || source.thumbnail.isEmpty()) throw new Error('no display');
+      const png = source.thumbnail.toPNG();
+      const dir = this.screenshotsDir();
+      mkdirSync(dir, { recursive: true });
+      const base = clipFileBase(new Date(), this.games.current()?.name ?? null);
+      let file = join(dir, `${base}.png`);
+      for (let n = 2; existsSync(file); n++) file = join(dir, `${base} (${n}).png`);
+      writeFileSync(file, png);
+      let copied = false;
+      try {
+        await clipboard.write([new ClipboardItem({ 'image/png': new Blob([new Uint8Array(png)], { type: 'image/png' }) })]);
+        copied = true;
+      } catch (e) {
+        log(`snímek do schránky: ${(e as Error).message}`);
+      }
+      const { width, height } = source.thumbnail.getSize();
+      log(`snímek obrazovky: ${file} (${width}x${height})`);
+      void this.toast.show(this.t(copied ? 'toastScreenshotCopied' : 'toastScreenshotSaved'), 'ok', {
+        notification: !s.toast,
+        onClick: () => shell.showItemInFolder(file),
+      });
+      return file;
+    } catch (e) {
+      log(`snímek obrazovky se nepovedl: ${(e as Error).message}`);
+      void this.toast.show(this.t('toastScreenshotFailed', { message: (e as Error).message }), 'error');
+      return null;
+    }
+  }
+
+  /** Složka se snímky obrazovky (vedle klipů). */
+  screenshotsDir(): string {
+    return join(this.settings.clipsDir(), 'Screenshots');
+  }
+
+  /** Značky do rozjeté nahrávky zápasu (klip, zabití) - čas podle hodin, na sekundy se přepočítá při uložení. */
+  private recordingMarkers: { at: number; label: string }[] = [];
 
   // ---- nahrávání celého zápasu ----------------------------------------------------
 
@@ -542,6 +615,7 @@ class KineApp {
     }
     try {
       await this.capture.startRecording(this.games.current()?.name ?? null);
+      this.recordingMarkers = [];
       this.capture.onRecordingAutoStop((reason) => void this.finishRecording(reason));
       void this.toast.show(s.recordHotkey ? this.t('toastRecordingStarted', { hotkey: hotkeyLabel(s.recordHotkey) }) : this.t('toastRecordingStartedNoKey'), 'ok');
     } catch (e) {
@@ -563,6 +637,11 @@ class KineApp {
     try {
       const result = await this.capture.stopRecording(this.settings.clipsDir(), join(app.getPath('userData'), 'thumbs'));
       const baseTitle = defaultClipTitle(new Date(info.since), game, this.t('recordingWord'));
+      // Značky (klipy a zabití během zápasu) jako sekundy od začátku nahrávky.
+      const markers = this.recordingMarkers
+        .map((m) => ({ time: Math.round(((m.at - info.since) / 1000) * 10) / 10, label: m.label }))
+        .filter((m) => m.time >= 0 && m.time <= result.durationSeconds);
+      this.recordingMarkers = [];
       const clip: Clip = {
         id: randomUUID(),
         file: result.file,
@@ -578,6 +657,7 @@ class KineApp {
         upload: null,
         audioTracks: result.audioTracks,
         kind: 'recording',
+        markers: markers.length > 0 ? markers : undefined,
       };
       this.library.add(clip);
       const minutes = Math.round(result.durationSeconds / 60);
@@ -788,6 +868,8 @@ class KineApp {
    * = dva klipy. Automatický klip bez běžícího zásobníku se tiše vynechá.
    */
   onClipHotkey(opts: { auto?: boolean; label?: string } = {}): Promise<Clip | null> {
+    // Čas stisku (klipy se řadí za sebe - značka v nahrávce patří ke stisku, ne k chvíli, kdy na klip přijde řada).
+    const pressedAt = Date.now();
     const run = async (): Promise<Clip | null> => {
       const s = this.settings.get();
       const toggleLabel = hotkeyLabel(s.toggleHotkey);
@@ -798,6 +880,10 @@ class KineApp {
         return null;
       }
       const game = this.games.current();
+      // Během nahrávání zápasu je každý klip zároveň značka v nahrávce (kapitola na Kine).
+      if (this.capture.recordingInfo()) {
+        this.recordingMarkers.push({ at: pressedAt, label: opts.label ?? this.t('markerClip', { n: this.recordingMarkers.length + 1 }) });
+      }
       try {
         const result = await this.capture.makeClip(this.effectiveClipSeconds(), this.settings.clipsDir(), game?.name ?? null, join(app.getPath('userData'), 'thumbs'));
         const baseTitle = defaultClipTitle(result.createdAt, game?.name ?? null, this.t('clipWord'));
@@ -856,7 +942,7 @@ class KineApp {
   // ---- nastavení ----------------------------------------------------------------
 
   private onSettingsChanged(s: Settings, prev: Settings): void {
-    if (s.clipHotkey !== prev.clipHotkey || s.toggleHotkey !== prev.toggleHotkey || s.recordHotkey !== prev.recordHotkey) this.registerHotkeys();
+    if (s.clipHotkey !== prev.clipHotkey || s.toggleHotkey !== prev.toggleHotkey || s.recordHotkey !== prev.recordHotkey || s.screenshotHotkey !== prev.screenshotHotkey) this.registerHotkeys();
     if (s.startWithSystem !== prev.startWithSystem) this.applyLoginItem();
     if (s.clipsDir !== prev.clipsDir) this.library.load(this.settings.clipsDir());
     const captureKeys: (keyof Settings)[] = ['maxHeight', 'fps', 'codec', 'videoMbps', 'systemAudio', 'systemAudioDevice', 'microphone', 'microphoneDevice', 'systemGain', 'micGain', 'displayId'];
@@ -889,7 +975,7 @@ class KineApp {
 
   private registerHotkeys(): void {
     const s = this.settings.get();
-    const problems = this.hotkeys.apply({ clip: s.clipHotkey, toggle: s.toggleHotkey, record: s.recordHotkey });
+    const problems = this.hotkeys.apply({ clip: s.clipHotkey, toggle: s.toggleHotkey, record: s.recordHotkey, screenshot: s.screenshotHotkey });
     for (const p of problems) {
       // Hráč musí vědět, že F8 nic neudělá - jinak by to vypadalo jako rozbitá appka.
       if (p.reason === 'helper-down') continue; // pomocník teprve nabíhá; kdyby nenaběhl, uvidí to v nastavení
@@ -1009,6 +1095,7 @@ class KineApp {
         click: () => void this.toggleRecording(),
         enabled: this.capture.state === 'on',
       },
+      { label: this.t('trayScreenshot', { hotkey: s.screenshotHotkey ? hotkeyLabel(s.screenshotHotkey) : '' }).replace(/\s*\(\)$/, ''), click: () => void this.takeScreenshot() },
       { label: this.t('trayLibrary'), click: () => this.openSettings('clips') },
       { label: this.t('traySettings'), click: () => this.openSettings('settings') },
       { label: this.paused ? this.t('trayResume') : this.t('trayPause'), click: () => void this.togglePause() },
@@ -1431,7 +1518,7 @@ class KineApp {
    * ať při chybě nezůstane rozbitý soubor). Průběh chodí oknům jako
    * "clips:trimProgress".
    */
-  async trimClip(id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur'; audio?: 'mix' | 'game' | 'mic' | 'none' }): Promise<Clip> {
+  async trimClip(id: string, opts: TrimIpcRequest): Promise<Clip> {
     const clip = this.library.get(id);
     if (!clip) throw new Error('clip not found');
     const s = this.settings.get();
@@ -1443,6 +1530,7 @@ class KineApp {
     const total = clip.durationSeconds > 0 ? clip.durationSeconds : Infinity;
     const vertical = opts.vertical === 'left' || opts.vertical === 'center' || opts.vertical === 'right' || opts.vertical === 'blur' ? opts.vertical : undefined;
     const audio = opts.audio === 'game' || opts.audio === 'mic' || opts.audio === 'none' ? opts.audio : 'mix';
+    const speed = normalizeSpeed(opts.speed ?? 1);
     const options = {
       start: Math.max(0, Number(opts.start) || 0),
       end: Math.min(total, Number(opts.end) || total),
@@ -1451,87 +1539,114 @@ class KineApp {
       vertical,
       audio: audio as 'mix' | 'game' | 'mic' | 'none',
       audioTracks: clip.audioTracks,
+      speed,
+      overlay: null as { file: string; position: TextPosition } | null,
     };
     if (!Number.isFinite(options.end)) throw new Error('unknown length');
     // Výřez na výšku je jiný formát - vždycky jako nový klip vedle původního.
     if (vertical && opts.mode === 'replace') opts = { ...opts, mode: 'new' };
     if (options.end - options.start < 0.2) throw new Error('too-short');
     const thumbsDir = join(app.getPath('userData'), 'thumbs');
+    // Momenty nahrávky se posunou na nový začátek (a přepočtou rychlostí); ty mimo výběr zmizí.
+    const markers = shiftMarkers(clip.markers, options.start, options.end, speed);
 
-    if (opts.mode === 'replace') {
-      const tmp = join(dir, `${stem}.upravuje-se${ext}`);
-      const result = await trimClip(clip.file, tmp, options, progress);
-      // Původní soubor může chvíli držet přehrávač - zkusit víckrát.
-      let lastError: Error | null = null;
-      for (let i = 0; i < 10; i++) {
-        try {
-          renameSync(tmp, clip.file);
-          lastError = null;
-          break;
-        } catch (e) {
-          lastError = e as Error;
-          await new Promise((r) => setTimeout(r, 300));
+    // Text přes video: PNG nakreslené oknem (písmo Inter, obrys...) - ffmpeg ho jen položí na obraz.
+    const text = opts.text;
+    if (text && text.png) {
+      const png = text.png instanceof Uint8Array ? text.png : new Uint8Array(text.png as ArrayBuffer);
+      const isPng = png.length > 8 && png[0] === 0x89 && png[1] === 0x50 && png[2] === 0x4e && png[3] === 0x47;
+      if (!isPng || png.length > 10 * 1024 * 1024) throw new Error('bad text image');
+      const position: TextPosition = text.position === 'top' || text.position === 'center' ? text.position : 'bottom';
+      const file = join(app.getPath('temp'), `kine-text-${randomUUID()}.png`);
+      writeFileSync(file, png);
+      options.overlay = { file, position };
+    }
+    try {
+      if (opts.mode === 'replace') {
+        const tmp = join(dir, `${stem}.upravuje-se${ext}`);
+        const result = await trimClip(clip.file, tmp, options, progress);
+        // Původní soubor může chvíli držet přehrávač - zkusit víckrát.
+        let lastError: Error | null = null;
+        for (let i = 0; i < 10; i++) {
+          try {
+            renameSync(tmp, clip.file);
+            lastError = null;
+            break;
+          } catch (e) {
+            lastError = e as Error;
+            await new Promise((r) => setTimeout(r, 300));
+          }
         }
-      }
-      if (lastError) {
-        try {
-          unlinkSync(tmp);
-        } catch {
-          // nechat být
+        if (lastError) {
+          try {
+            unlinkSync(tmp);
+          } catch {
+            // nechat být
+          }
+          throw new Error(`replace failed: ${lastError.message}`);
         }
-        throw new Error(`replace failed: ${lastError.message}`);
+        // Nový název náhledu - stejný by okno drželo v mezipaměti a ukazovalo starý snímek.
+        mkdirSync(thumbsDir, { recursive: true });
+        const thumb = join(thumbsDir, `${stem}-${Date.now().toString(36)}.jpg`);
+        const thumbOk = await makeThumbnail(clip.file, thumb);
+        if (thumbOk && clip.thumb && clip.thumb !== thumb) {
+          try {
+            unlinkSync(clip.thumb);
+          } catch {
+            // starý náhled už není
+          }
+        }
+        const updated = this.library.update(id, {
+          thumb: thumbOk ? thumb : clip.thumb,
+          durationSeconds: result.durationSeconds,
+          sizeBytes: result.sizeBytes,
+          width: result.width,
+          height: result.height,
+          audioTracks: result.audioTracks ?? undefined,
+          markers,
+          // Obsah je jiný než ten na Kine - nahrání začíná znovu.
+          upload: null,
+        });
+        log(`klip zkrácen (přepsán): ${clip.file} (${result.durationSeconds.toFixed(1)} s)`);
+        return updated!;
       }
-      // Nový název náhledu - stejný by okno drželo v mezipaměti a ukazovalo starý snímek.
+
+      const suffix = vertical ? this.t('clipVerticalSuffix') : this.t('clipEditedSuffix');
+      let out = join(dir, `${stem} (${suffix})${ext}`);
+      for (let n = 2; existsSync(out); n++) out = join(dir, `${stem} (${suffix} ${n})${ext}`);
+      const result = await trimClip(clip.file, out, options, progress);
       mkdirSync(thumbsDir, { recursive: true });
-      const thumb = join(thumbsDir, `${stem}-${Date.now().toString(36)}.jpg`);
-      const thumbOk = await makeThumbnail(clip.file, thumb);
-      if (thumbOk && clip.thumb && clip.thumb !== thumb) {
-        try {
-          unlinkSync(clip.thumb);
-        } catch {
-          // starý náhled už není
-        }
-      }
-      const updated = this.library.update(id, {
-        thumb: thumbOk ? thumb : clip.thumb,
+      const thumb = join(thumbsDir, `${basename(out, ext)}.jpg`);
+      const thumbOk = await makeThumbnail(out, thumb);
+      const created = new Date(new Date(clip.createdAt).getTime() + 1000);
+      const newClip: Clip = {
+        ...clip,
+        id: randomUUID(),
+        file: out,
+        thumb: thumbOk ? thumb : null,
+        title: `${clip.title} (${suffix})`.slice(0, 150),
+        createdAt: created.toISOString(),
         durationSeconds: result.durationSeconds,
         sizeBytes: result.sizeBytes,
         width: result.width,
         height: result.height,
         audioTracks: result.audioTracks ?? undefined,
-        // Obsah je jiný než ten na Kine - nahrání začíná znovu.
+        markers,
         upload: null,
-      });
-      log(`klip zkrácen (přepsán): ${clip.file} (${result.durationSeconds.toFixed(1)} s)`);
-      return updated!;
+        uploadOptions: undefined,
+      };
+      this.library.add(newClip);
+      log(`klip zkrácen (nový): ${out} (${result.durationSeconds.toFixed(1)} s)`);
+      return newClip;
+    } finally {
+      if (options.overlay) {
+        try {
+          unlinkSync(options.overlay.file);
+        } catch {
+          // dočasný soubor už není
+        }
+      }
     }
-
-    const suffix = vertical ? this.t('clipVerticalSuffix') : this.t('clipEditedSuffix');
-    let out = join(dir, `${stem} (${suffix})${ext}`);
-    for (let n = 2; existsSync(out); n++) out = join(dir, `${stem} (${suffix} ${n})${ext}`);
-    const result = await trimClip(clip.file, out, options, progress);
-    mkdirSync(thumbsDir, { recursive: true });
-    const thumb = join(thumbsDir, `${basename(out, ext)}.jpg`);
-    const thumbOk = await makeThumbnail(out, thumb);
-    const created = new Date(new Date(clip.createdAt).getTime() + 1000);
-    const newClip: Clip = {
-      ...clip,
-      id: randomUUID(),
-      file: out,
-      thumb: thumbOk ? thumb : null,
-      title: `${clip.title} (${suffix})`.slice(0, 150),
-      createdAt: created.toISOString(),
-      durationSeconds: result.durationSeconds,
-      sizeBytes: result.sizeBytes,
-      width: result.width,
-      height: result.height,
-      audioTracks: result.audioTracks ?? undefined,
-      upload: null,
-      uploadOptions: undefined,
-    };
-    this.library.add(newClip);
-    log(`klip zkrácen (nový): ${out} (${result.durationSeconds.toFixed(1)} s)`);
-    return newClip;
   }
 
   /**
@@ -1744,7 +1859,13 @@ class KineApp {
       return result.filePaths[0];
     });
     ipcMain.handle('clips:clipNow', () => this.onClipHotkey());
-    ipcMain.handle('clips:trim', (_e, id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur'; audio?: 'mix' | 'game' | 'mic' | 'none' }) => this.trimClip(id, opts));
+    ipcMain.handle('clips:trim', (_e, id: string, opts: TrimIpcRequest) => this.trimClip(id, opts));
+    ipcMain.handle('screenshot:take', () => this.takeScreenshot());
+    ipcMain.handle('screenshot:openDir', () => {
+      const dir = this.screenshotsDir();
+      mkdirSync(dir, { recursive: true });
+      return shell.openPath(dir);
+    });
     ipcMain.handle('app:copy', (_e, text: string) => clipboard.writeText(String(text ?? '')));
     ipcMain.handle('clips:discord', (_e, id: string) => this.shareToDiscord(id));
     ipcMain.handle('clips:discordFile', (_e, file: string, title: string) => this.shareFileToDiscord(String(file ?? ''), String(title ?? '')));

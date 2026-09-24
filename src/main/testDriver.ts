@@ -5,7 +5,7 @@ import { basename, dirname, join } from 'node:path';
 import { BrowserWindow, app, clipboard, nativeImage } from 'electron';
 import { log } from './log';
 import { trayIcon } from './icon';
-import { probe, runFfmpeg } from './ffmpeg';
+import { probe, runFfmpeg, spawnFfmpeg } from './ffmpeg';
 
 /**
  * Samočinná zkouška celé appky bez člověka (KINE_TEST=1).
@@ -820,6 +820,49 @@ export async function runTestDriver(kine: {
       const clipboardImage = await clipboard.has('image/png').catch(() => false);
       result.screenshot = { file: shotFile, size: shotSize, clipboardImage };
       result.screenshotOk = !!shotFile && existsSync(shotFile) && !!shotSize && shotSize.width >= 640 && shotSize.height >= 360 && /[\\/]Screenshots$/.test(dirname(shotFile)) && clipboardImage;
+
+      // Živé vysílání: tlačítko Vysílat -> dialog -> vysílá se na místní RTMP server (místo Cloudflare),
+      // ten proud uloží; musí mít obraz v kvalitě vysílání (720p) i zvuk. Klip během vysílání jde dál.
+      const liveUrl = process.env.KINE_TEST_LIVE_URL;
+      if (liveUrl) {
+        kine.openSettings('clips');
+        await sleep(700);
+        const liveWin = kine.settingsWindow;
+        const liveOut = join(outDir, 'live.flv');
+        rmSync(liveOut, { force: true });
+        const listener = spawnFfmpeg(['-loglevel', 'error', '-y', '-listen', '1', '-timeout', '60', '-i', liveUrl, '-c', 'copy', '-f', 'flv', liveOut]);
+        let listenerLog = '';
+        listener.stderr.on('data', (d) => (listenerLog += d.toString()));
+        const listenerClosed = new Promise<void>((resolve) => listener.on('close', () => resolve()));
+        await sleep(800);
+        let opened = false;
+        let liveState = '';
+        let sideLive: string | null = null;
+        let clipDuringLive = false;
+        if (liveWin && !liveWin.isDestroyed()) {
+          opened = await liveWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-live'); if (b) b.click(); return !!document.querySelector('.live-dialog'); })()`);
+          await sleep(300);
+          await shot(liveWin, 'settings-live-dialog');
+          await liveWin.webContents.executeJavaScript(`(() => { const i = document.querySelector('input.live-title'); if (i) i.value = 'E2E live'; const b = document.querySelector('.live-start'); if (b) b.click(); return !!b; })()`);
+          for (let i = 0; i < 60 && liveState !== 'live'; i++) {
+            await sleep(500);
+            liveState = (kine as any).live.current().state;
+          }
+          await sleep(5000);
+          sideLive = await liveWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-live.on .live-time'); return b ? b.textContent : null; })()`);
+          await shot(liveWin, 'settings-live');
+          clipDuringLive = !!(await (kine as any).onClipHotkey());
+          await sleep(1500);
+        }
+        await (kine as any).stopLive();
+        await Promise.race([listenerClosed, sleep(8000)]);
+        if (listener.exitCode === null) listener.kill();
+        const info = existsSync(liveOut) ? await probe(liveOut).catch(() => null) : null;
+        result.live = { opened, liveState, sideLive, clipDuringLive, after: (kine as any).live.current().state, info, listenerLog: listenerLog.slice(-300) };
+        result.liveOk =
+          opened && liveState === 'live' && !!sideLive && clipDuringLive && (kine as any).live.current().state === 'idle' &&
+          !!info && (info.durationSeconds ?? 0) >= 4 && (info.height ?? 0) > 0 && (info.height ?? 0) <= 720 && info.hasAudio;
+      }
     }
 
     // Kvalita: předvolba "Doporučené (1080p60)", řádek o tom, kdo kóduje (grafika / procesor), a posun zvuku ±300 ms.
@@ -1026,6 +1069,7 @@ export async function runTestDriver(kine: {
       'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
       'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'screenshotOk',
     ];
+    if (process.env.KINE_TEST_LIVE_URL) common.push('liveOk');
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];
     if (process.env.KINE_TEST_FAKE_AUDIO) checks.push('fakeAudioMeter', 'fakeAudioClip');
     if (process.env.KINE_TEST_FAKE_AUDIO === 'full') checks.push('multiTrackOk', 'trimAudioSelect');

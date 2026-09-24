@@ -1,5 +1,6 @@
 import { CATEGORY_KEYS, LANGS, VISIBILITIES, type Settings } from './types';
 import { isHotkey } from './hotkeys';
+import { LIVE_QUALITIES } from './live';
 
 /**
  * Výchozí nastavení a jeho očištění po načtení ze souboru.
@@ -18,6 +19,8 @@ export const DEFAULT_SETTINGS: Settings = {
   toggleHotkey: 'Ctrl+F9',
   recordHotkey: 'Ctrl+F8',
   screenshotHotkey: 'Alt+F8',
+  liveQuality: '720p30',
+  liveTitle: '',
   clipSeconds: 30,
   maxHeight: 1080,
   fps: 60,
@@ -124,6 +127,8 @@ export function sanitizeSettings(input: unknown): Settings {
     // Prázdné = nahrávání zápasu bez zkratky (jen tlačítkem); chybějící klíč ze starší verze = výchozí.
     recordHotkey: raw.recordHotkey === '' ? '' : isHotkey(raw.recordHotkey) ? (raw.recordHotkey as string) : d.recordHotkey,
     screenshotHotkey: raw.screenshotHotkey === '' ? '' : isHotkey(raw.screenshotHotkey) ? (raw.screenshotHotkey as string) : d.screenshotHotkey,
+    liveQuality: oneOf(raw.liveQuality, LIVE_QUALITIES, d.liveQuality),
+    liveTitle: text(raw.liveTitle, d.liveTitle, 100),
     clipSeconds: Number.isFinite(clipSeconds)
       ? Math.min(CLIP_SECONDS_MAX, Math.max(CLIP_SECONDS_MIN, Math.round(clipSeconds)))
       : d.clipSeconds,

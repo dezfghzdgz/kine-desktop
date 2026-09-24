@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AudioLevels, CaptureCommand, CaptureEvent, Clip, DisplayInfo, GameSource, ProcessInfo, Settings, Status, UploadRequest } from '../shared/types';
+import type { AudioLevels, CaptureCommand, CaptureEvent, Clip, DisplayInfo, GameSource, LiveQuality, LiveStatus, ProcessInfo, Settings, Status, UploadRequest } from '../shared/types';
 
 /**
  * Most mezi stránkami a hlavním procesem. Stránky nemají Node ani
@@ -80,6 +80,11 @@ const kine = {
   togglePause: (): Promise<void> => ipcRenderer.invoke('capture:pause'),
   /** Start / stop nahrávání celého zápasu (uloží se jako dlouhý klip). */
   toggleRecording: (): Promise<void> => ipcRenderer.invoke('capture:record'),
+  /** Živé vysílání na Kine (tlačítko Vysílat): název a kvalita; chyba = proč to nešlo. */
+  startLive: (opts: { title: string; quality: LiveQuality }): Promise<LiveStatus> => ipcRenderer.invoke('live:start', opts),
+  stopLive: (): Promise<void> => ipcRenderer.invoke('live:stop'),
+  /** Stránka vysílání na Kine (diváci, chat). */
+  openLivePage: (): Promise<void> => ipcRenderer.invoke('live:openPage'),
 
   loginBrowser: (): Promise<void> => ipcRenderer.invoke('auth:loginBrowser'),
   cancelBrowserLogin: (): Promise<void> => ipcRenderer.invoke('auth:cancelBrowser'),
@@ -135,6 +140,8 @@ const kineCapture = {
   onCommand: (cb: (c: CaptureCommand) => void) => on<CaptureCommand>('capture:command', cb),
   /** Kousek proudu: 'av' (obraz + zvuk hry, výchozí) nebo 'mic' (samostatný proud mikrofonu). */
   chunk: (generation: number, data: ArrayBuffer, kind: 'av' | 'mic' = 'av') => ipcRenderer.send('capture:chunk', generation, data, kind),
+  /** Kousek proudu živého vysílání (generace vysílání). */
+  liveChunk: (generation: number, data: ArrayBuffer) => ipcRenderer.send('capture:liveChunk', generation, data),
   event: (event: CaptureEvent) => ipcRenderer.send('capture:event', event),
   sources: (): Promise<{ id: string; name: string; display_id: string }[]> => ipcRenderer.invoke('capture:sources'),
   getSettings: (): Promise<Settings> => ipcRenderer.invoke('settings:get'),

@@ -9,6 +9,8 @@ import { performanceProfile } from '../shared/performance';
 import { clear, clipMeta, errorText, fileUrl, formatBytes, formatDate, formatDuration, h, isPortrait, thumbImages } from './ui';
 import { closePlayer, openPlayer, openPlayerId, type Neighbors, type PlayerHandle } from './player';
 import { VIDEO_LANGS, openUploadDialog } from './uploadDialog';
+import { openLiveDialog } from './liveDialog';
+import { liveElapsed } from '../shared/live';
 
 /**
  * Hlavní okno: v režimu "Kine + klipy" první záložka Kine - web Kine přes
@@ -96,10 +98,12 @@ async function init() {
   const wanted = params.get('tab');
   if (!settings.onboarded || wanted === 'wizard') wizardStep = 0;
   else if (wanted && visibleTabs().includes(wanted as Tab)) tab = wanted as Tab;
+  else if (wanted === 'live') tab = 'clips';
   else if (settings.appMode === 'full') tab = 'kine';
   document.documentElement.lang = settings.lang;
   document.title = status.variant === 'clipper' ? 'Kine Clipper' : 'Kine';
   render();
+  if (wanted === 'live' && wizardStep === null) openLive();
   void refreshGameNames();
 
   kine.onSettings((s) => {
@@ -151,6 +155,14 @@ async function init() {
     void refreshAudioDevices();
   });
   kine.onNavigate((target) => {
+    if (target === 'live') {
+      // Lišta u hodin: "Vysílat na Kine…" - okno s dialogem.
+      if (!visibleTabs().includes(tab) || tab === 'kine') tab = 'clips';
+      wizardStep = null;
+      render();
+      openLive();
+      return;
+    }
     if (visibleTabs().includes(target as Tab)) {
       tab = target as Tab;
       wizardStep = null;
@@ -577,12 +589,14 @@ function recordingTime(): string {
 }
 let recTimer: ReturnType<typeof setInterval> | null = null;
 function syncRecTimer() {
-  if (status.recordingSince && !recTimer) {
+  const ticking = !!status.recordingSince || status.live.state === 'live';
+  if (ticking && !recTimer) {
     recTimer = setInterval(() => {
+      if (status.live.state === 'live') for (const el of app.querySelectorAll('.live-time')) el.textContent = liveElapsed(status.live.since);
       const el = app.querySelector('.rec-time');
       if (el) el.textContent = recordingTime();
     }, 1000);
-  } else if (!status.recordingSince && recTimer) {
+  } else if (!ticking && recTimer) {
     clearInterval(recTimer);
     recTimer = null;
   }
@@ -627,6 +641,44 @@ function tabButton(name: Tab) {
  * Nastavení zbytek; dole karta se stavem nahrávání, tlačítky "Uložit klip"
  * a "Pozastavit" a účtem.
  */
+/** Tlačítko živého vysílání v panelu podle stavu. */
+function liveButton(): HTMLElement {
+  const live = status.live;
+  if (live.state === 'idle') {
+    return h('button', { class: 'small quiet side-live', title: t('liveDialogTitle'), onclick: () => openLive() }, h('span', { class: 'live-dot' }), t('sideLive'));
+  }
+  if (live.state === 'starting') {
+    return h('button', { class: 'small side-live pending', disabled: true }, h('span', { class: 'live-dot' }), t('sideLiveConnecting'));
+  }
+  const reconnecting = live.state === 'reconnecting';
+  return h(
+    'button',
+    { class: `small side-live on ${reconnecting ? 'reconnecting' : ''}`, title: live.title, onclick: () => void kine.stopLive() },
+    h('span', { class: 'rec-dot' }),
+    h('span', { class: 'live-time' }, reconnecting ? t('sideLiveReconnecting') : liveElapsed(live.since)),
+    ' · ' + t('sideLiveStop')
+  );
+}
+
+/** Dialog "Vysílat na Kine" (tlačítko v panelu, lišta u hodin). */
+function openLive() {
+  if (status.live.state !== 'idle') return;
+  openLiveDialog({
+    settings,
+    t,
+    defaultTitle: settings.liveTitle || status.game || '',
+    loggedIn: !!status.account,
+    onStart: async (opts) => {
+      await kine.startLive(opts);
+    },
+    onOpenStudio: () => void kine.openKine('/live'),
+    onSignIn: () => {
+      tab = 'account';
+      render();
+    },
+  });
+}
+
 function renderSide() {
   const st = statusText();
   const tabs = visibleTabs();
@@ -705,6 +757,11 @@ function renderSide() {
           '📷'
         )
       ),
+      // Živé vysílání na Kine: dialog, pak čas vysílání + Ukončit; pod tím stránka vysílání s chatem.
+      h('div', { class: 'side-actions' }, liveButton()),
+      status.live.state !== 'idle' && status.live.watchUrl
+        ? h('button', { class: 'side-sub side-live-open', onclick: () => void kine.openLivePage() }, '💬 ' + t('sideLiveOpen'))
+        : null,
       account
         ? h(
             'button',
@@ -738,6 +795,10 @@ function renderKineBar() {
       : null,
     ...status.hotkeyProblems.map((p) => h('span', { class: 'bar-item warn', title: p }, '⚠ ', p)),
     h('span', { class: 'grow' }),
+    // Během vysílání: čas a Ukončit i nad webem (chat je na stránce vysílání v okně).
+    status.live.state === 'live' || status.live.state === 'reconnecting'
+      ? h('span', { class: 'side-actions bar-live' }, liveButton())
+      : null,
     h('button', { class: 'small quiet', onclick: go('clips') }, clips.length > 0 ? t('barClipsCount', { count: clips.length }) : t('tabClips')),
     h('button', { class: 'small quiet', onclick: go('settings') }, t('tabSettings'))
   );

@@ -95,6 +95,10 @@ export type Settings = {
   recordHotkey: string;
   /** Zkratka na snímek obrazovky (PNG do složky Screenshots + do schránky; prázdné = vypnuto). */
   screenshotHotkey: string;
+  /** Kvalita živého vysílání na Kine (tlačítko Vysílat). */
+  liveQuality: LiveQuality;
+  /** Název posledního vysílání (předvyplní se příště). */
+  liveTitle: string;
   /** Kolik sekund zpět klip sahá. */
   clipSeconds: number;
   /** Výška obrazu: 0 = jako obrazovka. */
@@ -279,6 +283,8 @@ export type Status = {
   recordingSince: number | null;
   /** Hardwarový kodér H.264 dostupný (podle WebCodecs); null = zásobník ještě neběžel / nejde zjistit. */
   hwEncoder: boolean | null;
+  /** Živé vysílání z appky. */
+  live: LiveStatus;
 };
 
 export type GameSource = 'steam' | 'custom' | 'known' | 'fullscreen';
@@ -292,6 +298,9 @@ export type CaptureCommand =
   | { type: 'start'; settings: Settings; generation: number }
   | { type: 'restart'; generation: number }
   | { type: 'stop' }
+  /** Živé vysílání: druhý recorder (nižší datový tok, hra + mikrofon smíchané) na stejném snímání. */
+  | { type: 'live-start'; generation: number; preset: LivePreset }
+  | { type: 'live-stop' }
   /** Měřáky zvuku rychle (někdo se dívá do nastavení), nebo jednou za sekundu. */
   | { type: 'meters'; fast: boolean };
 
@@ -319,7 +328,28 @@ export type CaptureEvent =
   /** Hladiny zvuku (0-1, RMS) zhruba každou sekundu - měřáky v nastavení a hlídání ticha. */
   | { type: 'levels'; generation: number; levels: AudioLevels }
   /** Změnilo se výchozí výstupní zařízení Windows (nový název) - loopback je přilepený na staré, snímání se má rozjet znovu. */
-  | { type: 'defaultOutputChanged'; generation: number; device: string };
+  | { type: 'defaultOutputChanged'; generation: number; device: string }
+  /** Recorder živého vysílání běží (generace vysílání, ne zásobníku). */
+  | { type: 'live-started'; generation: number; mimeType: string; width: number; height: number; fps: number }
+  /** Recorder živého vysílání skončil (povel, nebo nový start snímání) - poslední kousky už odešly. */
+  | { type: 'live-stopped'; generation: number }
+  | { type: 'live-error'; generation: number; message: string };
+
+/** Kvalita živého vysílání: rozlišení, snímky, datový tok. */
+export type LiveQuality = '720p30' | '1080p30' | '1080p60';
+export type LivePreset = { width: number; height: number; fps: number; videoKbps: number };
+
+/** Stav živého vysílání z appky (tlačítko Vysílat). */
+export type LiveStatus = {
+  state: 'idle' | 'starting' | 'live' | 'reconnecting';
+  /** Od kdy je živě (ms od epochy); null = ještě ne. */
+  since: number | null;
+  title: string;
+  /** Stránka vysílání na Kine (diváci, chat). */
+  watchUrl: string | null;
+  /** Proč vysílání nešlo začít / spadlo (text pro hráče). */
+  error: string | null;
+};
 
 /** Co právě teče do zvuku klipu. */
 export type AudioLevels = {

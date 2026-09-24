@@ -20,7 +20,7 @@ import {
   session,
   shell,
 } from 'electron';
-import { CATEGORY_KEYS, TRASH_DAYS, VISIBILITIES, type AudioLevels, type CaptureEvent, type Clip, type DisplayInfo, type Settings, type Status, type UploadRequest, type Visibility } from '../shared/types';
+import { CATEGORY_KEYS, TRASH_DAYS, VISIBILITIES, type AudioLevels, type CaptureEvent, type Clip, type DisplayInfo, type LiveQuality, type LiveStatus, type Settings, type Status, type UploadRequest, type Visibility } from '../shared/types';
 import { chaptersText, markerChapters, parseHashtags } from '../shared/upload';
 import { hexToRgbTriplet } from '../shared/plan';
 import { makeT, type Key } from '../shared/i18n';
@@ -44,7 +44,9 @@ import { checkForUpdates, initUpdater, onGameEnded as updaterGameEnded } from '.
 import { runTestDriver } from './testDriver';
 import { WinHelper } from './winHelper';
 import { makeGif, makeThumbnail, mergeClips, trimClip } from './edit';
-import { runFfmpeg } from './ffmpeg';
+import { runFfmpeg, spawnFfmpeg } from './ffmpeg';
+import { LiveController } from './live';
+import { LIVE_QUALITIES, cleanLiveError, liveElapsed, liveErrorTextKey } from '../shared/live';
 import { GIF_MAX_SECONDS, normalizeSpeed, shiftMarkers, type TextPosition } from './editPlan';
 import { APP_USER_MODEL_IDS, PRODUCT_NAMES, detectVariant, modeForVariant, siblingExe } from './variant';
 import { brandIcon, trayIcon } from './icon';
@@ -146,6 +148,10 @@ class KineApp {
   settings!: SettingsStore;
   library!: ClipLibrary;
   capture!: CaptureManager;
+  /** Živé vysílání z appky na Kine (tlačítko Vysílat). */
+  live!: LiveController;
+  /** Zásobník rozjelo až vysílání (nebyla hra / ruční režim) - po konci vysílání se zase vypne. */
+  private liveStartedCapture = false;
   games!: GameWatcher;
   gameEvents!: GameEvents;
   /** Má ikona u hodin právě červenou tečku (nahrávání)? Ať se obrázek nemění při každém rebuildTray. */
@@ -258,6 +264,7 @@ class KineApp {
         this.pushStatus();
         void this.recoverRecordings();
       },
+      onLiveEvent: (event) => this.live?.handleEvent(event),
       onWarning: (kind, message) => {
         // Jednou za běh appky - ne při každém startu zásobníku.
         if (this.warnedOnce.has(kind)) return;
@@ -322,6 +329,20 @@ class KineApp {
       helper: this.helper,
       onFire: (id) => this.onHotkey(id),
       onProblemsChanged: () => this.pushStatus(),
+    });
+
+    this.live = new LiveController({
+      capture: this.capture,
+      api: () => api,
+      settings: () => this.settings.get(),
+      siteUrl: () => this.settings.get().siteUrl,
+      spawn: (args) => spawnFfmpeg(args),
+      log,
+      onChange: () => this.pushStatus(),
+      notify: (kind, info) => this.onLiveNotice(kind, info),
+      onEnded: () => this.afterLive(),
+      // Samočinná zkouška vysílá na místní RTMP server místo Kine.
+      testUrl: process.env.KINE_TEST ? process.env.KINE_TEST_LIVE_URL ?? null : null,
     });
 
     this.uploader = new Uploader({
@@ -510,7 +531,8 @@ class KineApp {
     if (!game && prev) {
       // Nahrávaný zápas skončil s hrou - uložit, ať je v okýnku po hře.
       if (this.capture.recordingInfo()) await this.finishRecording('game-ended');
-      if (s.detection === 'games') await this.capture.stop().catch(() => undefined);
+      // Během vysílání zásobník běží dál (vysílání ho potřebuje) - vypne se po konci vysílání.
+      if (s.detection === 'games' && !this.live.active()) await this.capture.stop().catch(() => undefined);
       this.sleepKineView(false);
       // Aktualizace, která vyšla během hry, se stáhne teď.
       updaterGameEnded();
@@ -858,8 +880,65 @@ class KineApp {
 
   /** Zastaví zásobník, ale nejdřív uloží rozjetou nahrávku - jinak by kousky zmizely s ním. */
   private async stopCapture(reason: 'game-ended' | 'buffer-off' | 'quit'): Promise<void> {
+    // Vysílání běží na stejném snímání - vypnout zásobník by ukončilo i vysílání.
+    if (reason !== 'quit' && this.live?.active()) {
+      void this.toast.show(this.t('toastLiveKeepsCapture'), 'warn');
+      return;
+    }
     if (this.capture.recordingInfo()) await this.finishRecording(reason);
     await this.capture.stop();
+  }
+
+  // ---- živé vysílání -------------------------------------------------------------
+
+  /** Tlačítko Vysílat (okno) / lišta: začne vysílat na kanál přihlášeného hráče. */
+  async startLive(opts: { title?: unknown; quality?: unknown }): Promise<LiveStatus> {
+    const s = this.settings.get();
+    const quality = (LIVE_QUALITIES as readonly string[]).includes(String(opts?.quality)) ? (opts.quality as LiveQuality) : s.liveQuality;
+    const title = String(opts?.title ?? '').trim().slice(0, 100) || s.liveTitle || this.games.current()?.name || this.t('liveDefaultTitle');
+    if (!this.auth.current() && !(process.env.KINE_TEST && process.env.KINE_TEST_LIVE_URL)) throw new Error('not-logged-in');
+    this.settings.update({ liveTitle: title, liveQuality: quality });
+    if (!this.live.active()) this.liveStartedCapture = this.capture.state !== 'on';
+    return this.live.start({ title, quality });
+  }
+
+  async stopLive(): Promise<void> {
+    await this.live.stop('user');
+  }
+
+  /** Stránka vysílání na Kine (diváci, chat) - v Kine do PC v okně, v Klipovači v prohlížeči. */
+  openLivePage(): void {
+    const url = this.live.current().watchUrl;
+    const site = this.settings.get().siteUrl;
+    this.openKine(url && url.startsWith(site) ? url.slice(site.length) : '/live');
+  }
+
+  /** Okno s dialogem Vysílat (z lišty u hodin). */
+  openLiveDialog(): void {
+    this.openSettings('live');
+  }
+
+  /** Po konci vysílání: zásobník, který rozjelo jen vysílání, se zase vypne. */
+  private afterLive(): void {
+    const s = this.settings.get();
+    const keep = !this.paused && (s.detection === 'always' || (s.detection === 'games' && !!this.games.current()));
+    if (this.liveStartedCapture && !keep && this.capture.state === 'on') void this.stopCapture('buffer-off');
+    this.liveStartedCapture = false;
+    this.pushStatus();
+  }
+
+  private liveErrorText(message: string | undefined): string {
+    const clean = cleanLiveError(message ?? '');
+    const key = liveErrorTextKey(clean);
+    return this.t(key, key === 'liveErrOther' ? { message: clean.slice(0, 160) } : {});
+  }
+
+  private onLiveNotice(kind: 'live' | 'reconnecting' | 'ended' | 'failed' | 'slow', info: { error?: string; duration?: string }): void {
+    if (kind === 'live') void this.toast.show(this.t('toastLiveStarted'), 'ok', { notification: true, onClick: () => this.openLivePage() });
+    else if (kind === 'reconnecting') void this.toast.show(this.t('toastLiveReconnecting'), 'warn');
+    else if (kind === 'ended') void this.toast.show(this.t('toastLiveEnded', { duration: info.duration ?? '' }), 'ok', { onClick: () => this.openKine('/live') });
+    else if (kind === 'slow') void this.toast.show(this.t('toastLiveSlow'), 'warn', { notification: true });
+    else void this.toast.show(this.t('toastLiveFailed', { message: this.liveErrorText(info.error) }), 'error', { notification: true });
   }
 
   /**
@@ -926,6 +1005,10 @@ class KineApp {
 
   async onToggleHotkey(): Promise<void> {
     const s = this.settings.get();
+    if (this.live.active()) {
+      void this.toast.show(this.t('toastLiveKeepsCapture'), 'warn');
+      return;
+    }
     if (this.capture.state === 'on' || this.capture.state === 'starting') {
       await this.stopCapture('buffer-off');
       void this.toast.show(this.t('toastBufferOff'), 'warn');
@@ -1096,6 +1179,9 @@ class KineApp {
         enabled: this.capture.state === 'on',
       },
       { label: this.t('trayScreenshot', { hotkey: s.screenshotHotkey ? hotkeyLabel(s.screenshotHotkey) : '' }).replace(/\s*\(\)$/, ''), click: () => void this.takeScreenshot() },
+      this.live.current().state === 'idle'
+        ? { label: this.t('trayLiveStart'), click: () => this.openLiveDialog() }
+        : { label: this.t('trayLiveStop', { time: liveElapsed(this.live.current().since) }), click: () => void this.stopLive() },
       { label: this.t('trayLibrary'), click: () => this.openSettings('clips') },
       { label: this.t('traySettings'), click: () => this.openSettings('settings') },
       { label: this.paused ? this.t('trayResume') : this.t('trayPause'), click: () => void this.togglePause() },
@@ -1114,6 +1200,10 @@ class KineApp {
   }
 
   private async togglePause(): Promise<void> {
+    if (!this.paused && this.live.active()) {
+      void this.toast.show(this.t('toastLiveKeepsCapture'), 'warn');
+      return;
+    }
     this.paused = !this.paused;
     if (this.paused) await this.stopCapture('buffer-off');
     else if (this.settings.get().detection === 'always' || (this.settings.get().detection === 'games' && this.games.current())) {
@@ -1494,6 +1584,7 @@ class KineApp {
       autoClipsLive: this.gameEvents.live(),
       recordingSince: this.capture.recordingInfo()?.since ?? null,
       hwEncoder: this.capture.hwEncoder,
+      live: this.live.current(),
     };
   }
 
@@ -1812,6 +1903,12 @@ class KineApp {
     ipcMain.on('capture:chunk', (e, generation: number, data: ArrayBuffer, kind: 'av' | 'mic' = 'av') => {
       if (isCaptureSender(e)) this.capture.handleChunk(generation, data, kind === 'mic' ? 'mic' : 'av');
     });
+    ipcMain.on('capture:liveChunk', (e, generation: number, data: ArrayBuffer) => {
+      if (isCaptureSender(e)) this.live.handleChunk(generation, data);
+    });
+    ipcMain.handle('live:start', (_e, opts: { title?: unknown; quality?: unknown }) => this.startLive(opts ?? {}));
+    ipcMain.handle('live:stop', () => this.stopLive());
+    ipcMain.handle('live:openPage', () => this.openLivePage());
     ipcMain.on('capture:event', (e, event: CaptureEvent) => {
       if (isCaptureSender(e)) this.capture.handleEvent(event);
     });
@@ -2019,11 +2116,16 @@ class KineApp {
     void this.gameEvents.stop();
     // Rozjetá nahrávka se před koncem uloží (dlouhá může chvíli trvat - proto delší strop).
     const recording = !!this.capture.recordingInfo();
-    void this.stopCapture('quit').finally(() => {
-      this.toast.destroy();
-      app.exit(0);
-    });
-    setTimeout(() => app.exit(0), recording ? 5 * 60 * 1000 : 4000);
+    // Vysílání se ukončí pořádně (Cloudflare uzavře záznam hned, ne až po minutě ticha).
+    void this.live
+      .stop('quit')
+      .catch(() => undefined)
+      .then(() => this.stopCapture('quit'))
+      .finally(() => {
+        this.toast.destroy();
+        app.exit(0);
+      });
+    setTimeout(() => app.exit(0), recording ? 5 * 60 * 1000 : 6000);
   }
 }
 

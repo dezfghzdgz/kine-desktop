@@ -1,5 +1,5 @@
 import type { KineCaptureBridge } from '../preload/preload';
-import type { CaptureCommand, Settings } from '../shared/types';
+import type { CaptureCommand, LivePreset, Settings } from '../shared/types';
 
 /**
  * Skrytá snímací stránka.
@@ -19,6 +19,12 @@ import type { CaptureCommand, Settings } from '../shared/types';
  *
  * Kodek: H.264 první, protože ho grafiky kódují hardwarově a výsledek je
  * mp4, které přehraje všechno. Pak VP9 a VP8.
+ *
+ * Živé vysílání (tlačítko Vysílat): třetí recorder na stejném snímání -
+ * kopie obrazové stopy zmenšená na kvalitu vysílání, zvuk hry a mikrofon
+ * smíchané přes Web Audio (s hlasitostmi z nastavení), vždy H.264 kvůli
+ * RTMP. Klipy mezi tím běží dál; restart zásobníku při klipu vysílání
+ * nepřeruší (má vlastní stopy).
  */
 declare const window: Window & { kineCapture: KineCaptureBridge };
 const bridge = window.kineCapture;
@@ -443,7 +449,113 @@ function stopRecorders() {
   micRecorder = null;
 }
 
+// ---- živé vysílání ----------------------------------------------------------------------------
+
+type LiveSession = {
+  recorder: MediaRecorder;
+  generation: number;
+  /** Kopie obrazové stopy a smíchaný zvuk - zastaví se s koncem vysílání. */
+  tracks: MediaStreamTrack[];
+  ctx: AudioContext;
+  chain: Promise<void>;
+};
+let live: LiveSession | null = null;
+
+/** Formát pro vysílání: vždy H.264 (RTMP / FLV nic jiného nebere), s grafikou High profile. */
+function liveMime(): string | null {
+  const high = hwEncoder === true ? ['video/webm;codecs=avc1.640028,opus', 'video/webm;codecs=avc1.64001f,opus'] : [];
+  for (const m of [...high, 'video/webm;codecs=h264,opus', 'video/webm;codecs=avc1,opus']) if (MediaRecorder.isTypeSupported(m)) return m;
+  return null;
+}
+
+async function startLive(gen: number, preset: LivePreset): Promise<void> {
+  stopLive();
+  if (!stream) throw new Error('capture-off: snímání neběží');
+  const source = stream.getVideoTracks()[0];
+  if (!source) throw new Error('capture-off: není obraz');
+  const mime = liveMime();
+  if (!mime) throw new Error('h264-unsupported');
+  // Vlastní kopie obrazu: zmenší se na kvalitu vysílání, zásobník s klipy zůstává ve své.
+  const video = source.clone();
+  video.contentHint = 'motion';
+  try {
+    await video.applyConstraints({ width: { max: preset.width }, height: { max: preset.height }, frameRate: { max: preset.fps } });
+  } catch {
+    // Zmenšit nejde - vysílá se v rozlišení snímání (recorder datový tok stejně drží).
+  }
+  // Zvuk: hra + mikrofon do jedné stopy (RTMP má jen jednu), hlasitosti jako u klipů.
+  const ctx = new AudioContext({ sampleRate: 48000 });
+  if (ctx.state !== 'running') void ctx.resume().catch(() => undefined);
+  const dest = ctx.createMediaStreamDestination();
+  // Hlasitá hra + hlas by se v součtu přebudily - omezovač těsně pod nulou (jako alimiter u klipů).
+  const limiter = ctx.createDynamicsCompressor();
+  limiter.threshold.value = -1.5;
+  limiter.knee.value = 0;
+  limiter.ratio.value = 20;
+  limiter.attack.value = 0.003;
+  limiter.release.value = 0.1;
+  limiter.connect(dest);
+  const mix = (track: MediaStreamTrack, gain: number) => {
+    const node = ctx.createGain();
+    node.gain.value = Number.isFinite(gain) ? Math.max(0, Math.min(2, gain)) : 1;
+    ctx.createMediaStreamSource(new MediaStream([track])).connect(node);
+    node.connect(limiter);
+  };
+  const systemTrack = stream.getAudioTracks()[0] ?? null;
+  const micTrack = micStream?.getAudioTracks()[0] ?? null;
+  if (systemTrack) mix(systemTrack, currentSettings?.systemGain ?? 1);
+  if (micTrack) mix(micTrack, currentSettings?.micGain ?? 1);
+  if (!systemTrack && !micTrack) {
+    // Bez zvuku by některé přehrávače proud nebraly - tiché ticho.
+    const silent = ctx.createConstantSource();
+    const zero = ctx.createGain();
+    zero.gain.value = 0;
+    silent.connect(zero);
+    zero.connect(dest);
+    silent.start();
+  }
+  const audio = dest.stream.getAudioTracks()[0];
+  const options: MediaRecorderOptions & { videoKeyFrameIntervalDuration?: number } = {
+    mimeType: mime,
+    videoBitsPerSecond: preset.videoKbps * 1000,
+    audioBitsPerSecond: 160_000,
+    // Cloudflare chce klíčový snímek aspoň každé 2 s.
+    videoKeyFrameIntervalDuration: 2000,
+  };
+  const rec = new MediaRecorder(new MediaStream([video, ...(audio ? [audio] : [])]), options);
+  const session: LiveSession = { recorder: rec, generation: gen, tracks: [video, ...(audio ? [audio] : [])], ctx, chain: Promise.resolve() };
+  rec.ondataavailable = (e) => {
+    if (!e.data || e.data.size === 0) return;
+    const blob = e.data;
+    session.chain = session.chain.then(async () => {
+      bridge.liveChunk(gen, await blob.arrayBuffer());
+    });
+  };
+  rec.onerror = (e) => report({ type: 'live-error', generation: gen, message: String((e as ErrorEvent).error ?? e) });
+  rec.onstop = () => {
+    for (const track of session.tracks) track.stop();
+    void session.ctx.close().catch(() => undefined);
+    void session.chain.then(() => report({ type: 'live-stopped', generation: gen }));
+  };
+  rec.start(1000);
+  live = session;
+  const vs = video.getSettings();
+  report({ type: 'live-started', generation: gen, mimeType: rec.mimeType || mime, width: vs.width ?? 0, height: vs.height ?? 0, fps: Math.round(vs.frameRate ?? preset.fps) });
+}
+
+function stopLive() {
+  const session = live;
+  live = null;
+  if (!session) return;
+  if (session.recorder.state !== 'inactive') session.recorder.stop();
+  else {
+    for (const track of session.tracks) track.stop();
+    void session.ctx.close().catch(() => undefined);
+  }
+}
+
 function stopAll() {
+  stopLive();
   stopRecorders();
   stopMeters();
   for (const track of stream?.getTracks() ?? []) track.stop();
@@ -458,6 +570,16 @@ function stopAll() {
 let currentSettings: Settings | null = null;
 
 bridge.onCommand(async (command: CaptureCommand) => {
+  // Vysílání má vlastní hlášení chyb - chyba vysílání nesmí shodit zásobník s klipy.
+  if (command.type === 'live-start' || command.type === 'live-stop') {
+    try {
+      if (command.type === 'live-start') await startLive(command.generation, command.preset);
+      else stopLive();
+    } catch (e) {
+      report({ type: 'live-error', generation: command.type === 'live-start' ? command.generation : live?.generation ?? 0, message: (e as Error).message ?? String(e) });
+    }
+    return;
+  }
   try {
     if (command.type === 'start') {
       stopAll();

@@ -546,3 +546,22 @@ button.side-audio-warn:hover { text-decoration: underline; background: none; }
 .tl-tick { position: absolute; top: 10px; width: 3px; height: 24px; margin-left: -1px; border-radius: 2px; background: #ffd23f; box-shadow: 0 0 3px rgba(0, 0, 0, 0.6); z-index: 2; }
 .trim-text { flex: 1 1 220px; min-width: 180px; width: auto; min-height: 32px; padding: 4px 10px; }
 .side-actions button.side-shot { flex: 0 0 auto; width: 40px; padding: 4px 0; }
+
+/* Živé vysílání: tlačítko v panelu, dialog */
+.live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); margin-right: 6px; vertical-align: 1px; }
+.side-actions button.side-live { color: var(--text); }
+.side-actions button.side-live:not(:disabled):hover .live-dot { box-shadow: 0 0 8px rgba(255, 107, 107, 0.9); }
+.side-actions button.side-live.on { color: var(--danger); box-shadow: inset 0 0 0 1px rgba(255, 107, 107, 0.55); background-color: rgba(255, 107, 107, 0.12); background-image: none; font-weight: 600; font-variant-numeric: tabular-nums; }
+.side-actions button.side-live.on.reconnecting { color: var(--warn, #f5a623); box-shadow: inset 0 0 0 1px rgba(245, 166, 35, 0.55); background-color: rgba(245, 166, 35, 0.1); }
+.side-actions button.side-live.pending { opacity: 0.8; }
+button.side-sub.side-live-open { background: none; border: none; box-shadow: none; padding: 2px 0; min-height: 0; text-align: left; color: var(--text-dim); cursor: pointer; }
+button.side-sub.side-live-open:hover { color: var(--text); text-decoration: underline; }
+.live-dialog { width: min(520px, 94vw); }
+.live-dialog .player-head .title { display: flex; align-items: center; }
+.live-body { padding: 16px 18px 18px; }
+.live-body .field input, .live-body .field select { width: 100%; }
+.live-body .live-studio { align-self: flex-start; }
+.live-actions { gap: 10px; }
+.live-actions .live-start { min-width: 160px; }
+.kine-bar .bar-live { margin: 0 6px 0 0; }
+.kine-bar .bar-live button.small { flex: none; }

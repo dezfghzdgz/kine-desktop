@@ -39,6 +39,16 @@ export type ConfirmInput = {
 
 export type VideoStatus = 'ready' | 'processing' | 'not-found';
 
+/** Živé vysílání na Kine (/api/live/me): klíč pro vysílání a stav přenosu. */
+export type LiveSetup = {
+  /** Má server Cloudflare Stream? */
+  configured: boolean;
+  /** Proběhla na Kine migrace živého vysílání? */
+  migrated: boolean;
+  input: { rtmpsUrl: string; streamKey: string } | null;
+  stream: { ownerId: string; title: string; description: string; category: string | null } | null;
+};
+
 export type KineApi = {
   siteUrl(): string;
   createUploadUrl(fileSize: number): Promise<UploadTarget>;
@@ -49,7 +59,24 @@ export type KineApi = {
    * Kine vidět. Volá se po nahrání dokola, dokud není hotovo.
    */
   status(videoId: string): Promise<VideoStatus>;
+  /** Klíč a stav živého vysílání přihlášeného hráče. */
+  liveSetup(): Promise<LiveSetup>;
+  /** Založí klíč pro vysílání (když ještě není) a vrátí ho. */
+  liveCreate(): Promise<LiveSetup>;
+  /** Název, popis a kategorie přenosu (vidí je diváci na Kine). */
+  liveDetails(details: { title: string; description: string; category: string | null }): Promise<void>;
 };
+
+function liveSetupFrom(data: any): LiveSetup {
+  const input = data?.input && typeof data.input.rtmpsUrl === 'string' && typeof data.input.streamKey === 'string' ? { rtmpsUrl: data.input.rtmpsUrl as string, streamKey: data.input.streamKey as string } : null;
+  const s = data?.stream;
+  return {
+    configured: data?.configured !== false,
+    migrated: data?.migrated !== false,
+    input,
+    stream: s && typeof s.ownerId === 'string' ? { ownerId: s.ownerId, title: String(s.title ?? ''), description: String(s.description ?? ''), category: typeof s.category === 'string' ? s.category : null } : null,
+  };
+}
 
 export function createKineApi(deps: {
   siteUrl: () => string;
@@ -66,6 +93,15 @@ export function createKineApi(deps: {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify(body),
     });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new KineApiError(typeof data?.error === 'string' ? data.error : `Kine odpověděla ${res.status}.`, res.status);
+    return data;
+  }
+
+  async function get(path: string): Promise<any> {
+    const token = await deps.getToken();
+    if (!token) throw new KineApiError('Nejsi přihlášený.', 401);
+    const res = await fetchImpl(`${deps.siteUrl()}${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20000) });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new KineApiError(typeof data?.error === 'string' ? data.error : `Kine odpověděla ${res.status}.`, res.status);
     return data;
@@ -113,6 +149,15 @@ export function createKineApi(deps: {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new KineApiError(typeof data?.error === 'string' ? data.error : `Kine odpověděla ${res.status}.`, res.status);
       return data?.status === 'ready' ? 'ready' : 'processing';
+    },
+    async liveSetup() {
+      return liveSetupFrom(await get('/api/live/me'));
+    },
+    async liveCreate() {
+      return liveSetupFrom({ configured: true, migrated: true, ...(await post('/api/live/me', { action: 'create' })) });
+    },
+    async liveDetails(details) {
+      await post('/api/live/me', { action: 'details', title: details.title.slice(0, 100), description: details.description.slice(0, 2000), category: details.category });
     },
   };
 }

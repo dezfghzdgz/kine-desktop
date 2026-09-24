@@ -133,6 +133,8 @@ export class CaptureManager {
       bufferName?: string;
       /** Rozjetá nahrávka zápasu, kterou přerušil pád, je odložená k obnově - ať ji hlavní proces slepí (recoverLeftovers). */
       onRecoverable?: () => void;
+      /** Události recorderu živého vysílání (live.ts). */
+      onLiveEvent?: (event: Extract<CaptureEvent, { type: 'live-started' | 'live-stopped' | 'live-error' }>) => void;
     }
   ) {
     this.bufferName = deps.bufferName ?? 'kine-buffer';
@@ -344,6 +346,13 @@ export class CaptureManager {
     this.window.webContents.send('capture:command', command);
   }
 
+  /** Povel pro recorder živého vysílání; false = snímací stránka neběží. */
+  sendLive(command: Extract<CaptureCommand, { type: 'live-start' | 'live-stop' }>): boolean {
+    if (!this.window || this.window.isDestroyed() || this._state !== 'on') return false;
+    this.window.webContents.send('capture:command', command);
+    return true;
+  }
+
   /** Povel, který nevadí, když snímání neběží (měřáky). */
   private sendSafe(command: CaptureCommand): void {
     if (this.window && !this.window.isDestroyed()) this.window.webContents.send('capture:command', command);
@@ -471,6 +480,11 @@ export class CaptureManager {
   }
 
   handleEvent(event: CaptureEvent): void {
+    // Vysílání má vlastní číslování generací - do zásobníku nepatří.
+    if (event.type === 'live-started' || event.type === 'live-stopped' || event.type === 'live-error') {
+      this.deps.onLiveEvent?.(event);
+      return;
+    }
     const gen = this.generations.find((g) => g.id === event.generation);
     if (event.type === 'started') {
       if (!gen) return;

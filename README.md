@@ -118,6 +118,22 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   „3 / 24“, u nahraného klipu „Kopírovat odkaz“. Klávesy: mezerník,
   ← → (±1 s, se Shiftem 5 s), M ztlumí, F celá obrazovka, I/O v úpravách.
   Hlasitost si přehrávač pamatuje.
+- **Živé vysílání na Kine bez OBS** (tlačítko „Vysílat“ v panelu, položka
+  v liště): dialog s názvem a kvalitou (720p30 3 Mb/s / 1080p30 4,5 Mb/s /
+  1080p60 6 Mb/s), klíč si appka vezme z Kine (`/api/live/me`, stejný jako
+  pro OBS ve studiu). Snímací stránka pustí třetí recorder na stejném
+  snímání - kopie obrazové stopy zmenšená na kvalitu vysílání, zvuk hry
+  a mikrofonu smíchaný přes Web Audio (hlasitosti z nastavení, omezovač),
+  vždy H.264, klíčový snímek každé 2 s - a jeho kousky jdou rourou do
+  ffmpeg: obraz beze změny, zvuk na AAC, FLV přes RTMPS na Cloudflare
+  (`src/main/live.ts`, čistá část `livePlan.ts`). Výpadek se připojí znovu
+  sám (2, 3, 5… s, nová „generace“ = nový recorder a ffmpeg), špatný klíč
+  se neopakuje, visící spojení hlídá hlídač, nestíhající upload se ohlásí.
+  Klipy se během vysílání ukládají dál; zásobník se během vysílání
+  nevypne (konec hry, pauza, přepínač), a když ho rozjelo jen vysílání,
+  po konci se zase vypne. V Kine do PC je nad webem čas vysílání
+  a „Ukončit“, stránka vysílání s chatem se otevře v okně. Zkouška:
+  `KINE_TEST_LIVE_URL` = místní RTMP server (ffmpeg `-listen 1`).
 - **Snímek obrazovky** (zkratka Alt+F8, tlačítko 📷 v panelu, položka
   v liště): celá obrazovka, ze které se nahrává, v plném rozlišení jako
   PNG do `Videa\Kine\Screenshots` a rovnou do schránky (vložit do
@@ -369,6 +385,7 @@ Užitečné proměnné prostředí:
 | `KINE_USER_DATA=…` | jiná složka s nastavením (zkoušky) |
 | `KINE_FFMPEG=…` | vlastní ffmpeg místo přibaleného |
 | `KINE_TEST=1` | samočinná zkouška: zásobník → dva klipy → přehrávač, úpravy, 9:16, GIF, sestřih, oblíbené, panel → screenshoty → konec (`tests/e2e.sh`) |
+| `KINE_TEST_LIVE_URL` | (se `KINE_TEST`) vysílání jde sem místo na Kine - `tests/e2e.sh` pouští místní RTMP server a kontroluje, co přišlo |
 | `KINE_NO_HELPER=1` | nespouštět pomocníka pro Windows (hry jen podle seznamu a Steamu, jen jednoduché zkratky) |
 | `KINE_VARIANT=clipper` | při vývoji se chovat jako appka Kine Clipper (zabalená appka to má v package.json) |
 
@@ -408,6 +425,8 @@ src/main/        hlavní proces (Electron, Node)
   gameEvents.ts  klipy samy z událostí: CS2 Game State Integration (lokální server + cfg), LoL Live Client API
   gameEventsParse.ts  čistá část: rozbor událostí CS2/LoL, série zabití, obsah cfg (test)
   edit.ts        zkrácení / ztlumení / výřez 9:16 / rychlost / text, sestřih víc klipů, GIF (ffmpeg), náhled k upravenému klipu
+  live.ts        živé vysílání na Kine: klíč z Kine, ffmpeg -> RTMPS, znovupřipojení, hlídač
+  livePlan.ts    čistá část vysílání: adresa, argumenty ffmpeg, průběh, pokusy (test)
   editPlan.ts    čistá část úprav: slepení klipu se stopami zvuku, zkrácení (trimArgs), sestřih, GIF, momenty, rozbor hlavičky ffmpeg (test)
   winHelper.ts   pomocník pro Windows (PowerShell + C# přes Add-Type): okno v popředí, procesy, okna, Steam, stav kláves
   hotkeys.ts     zkratky: systémové (Electron) + složené přes pomocníka

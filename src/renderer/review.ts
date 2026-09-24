@@ -2,7 +2,7 @@ import type { KineBridge } from '../preload/preload';
 import type { Clip, Settings, Visibility } from '../shared/types';
 import { VISIBILITIES } from '../shared/types';
 import { makeT } from '../shared/i18n';
-import { clear, clipMeta, fileUrl, formatDuration, h } from './ui';
+import { clear, clipMeta, formatDuration, h, isPortrait, thumbImages } from './ui';
 import { applyBrandColor } from '../shared/plan';
 import { openPlayer, type PlayerHandle } from './player';
 import { openUploadDialog } from './uploadDialog';
@@ -161,8 +161,8 @@ function render() {
     );
     const thumb = h(
       'div',
-      { class: 'thumb', onclick: () => showClip(clip) },
-      clip.thumb ? h('img', { src: fileUrl(clip.thumb), alt: '' }) : null,
+      { class: `thumb ${isPortrait(clip) ? 'portrait' : ''}`, onclick: () => showClip(clip) },
+      ...thumbImages(clip, false),
       check,
       h('span', { class: 'play-badge' }, '▶'),
       clip.kind === 'recording' ? h('span', { class: 'kind-badge' }, '⏺ ' + t('libraryRecordingBadge')) : null,

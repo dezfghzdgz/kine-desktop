@@ -206,22 +206,73 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   'loopback'` v `setDisplayMediaRequestHandler`). Když hra hraje jinam
   (jiné sluchátka zvolené ve hře nebo ve Windows > Zvuk > hlasitost
   aplikací), nahrává se ticho, i když hráč hru slyší. Proto: v Záznamu
-  jsou **živé měřáky** zvuku hry a mikrofonu (AnalyserNode na každé stopě
-  před smícháním, hlášení jednou za sekundu jako `levels`), pod nimi
-  „Zvuk hry se bere z: <zařízení>“ (název výchozího výstupu z
-  `enumerateDevices`), a když je zvuk hry 10 s digitální nula, nápověda co
-  s tím; při běžící hře a 20 s ticha jednou upozornění (`toastSystemAudioSilent`,
-  klik otevře Záznam) a varování v postranním panelu. Hráč může zvuk hry
-  brát i **z jiného záznamového zařízení** (`systemAudioDevice`: Stereo
-  Mix, „What U Hear“, VB-Cable), vybrat **mikrofon** (`microphoneDevice`) a
-  nastavit **hlasitost hry a mikrofonu v klipu** (`systemGain`, `micGain`,
-  GainNode 0-200 %). Když je jen jedna stopa beze změny hlasitosti, jde do
-  záznamu rovnou (bez Web Audio - nejméně věcí, co se může pokazit); jinak
-  se stopy smíchají v AudioContextu (`resume()`, kdyby byl uspaný). Změna
-  výchozího výstupu Windows za běhu (`devicechange`) snímání rozjede znovu,
-  protože loopback zůstává na starém zařízení. Zkouška `KINE_TEST_FAKE_AUDIO=1`
-  (a `=mix`) dá Chromiu falešný mikrofon s tónem a ověří měřáky i to, že
-  klip má opravdu slyšitelný zvuk (`volumedetect`).
+  jsou **živé měřáky** zvuku hry a mikrofonu (AnalyserNode jen na měření,
+  10x za sekundu, když je Záznam otevřený - `audio:watch`, jinak jednou za
+  sekundu; proužek nahoru hned, dolů pomalu), pod nimi „Zvuk hry se bere
+  z: <zařízení>“, a když je zvuk hry 10 s digitální nula, nápověda co s
+  tím (u sluchátek Bluetooth vlastní); při běžící hře a 20 s ticha jednou
+  upozornění (`toastSystemAudioSilent`). Hráč může zvuk hry brát i **z
+  jiného záznamového zařízení** (`systemAudioDevice`: Stereo Mix, „What U
+  Hear“, VB-Cable), vybrat **mikrofon** (`microphoneDevice`) a nastavit
+  **hlasitost hry a mikrofonu v klipu** (`systemGain`, `micGain`, 0-200 %).
+  Změna výchozího výstupu Windows za běhu (`devicechange`) snímání rozjede
+  znovu, protože loopback zůstává na starém zařízení.
+- **Zvuk sedí na obraz (0.9.3).** Zvuk hry jde do stejného MediaRecorderu
+  jako obraz, **bez Web Audio** (to dřív při míchání přidávalo zpoždění a
+  zvuk ujížděl). **Mikrofon má vlastní MediaRecorder** a vlastní segmenter
+  (`m00042.mka`, `mic.csv`) a do klipu se přimíchá až při uložení:
+  `planClip` (`src/main/segments.ts`) položí každý kousek mikrofonu podle
+  hodin počítače na místo vůči obrazu STEJNÉ generace (i přes mezery po
+  uloženém klipu), odečte zpoždění mikrofonu podle Chromia
+  (`getSettings().latency`), ffconcat s `duration`/`outpoint`, `aresample
+  async` proti ujetí; `clipMuxArgs` (`src/main/editPlan.ts`) smíchá
+  (`amix normalize=0` + `alimiter latency=1`, ať limiter nezpožďuje).
+  Ověřeno skutečným ffmpeg: klik v obraze, zvuku hry i mikrofonu do 2 ms.
+  Ruční **posun zvuku** ±300 ms (`audioOffsetMs`) pro případ, že by přesto
+  něco nesedělo. Výsledný zvuk AAC 192 kb/s.
+- **Hra a mikrofon zvlášť.** Klip s oběma má tři stopy: *Hra + mikrofon*
+  (výchozí, hraje všude), *Hra*, *Mikrofon* (`separateMicTrack`, zapnuté).
+  V úpravách je místo „bez zvuku“ výběr **Hra + mikrofon / Jen hra / Jen
+  mikrofon / Bez zvuku** (`trimAudioPlan`) - klip jde uložit bez vlastního
+  hlasu. Kamarádi z hlasového chatu ve hře jsou ve zvuku hry. Na Kine jde
+  takový klip **jen se smíchanou stopou** (Kine hraje jednu a nikde není
+  psáno, kterou by vybral): kopie bez překódování v `userData/upload-cache`
+  (`prepareFile` v uploaderu), přežije restart kvůli navázání, po nahrání
+  zmizí.
+- **Sluchátka Bluetooth.** Jakmile cokoli otevře mikrofon sluchátek
+  Bluetooth, Windows je přepne do režimu hovoru (HFP): všechno zní hůř,
+  mono, a zvuk hry jde na jiné „zařízení“, které loopback nenahrává -
+  ticho. Appka proto výchozí mikrofon Bluetooth **sama vynechá** (vezme
+  jiný vstup, nebo nahrává bez mikrofonu), řekne to (`bluetoothMic`) a v
+  seznamu mikrofonů je u Bluetooth varování. Ručně vybraný se použije.
+- **Kvalita a zátěž.** Výchozí 1080p / 60 fps / 20 Mb/s (nastavení v3:
+  kdo měl staré výchozí 1080p30 8 Mb/s, dostane nové; vlastní hodnoty
+  zůstávají). Snímací stránka před startem zjistí, jestli grafika umí
+  kódovat H.264 (`VideoEncoder.isConfigSupported`, `prefer-hardware`):
+  s hardwarem profil High, bez něj se nahrává nejvýš 30 fps (procesor by
+  jinak hru brzdil). V Záznamu je vidět, čím se kóduje, předvolba
+  „Doporučené (1080p60)“ a „Nízká zátěž“. `contentHint = 'motion'`.
+- **Nahrávka zápasu přežije pád.** Při nahrávání celého zápasu leží ve
+  složce zásobníku `recording.json` a v každé generaci `gen.json` (start,
+  formát, zvuk). Spadne-li appka nebo Windows, při dalším startu se
+  složka místo smazání odloží (`<název>.recover-*`, `salvageLeftovers`) a
+  slepí jako nahrávka „obnoveno po pádu“ (`recoverLeftovers`,
+  `recoverySegments`); když složku ještě drží spadlý ffmpeg, nechá se být
+  a zásobník jde vedle. Spadne-li snímání za běhu (snímací stránka,
+  ovladač grafiky, obrazovka přestane posílat obraz, chyba kodéru -
+  `onState(..., runtime)`), kousky nahrávky se odloží a slepí hned a
+  zásobník se za 3 s sám rozjede znovu (nejvýš 3x za 10 minut,
+  `restartAfterCrash`) - dřív stál až do konce hry. I zastavení nahrávky
+  ve chvíli pádu (hra spadla s ním) kousky nezahodí (`interrupted`).
+- **Diagnostika.** O aplikaci > „Zkopírovat diagnostiku“: verze, systém,
+  grafika, kodér, nastavení snímání a zvuku, hladiny a konec protokolu do
+  schránky - bez jména uživatele ve cestách a bez e-mailů.
+- **Klipy na výšku v knihovně** mají stejně velký náhled jako ostatní
+  (16:9, obraz uprostřed na rozmazaném pozadí, štítek 9:16).
+- **Zkoušky zvuku:** `KINE_TEST_FAKE_AUDIO=1` dá Chromiu falešný mikrofon
+  s tónem a ověří měřáky i slyšitelný zvuk v klipu (`volumedetect`);
+  `=full` k tomu vezme falešný vstup jako „zvuk hry“ a ověří klip se třemi
+  stopami a ořez „jen hra“.
 - **Kine v prohlížeči (Kine Clipper):** „Otevřít na Kine“ jde přes
   `/connect/app` s jednorázovým tokenem, takže se prohlížeč přihlásí
   stejným účtem jako appka - čerstvě nahraný (soukromý) klip je hned
@@ -331,12 +382,12 @@ src/main/        hlavní proces (Electron, Node)
   variant.ts     která ze dvou appek běží (Kine / Kine Clipper) - název, ikona, režim
   icon.ts        ikona okna a lišty přebarvená podle barvy Kine hráče
   capture.ts     zásobník: skrytá stránka → ffmpeg segmenty → klip
-  segments.ts    čistá logika výběru kousků (test)
+  segments.ts    čistá logika výběru kousků, plán klipu s mikrofonem, obnova po pádu (test)
   games.ts       hlídání her (procesy, Steam, popředí), gamesParse.ts čistá část (test)
   gameEvents.ts  klipy samy z událostí: CS2 Game State Integration (lokální server + cfg), LoL Live Client API
   gameEventsParse.ts  čistá část: rozbor událostí CS2/LoL, série zabití, obsah cfg (test)
   edit.ts        zkrácení / ztlumení / výřez 9:16, sestřih víc klipů, GIF (ffmpeg), náhled k upravenému klipu
-  editPlan.ts    čistá část úprav: argumenty pro sestřih a GIF, rozbor hlavičky ffmpeg, průběh (test)
+  editPlan.ts    čistá část úprav: slepení klipu se stopami zvuku, sestřih, GIF, rozbor hlavičky ffmpeg (test)
   winHelper.ts   pomocník pro Windows (PowerShell + C# přes Add-Type): okno v popředí, procesy, okna, Steam, stav kláves
   hotkeys.ts     zkratky: systémové (Electron) + složené přes pomocníka
   clips.ts       knihovna klipů (index.json ve složce s klipy)

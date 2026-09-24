@@ -264,3 +264,63 @@ test('čekání na zpracování: "processing" se zkouší dál, po restartu appk
   again.stopWaiting();
   mock.server.close();
 });
+
+test('klip s víc zvukovými stopami: nahraje se připravená kopie (jen smíchaný zvuk) a po nahrání se uklidí', async () => {
+  const mock = await startMockServer();
+  const { library, clip } = makeLibrary(2048);
+  library.update('c1', { audioTracks: ['mix', 'game', 'mic'] });
+  const copy = clip.file + '.upload.mp4';
+  writeFileSync(copy, Buffer.alloc(1500, 3));
+  const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${mock.port}`, getToken: async () => 'token-123' });
+  const prepared = [];
+  const released = [];
+  const uploader = new Uploader({
+    library,
+    api,
+    blocked: () => null,
+    settings: () => settings,
+    log: () => {},
+    readySchedule: fast,
+    prepareFile: async (c) => {
+      prepared.push(c.audioTracks);
+      return { file: copy, fresh: true };
+    },
+    releaseFile: (c) => released.push(c.id),
+  });
+  const done = new Promise((resolve) => uploader.on((e) => e.type === 'done' && resolve(e)));
+  uploader.enqueue([{ clipId: 'c1', visibility: 'private' }]);
+  await done;
+  assert.deepEqual(prepared, [['mix', 'game', 'mic']]);
+  // Na Kine odešla kopie (1500 B), ne původní soubor se třemi stopami (2048 B).
+  assert.equal(mock.uploads.get('cf1').data.length, 1500);
+  assert.equal(mock.uploads.get('cf1').data[0], 3);
+  assert.deepEqual(released, ['c1']);
+  uploader.stopWaiting();
+  mock.server.close();
+});
+
+test('nová kopie k nahrání = rozjeté nahrávání jiné kopie se nenaváže, začne se znovu', async () => {
+  const mock = await startMockServer();
+  const { library, clip } = makeLibrary(4096);
+  const copy = clip.file + '.upload.mp4';
+  writeFileSync(copy, Buffer.alloc(3000, 5));
+  // Z minula: pozastavené nahrávání na 50 % s adresou, která už neplatí.
+  library.setUpload('c1', { state: 'paused', percent: 50, reason: 'game', tusUrl: `http://127.0.0.1:${mock.port}/tus/stare`, videoId: 'stare' });
+  const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${mock.port}`, getToken: async () => 'token-123' });
+  const uploader = new Uploader({
+    library,
+    api,
+    blocked: () => null,
+    settings: () => settings,
+    log: () => {},
+    readySchedule: fast,
+    prepareFile: async () => ({ file: copy, fresh: true }),
+  });
+  const done = new Promise((resolve) => uploader.on((e) => e.type === 'done' && resolve(e)));
+  uploader.restoreFromLibrary();
+  await done;
+  assert.equal(mock.uploads.get('cf1').data.length, 3000);
+  assert.equal(library.get('c1').upload.state, 'done');
+  uploader.stopWaiting();
+  mock.server.close();
+});

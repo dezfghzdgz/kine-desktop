@@ -18,7 +18,9 @@ import { clear, errorText, fileUrl, formatBytes, h } from './ui';
  */
 type T = (key: Key, vars?: Record<string, string | number>) => string;
 
-export type TrimRequest = { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur' };
+export type TrimRequest = { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur'; audio?: AudioChoice };
+/** Zvuk ukládaného klipu (klip se samostatnými stopami hra / mikrofon). */
+type AudioChoice = 'mix' | 'game' | 'mic' | 'none';
 type CropAnchor = 'left' | 'center' | 'right' | 'blur';
 /** Formát výstupu v úpravách: původní video, výřez na výšku, nebo GIF (soubor vedle klipu). */
 type ExportFormat = 'original' | 'vertical' | 'gif';
@@ -123,6 +125,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   let start = 0;
   let end = duration;
   let mute = false;
+  /** Zvuk při ukládání: u klipů se stopami hra / mikrofon jde vybrat jen jedna z nich. */
+  let audioChoice: AudioChoice = 'mix';
   /** Výřez na výšku 9:16 (TikTok, Shorts); null = původní formát. */
   let vertical: CropAnchor | null = null;
   /** Formát GIF (bez zvuku, soubor vedle klipu, ne do knihovny). */
@@ -205,6 +209,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     titleEl.title = clip.title;
     copyBtn.classList.toggle('hidden', clip.upload?.state !== 'done');
     note.classList.add('hidden');
+    syncAudioChoice();
     loadVideo(false);
     layout();
     refreshNav();
@@ -228,6 +233,37 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const endVal = h('b', {});
   const lenVal = h('b', {});
   const muteBox = h('input', { type: 'checkbox', onchange: (e: Event) => { mute = (e.target as HTMLInputElement).checked; refreshButtons(); } }) as HTMLInputElement;
+  const muteLabel = h('label', { class: 'check', style: 'align-items:center' }, muteBox, t('trimMute'));
+  // Klip se samostatnými stopami: místo "bez zvuku" výběr, co v uloženém klipu bude (třeba bez vlastního hlasu).
+  const audioSelect = h(
+    'select',
+    {
+      class: 'trim-audio',
+      style: 'width:auto;min-height:32px;padding:4px 10px',
+      title: t('trimAudioHint'),
+      onchange: (e: Event) => {
+        audioChoice = (e.target as HTMLSelectElement).value as AudioChoice;
+        mute = audioChoice === 'none';
+        refreshButtons();
+      },
+    },
+    h('option', { value: 'mix' }, t('trimAudioMix')),
+    h('option', { value: 'game' }, t('trimAudioGame')),
+    h('option', { value: 'mic' }, t('trimAudioMic')),
+    h('option', { value: 'none' }, t('trimAudioNone'))
+  ) as HTMLSelectElement;
+  const audioLabel = h('label', { class: 'row trim-audio-row', style: 'gap:6px;align-items:center' }, h('span', { class: 'faint' }, t('trimAudio')), audioSelect);
+  /** Má klip samostatné stopy hra / mikrofon? Podle toho výběr zvuku, nebo jen "bez zvuku". */
+  function syncAudioChoice() {
+    const tracks = clip.audioTracks ?? [];
+    const separate = tracks.includes('game') && tracks.includes('mic');
+    audioLabel.classList.toggle('hidden', !separate);
+    muteLabel.classList.toggle('hidden', separate);
+    audioChoice = 'mix';
+    audioSelect.value = 'mix';
+    mute = false;
+    muteBox.checked = false;
+  }
   const saveNewBtn = h('button', { class: 'small primary', onclick: () => void (gif ? saveGif() : save('new')) }, t('trimSaveNew'));
   const replaceBtn = h('button', { class: 'small quiet', onclick: () => onReplaceClick() }, t('trimReplace'));
   // Formát: původní / na výšku (a kde výřez leží) / GIF.
@@ -261,7 +297,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       h('button', { class: 'small quiet', onclick: () => setStart(video.currentTime) }, t('trimSetStart')),
       h('button', { class: 'small quiet', onclick: () => setEnd(video.currentTime) }, t('trimSetEnd')),
       h('button', { class: 'small quiet', onclick: () => playSelection() }, '▶ ' + t('trimPlaySelection')),
-      h('label', { class: 'check', style: 'align-items:center' }, muteBox, t('trimMute')),
+      muteLabel,
+      audioLabel,
       edit?.thumbnail ? h('button', { class: 'small quiet thumb-frame', title: t('thumbFrameHint'), onclick: () => void useFrameAsThumb() }, '📷 ' + t('thumbFrame')) : null
     ),
     h('p', { class: 'hint' }, t('trimHint')),
@@ -271,6 +308,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     uploadedNote,
     h('div', { class: 'row trim-actions' }, saveNewBtn, replaceBtn, progress, progressText)
   );
+  syncAudioChoice();
 
   // ---- video ----------------------------------------------------------------------
   const fail = (why: string) => {
@@ -487,8 +525,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     if (editing) {
       start = 0;
       end = duration;
-      mute = false;
-      muteBox.checked = false;
+      syncAudioChoice();
       confirmReplace = false;
       gif = false;
       setVertical(null);
@@ -496,7 +533,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     layout();
   }
   function nothingToDo(): boolean {
-    return start <= 0.05 && end >= duration - 0.05 && !mute && !vertical && !gif;
+    return start <= 0.05 && end >= duration - 0.05 && !mute && audioChoice === 'mix' && !vertical && !gif;
   }
   /** GIF: úsek musí být nejvýš GIF_MAX_SECONDS. */
   function gifTooLong(): boolean {
@@ -510,6 +547,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     replaceBtn.disabled = !idle || nothingToDo() || !!vertical || gif;
     replaceBtn.classList.toggle('hidden', gif);
     muteBox.disabled = gif;
+    audioSelect.disabled = gif;
     saveNewBtn.title = nothingToDo() ? t('trimNothingToDo') : gifTooLong() ? t('gifTooLong', { max: GIF_MAX_SECONDS }) : '';
     replaceBtn.title = nothingToDo() ? t('trimNothingToDo') : '';
     replaceBtn.textContent = confirmReplace ? t('trimReplaceConfirm') : t('trimReplace');
@@ -620,7 +658,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       video.load();
     }
     try {
-      const result = await edit.run(original, { start, end, mute, mode, vertical: vertical ?? undefined });
+      const result = await edit.run(original, { start, end, mute, mode, vertical: vertical ?? undefined, audio: audioChoice });
       clip = result;
       titleEl.textContent = clip.title;
       titleEl.title = clip.title;

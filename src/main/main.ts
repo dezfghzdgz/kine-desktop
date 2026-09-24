@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, statfsSync, unlinkSync } from 'node:fs';
+import { cpus, homedir, release, totalmem } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, statfsSync, unlinkSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import {
   BrowserWindow,
@@ -27,7 +28,7 @@ import { clipFileBase, defaultClipTitle, safeFilePart } from '../shared/clipNami
 import { DISCORD_FILE_MAX_BYTES } from '../shared/settingsSchema';
 import { maxClipSecondsFor } from '../shared/plan';
 import { performanceProfile } from '../shared/performance';
-import { initLog, log, logDir } from './log';
+import { initLog, log, logDir, tailLog } from './log';
 import { SettingsStore } from './settings';
 import { ClipLibrary } from './clips';
 import { CaptureManager } from './capture';
@@ -42,6 +43,7 @@ import { checkForUpdates, initUpdater, onGameEnded as updaterGameEnded } from '.
 import { runTestDriver } from './testDriver';
 import { WinHelper } from './winHelper';
 import { makeGif, makeThumbnail, mergeClips, trimClip } from './edit';
+import { runFfmpeg } from './ffmpeg';
 import { GIF_MAX_SECONDS } from './editPlan';
 import { APP_USER_MODEL_IDS, PRODUCT_NAMES, detectVariant, modeForVariant, siblingExe } from './variant';
 import { brandIcon, trayIcon } from './icon';
@@ -230,15 +232,29 @@ class KineApp {
       settings: () => this.settings.get(),
       preload: PRELOAD,
       rendererDir: RENDERER_DIR,
-      onState: (state, error) => {
-        if (state === 'error' && error) void this.toast.show(this.t('toastCaptureError', { message: error }), 'error', { notification: true });
+      onState: (state, error, runtime) => {
+        if (state === 'error' && error) {
+          void this.toast.show(this.t('toastCaptureError', { message: error }), 'error', { notification: true });
+          if (runtime) this.restartAfterCrash();
+        }
         this.pushStatus();
+      },
+      // Nahrávka zápasu přerušená pádem (snímání, appka, Windows) je odložená - slepit ji hned.
+      onRecoverable: () => {
+        this.pushStatus();
+        void this.recoverRecordings();
       },
       onWarning: (kind, message) => {
         // Jednou za běh appky - ne při každém startu zásobníku.
         if (this.warnedOnce.has(kind)) return;
         this.warnedOnce.add(kind);
         const clean = message.replace(/^\w*Error:\s*/, '');
+        if (kind === 'bluetoothMic') {
+          // Výchozí mikrofon jsou sluchátka Bluetooth: appka vzala jiný (message = jeho název), nebo žádný.
+          const text = clean ? this.t('toastBluetoothMicSwitched', { mic: clean }) : this.t('toastBluetoothMicOff');
+          void this.toast.show(text, 'warn', { notification: true, onClick: () => this.openSettings('settings') });
+          return;
+        }
         if (kind === 'systemAudio') {
           void this.toast.show(this.t('toastSystemAudioDevice', { message: clean }), 'warn', { notification: true, onClick: () => this.openSettings('settings') });
           return;
@@ -309,6 +325,8 @@ class KineApp {
         return clip.game ? this.t('uploadDescriptionGame', { game: clip.game, url: download }) : this.t('uploadDescription', { url: download });
       },
       uploadThumbnail: (videoId, file) => this.auth.uploadThumbnail(videoId, file),
+      prepareFile: (clip) => this.uploadFileFor(clip),
+      releaseFile: (clip) => this.releaseUploadFile(clip.id),
     });
     this.uploader.on((e) => {
       if (e.type === 'done') {
@@ -353,6 +371,11 @@ class KineApp {
     this.games.start();
     void this.gameEvents.start();
     this.uploader.restoreFromLibrary();
+    this.purgeUploadCache();
+
+    // Nahrávka zápasu, kterou minule přerušil pád appky nebo Windows: kousky
+    // zůstaly v dočasné složce - odložit je (dřív, než je start zásobníku smaže) a slepit.
+    if (this.capture.salvageLeftovers().waiting > 0) setTimeout(() => void this.recoverRecordings(), 4000);
 
     if (this.settings.get().detection === 'always') void this.capture.start().catch(() => undefined);
 
@@ -553,6 +576,7 @@ class KineApp {
         height: result.height,
         sessionId: game ? this.sessionId : 'no-game-' + this.sessionId,
         upload: null,
+        audioTracks: result.audioTracks,
         kind: 'recording',
       };
       this.library.add(clip);
@@ -568,6 +592,12 @@ class KineApp {
       return clip;
     } catch (e) {
       const message = (e as Error).message;
+      if (message === 'interrupted') {
+        // Snímání spadlo pod nahrávkou - kousky se odkládají a slepí se samy (toast "zachráněno").
+        log(`nahrávka zápasu (${reason}): snímání spadlo, nahrávka se obnoví z kousků`);
+        this.pushStatus();
+        return null;
+      }
       if (message !== 'too-early' && message !== 'not-capturing') {
         void this.toast.show(this.t('toastClipFailed', { message }), 'error', { notification: true });
       } else if (reason === 'user') {
@@ -577,6 +607,173 @@ class KineApp {
       this.pushStatus();
       return null;
     }
+  }
+
+  /**
+   * Nahrávky zápasu, které přerušil pád (appky, snímací stránky, Windows):
+   * capture je odložil stranou, tady se slepí a přidají do knihovny jako
+   * nahrávka s poznámkou "obnoveno po pádu".
+   */
+  async recoverRecordings(): Promise<Clip[]> {
+    const results = await this.capture.recoverLeftovers(this.settings.clipsDir(), join(app.getPath('userData'), 'thumbs')).catch((e) => {
+      log(`obnova nahrávek zápasu: ${(e as Error).message}`);
+      return [];
+    });
+    const clips: Clip[] = [];
+    for (const r of results) {
+      const clip: Clip = {
+        id: randomUUID(),
+        file: r.file,
+        thumb: r.thumb,
+        title: `${defaultClipTitle(new Date(r.since), r.game, this.t('recordingWord'))} · ${this.t('recordingRecovered')}`,
+        game: r.game,
+        createdAt: new Date(r.since).toISOString(),
+        durationSeconds: r.durationSeconds,
+        sizeBytes: r.sizeBytes,
+        width: r.width,
+        height: r.height,
+        sessionId: 'recovered-' + randomUUID(),
+        upload: null,
+        audioTracks: r.audioTracks,
+        kind: 'recording',
+      };
+      this.library.add(clip);
+      clips.push(clip);
+      const minutes = Math.max(1, Math.round(r.durationSeconds / 60));
+      void this.toast.show(this.t('toastRecordingRecovered', { minutes }), 'ok', { notification: true, onClick: () => this.openSettings('clips') });
+    }
+    if (clips.length > 0) this.pushStatus();
+    return clips;
+  }
+
+  /**
+   * Diagnostika pro podporu (O aplikaci -> Zkopírovat diagnostiku): verze,
+   * systém, grafika, kodér, nastavení snímání a zvuku, hladiny a konec
+   * protokolu. Domovská složka (jméno uživatele) a e-maily se vynechají.
+   */
+  async diagnostics(): Promise<string> {
+    const s = this.settings.get();
+    const c = this.capture;
+    const yesNo = (v: boolean | null | undefined) => (v === null || v === undefined ? '?' : v ? 'yes' : 'no');
+    const lines: string[] = [];
+    lines.push(`${PRODUCT} ${app.getVersion()} (${VARIANT}) · Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · ${process.platform} ${release()} ${process.arch}`);
+    const cpu = cpus();
+    lines.push(`CPU: ${cpu[0]?.model?.trim() ?? '?'} x${cpu.length} · RAM ${Math.round(totalmem() / 1024 ** 3)} GB`);
+    try {
+      const gpu = (await app.getGPUInfo('basic')) as { gpuDevice?: { vendorId?: number; deviceId?: number; active?: boolean; driverVersion?: string }[] };
+      const vendor = (id?: number) => (id === 0x10de ? 'NVIDIA' : id === 0x1002 ? 'AMD' : id === 0x8086 ? 'Intel' : id ? `0x${id.toString(16)}` : '?');
+      const devices = (gpu.gpuDevice ?? []).map((d) => `${vendor(d.vendorId)} 0x${(d.deviceId ?? 0).toString(16)}${d.active ? ' (active)' : ''}${d.driverVersion ? ` driver ${d.driverVersion}` : ''}`);
+      lines.push(`GPU: ${devices.join(', ') || '?'} · video encode: ${app.getGPUFeatureStatus().video_encode ?? '?'}`);
+    } catch {
+      lines.push('GPU: ?');
+    }
+    lines.push(`Capture: ${c.state}${c.error ? ` (${c.error})` : ''} · ${s.maxHeight}p ${s.fps} fps (real ${c.effectiveFps ?? '?'}) · ${s.codec} · ${s.videoMbps} Mb/s · HW encoder ${yesNo(c.hwEncoder)} · ${c.lastStarted?.mimeType ?? '?'}`);
+    lines.push(
+      `Audio: game ${yesNo(s.systemAudio)} (${s.systemAudioDevice ? 'input device' : 'loopback'}) · mic ${yesNo(s.microphone)} (${s.microphoneDevice ? 'chosen' : 'default'}) · gain ${Math.round(s.systemGain * 100)}/${Math.round(s.micGain * 100)} % · separate tracks ${yesNo(s.separateMicTrack)} · offset ${s.audioOffsetMs} ms · latency ${c.lastStarted?.micLatencyMs ?? '?'} ms`
+    );
+    const l = c.levels;
+    const level = (v: number | null) => (v === null ? 'off' : v > 0 ? `${Math.round(20 * Math.log10(v))} dB` : 'silent');
+    if (l) {
+      lines.push(`Levels: game ${level(l.system)} from "${l.systemDevice || 'default'}" (silent ${l.systemSilentSeconds} s) · mic ${level(l.mic)}${l.micDevice ? ` "${l.micDevice}"` : ''}${l.bluetoothMicAvoided ? ' · Bluetooth mic avoided' : ''}`);
+    }
+    lines.push(`Game: ${this.games.current()?.name ?? '-'} · detection ${s.detection} · performance ${s.performance} · clip ${s.clipSeconds} s · paused ${yesNo(this.paused)} · recording ${yesNo(!!c.recordingInfo())}`);
+    lines.push(`Library: ${this.library.list().length} clips · free ${Math.round(freeDiskBytes(this.settings.clipsDir()) / 1024 ** 3)} GB`);
+    lines.push('--- log ---');
+    lines.push(...tailLog(80));
+    let text = lines.join('\n');
+    const home = homedir();
+    if (home) {
+      text = text.split(home).join('~');
+      text = text.split(home.replace(/\\/g, '/')).join('~');
+    }
+    return text.replace(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, '<e-mail>');
+  }
+
+  // ---- soubor k nahrání -----------------------------------------------------------
+
+  private uploadCacheDir(): string {
+    return join(app.getPath('userData'), 'upload-cache');
+  }
+
+  /**
+   * Klip se samostatnými stopami (hra + mikrofon, hra, mikrofon) jde na Kine
+   * jen s první, smíchanou stopou: Kine (Cloudflare Stream) hraje jednu a
+   * nikde není psáno, kterou by si z víc vybral. Kopie bez překódování
+   * (vteřiny) leží v userData, ať jde přerušené nahrávání navázat i po
+   * restartu; po nahrání zmizí.
+   */
+  private async uploadFileFor(clip: Clip): Promise<{ file: string; fresh: boolean }> {
+    if ((clip.audioTracks?.length ?? 0) <= 1) return { file: clip.file, fresh: false };
+    const webm = extname(clip.file).toLowerCase() === '.webm';
+    const target = join(this.uploadCacheDir(), `${clip.id}${webm ? '.webm' : '.mp4'}`);
+    try {
+      const cached = statSync(target);
+      if (cached.size > 0 && cached.mtimeMs >= statSync(clip.file).mtimeMs) return { file: target, fresh: false };
+    } catch {
+      // Kopie ještě není.
+    }
+    mkdirSync(this.uploadCacheDir(), { recursive: true });
+    const part = `${target}.part`;
+    await runFfmpeg(
+      ['-loglevel', 'error', '-y', '-i', clip.file, '-map', '0:v:0', '-map', '0:a:0', '-c', 'copy', ...(webm ? ['-f', 'webm'] : ['-movflags', '+faststart', '-f', 'mp4']), part],
+      10 * 60 * 1000
+    );
+    renameSync(part, target);
+    log(`nahrání: ${basename(clip.file)} jde na Kine jen se smíchaným zvukem (${clip.audioTracks?.join(' + ')} -> mix)`);
+    return { file: target, fresh: true };
+  }
+
+  private releaseUploadFile(clipId: string): void {
+    for (const ext of ['.mp4', '.webm']) rmSync(join(this.uploadCacheDir(), `${clipId}${ext}`), { force: true });
+  }
+
+  /** Po startu: kopie k nahrání, které už nic nenahrává (klip nahraný, smazaný, zrušený). */
+  private purgeUploadCache(): void {
+    let names: string[];
+    try {
+      names = readdirSync(this.uploadCacheDir());
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const id = name.replace(/\.(mp4|webm)(\.part)?$/, '');
+      const clip = this.library.get(id);
+      const pending = !!clip && !clip.deletedAt && !!clip.upload && ['queued', 'paused', 'uploading'].includes(clip.upload.state);
+      if (!pending || name.endsWith('.part')) rmSync(join(this.uploadCacheDir(), name), { force: true });
+    }
+  }
+
+  /** Kdy naposledy spadla snímací stránka (restart nejvýš 3x za 10 minut, ať se appka necyklí). */
+  private captureCrashes: number[] = [];
+
+  /**
+   * Snímání spadlo za běhu (snímací stránka, ovladač grafiky, pád hry,
+   * obrazovka přestala posílat obraz): zásobník se za pár sekund sám rozjede
+   * znovu, pokud má běžet - jinak by hráč do konce hry přišel o všechny
+   * klipy, aniž by to věděl. Rozjetá nahrávka zápasu se při tom odloží a slepí.
+   */
+  private restartAfterCrash(): void {
+    const now = Date.now();
+    this.captureCrashes = this.captureCrashes.filter((at) => now - at < 10 * 60 * 1000);
+    if (this.captureCrashes.length >= 3) {
+      log('snímací stránka padá opakovaně - sama se už znovu nerozjede');
+      return;
+    }
+    this.captureCrashes.push(now);
+    setTimeout(() => {
+      const s = this.settings.get();
+      const wanted = !this.paused && (s.detection !== 'games' || !!this.games.current());
+      if (!wanted || this.capture.state !== 'error') return;
+      log('snímání se po chybě rozjíždí znovu');
+      void (async () => {
+        // Nejdřív úklid (po chybě bez pádu stránky běží staré generace dál), pak čistý start.
+        await this.capture.stop().catch(() => undefined);
+        await this.capture.start();
+      })().then(
+        () => void this.toast.show(this.t('toastCaptureRecovered'), 'ok'),
+        () => undefined
+      );
+    }, 3000);
   }
 
   /** Zastaví zásobník, ale nejdřív uloží rozjetou nahrávku - jinak by kousky zmizely s ním. */
@@ -617,6 +814,7 @@ class KineApp {
           height: result.height,
           sessionId: game ? this.sessionId : 'no-game-' + this.sessionId,
           upload: null,
+          audioTracks: result.audioTracks,
         };
         this.library.add(clip);
         const seconds = Math.round(result.durationSeconds);
@@ -767,7 +965,9 @@ class KineApp {
    * hra hraje do jiného zařízení, než je ve Windows výchozí.
    */
   private onAudioLevels(levels: AudioLevels): void {
-    this.broadcast('audio:levels', levels);
+    // Měřáky jen do okna nastavení (jinam nepatří a 10x za sekundu je zbytečné všem).
+    const win = this.settingsWindow;
+    if (win && !win.isDestroyed()) win.webContents.send('audio:levels', levels);
     const game = this.games.current();
     if (levels.system !== null && game && levels.systemSilentSeconds >= 20 && this.silenceWarnedFor !== this.capture.captureSession()) {
       this.silenceWarnedFor = this.capture.captureSession();
@@ -1206,6 +1406,7 @@ class KineApp {
       variant: VARIANT,
       autoClipsLive: this.gameEvents.live(),
       recordingSince: this.capture.recordingInfo()?.since ?? null,
+      hwEncoder: this.capture.hwEncoder,
     };
   }
 
@@ -1230,7 +1431,7 @@ class KineApp {
    * ať při chybě nezůstane rozbitý soubor). Průběh chodí oknům jako
    * "clips:trimProgress".
    */
-  async trimClip(id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur' }): Promise<Clip> {
+  async trimClip(id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur'; audio?: 'mix' | 'game' | 'mic' | 'none' }): Promise<Clip> {
     const clip = this.library.get(id);
     if (!clip) throw new Error('clip not found');
     const s = this.settings.get();
@@ -1241,12 +1442,15 @@ class KineApp {
     // Konec nejdál na konci klipu (když délku neznáme, věří se stránce).
     const total = clip.durationSeconds > 0 ? clip.durationSeconds : Infinity;
     const vertical = opts.vertical === 'left' || opts.vertical === 'center' || opts.vertical === 'right' || opts.vertical === 'blur' ? opts.vertical : undefined;
+    const audio = opts.audio === 'game' || opts.audio === 'mic' || opts.audio === 'none' ? opts.audio : 'mix';
     const options = {
       start: Math.max(0, Number(opts.start) || 0),
       end: Math.min(total, Number(opts.end) || total),
       mute: Boolean(opts.mute),
       videoMbps: s.videoMbps,
       vertical,
+      audio: audio as 'mix' | 'game' | 'mic' | 'none',
+      audioTracks: clip.audioTracks,
     };
     if (!Number.isFinite(options.end)) throw new Error('unknown length');
     // Výřez na výšku je jiný formát - vždycky jako nový klip vedle původního.
@@ -1294,6 +1498,7 @@ class KineApp {
         sizeBytes: result.sizeBytes,
         width: result.width,
         height: result.height,
+        audioTracks: result.audioTracks ?? undefined,
         // Obsah je jiný než ten na Kine - nahrání začíná znovu.
         upload: null,
       });
@@ -1320,7 +1525,9 @@ class KineApp {
       sizeBytes: result.sizeBytes,
       width: result.width,
       height: result.height,
+      audioTracks: result.audioTracks ?? undefined,
       upload: null,
+      uploadOptions: undefined,
     };
     this.library.add(newClip);
     log(`klip zkrácen (nový): ${out} (${result.durationSeconds.toFixed(1)} s)`);
@@ -1487,8 +1694,8 @@ class KineApp {
       const win = BrowserWindow.fromWebContents(e.sender);
       return !!win && win.webContents.getURL().endsWith('capture.html');
     };
-    ipcMain.on('capture:chunk', (e, generation: number, data: ArrayBuffer) => {
-      if (isCaptureSender(e)) this.capture.handleChunk(generation, data);
+    ipcMain.on('capture:chunk', (e, generation: number, data: ArrayBuffer, kind: 'av' | 'mic' = 'av') => {
+      if (isCaptureSender(e)) this.capture.handleChunk(generation, data, kind === 'mic' ? 'mic' : 'av');
     });
     ipcMain.on('capture:event', (e, event: CaptureEvent) => {
       if (isCaptureSender(e)) this.capture.handleEvent(event);
@@ -1537,7 +1744,7 @@ class KineApp {
       return result.filePaths[0];
     });
     ipcMain.handle('clips:clipNow', () => this.onClipHotkey());
-    ipcMain.handle('clips:trim', (_e, id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur' }) => this.trimClip(id, opts));
+    ipcMain.handle('clips:trim', (_e, id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur'; audio?: 'mix' | 'game' | 'mic' | 'none' }) => this.trimClip(id, opts));
     ipcMain.handle('app:copy', (_e, text: string) => clipboard.writeText(String(text ?? '')));
     ipcMain.handle('clips:discord', (_e, id: string) => this.shareToDiscord(id));
     ipcMain.handle('clips:discordFile', (_e, file: string, title: string) => this.shareFileToDiscord(String(file ?? ''), String(title ?? '')));
@@ -1567,6 +1774,8 @@ class KineApp {
     });
     ipcMain.handle('capture:pause', () => this.togglePause());
     ipcMain.handle('audio:levels', () => this.capture.levels);
+    // Okno nastavení ukazuje měřáky - ať jsou plynulé (jinak se hladiny posílají jednou za sekundu).
+    ipcMain.handle('audio:watch', (_e, fast: boolean) => this.capture.setMetersFast(Boolean(fast)));
     ipcMain.handle('capture:record', () => this.toggleRecording());
 
     ipcMain.handle('auth:loginBrowser', async () => {
@@ -1633,6 +1842,10 @@ class KineApp {
 
     ipcMain.handle('app:checkUpdate', () => checkForUpdates());
     ipcMain.handle('app:openLogs', () => shell.openPath(logDir()));
+    ipcMain.handle('app:copyDiagnostics', async () => {
+      await clipboard.writeText(await this.diagnostics());
+      return true;
+    });
     ipcMain.handle('app:openExternal', (_e, url: string) => {
       if (/^https?:\/\//.test(url)) void shell.openExternal(url);
     });

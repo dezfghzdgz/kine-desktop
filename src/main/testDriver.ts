@@ -1,7 +1,8 @@
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { request as httpRequest } from 'node:http';
-import { join } from 'node:path';
-import { BrowserWindow, app } from 'electron';
+import { basename, dirname, join } from 'node:path';
+import { BrowserWindow, app, clipboard } from 'electron';
 import { log } from './log';
 import { trayIcon } from './icon';
 import { probe, runFfmpeg } from './ffmpeg';
@@ -54,7 +55,7 @@ export async function runTestDriver(kine: {
     const clipperApp = (kine as any).variant === 'clipper';
     result.variant = clipperApp ? 'clipper' : 'full';
     kine.settings.update({ detection: 'always', clipSeconds, onboarded: true, toast: true, afterGame: 'review' });
-    // KINE_TEST_FAKE_AUDIO=mix: hlasitost mikrofonu 50 % -> zvuk jde přes míchání ve Web Audio, ne rovnou ze stopy.
+    // KINE_TEST_FAKE_AUDIO=mix: hlasitost mikrofonu 50 % -> při uložení klipu jde mikrofon přes filtr hlasitosti v ffmpeg.
     if (process.env.KINE_TEST_FAKE_AUDIO === 'mix') kine.settings.update({ micGain: 0.5 });
 
     await sleep(500);
@@ -74,6 +75,55 @@ export async function runTestDriver(kine: {
       }
       result.fakeAudioLevels = levels;
       result.fakeAudioMeter = !!levels && levels.mic !== null && levels.mic > 0.01 && levels.system === null;
+    }
+    // KINE_TEST_FAKE_AUDIO=full: "zvuk hry" z falešného vstupního zařízení (jako Stereo Mix) + mikrofon ->
+    // klip má tři stopy (hra + mikrofon, hra, mikrofon) a v úpravách jde uložit "jen hra".
+    let multiClipId: string | null = null;
+    if (process.env.KINE_TEST_FAKE_AUDIO === 'full') {
+      const capWin = (kine as any).capture.window as BrowserWindow | null;
+      const inputs: { id: string; label: string }[] = capWin
+        ? await capWin.webContents.executeJavaScript(`navigator.mediaDevices.enumerateDevices().then((d) => d.filter((x) => x.kind === 'audioinput' && x.deviceId !== 'default' && x.deviceId !== 'communications').map((x) => ({ id: x.deviceId, label: x.label })))`)
+        : [];
+      result.fakeInputs = inputs.map((x) => x.label);
+      if (inputs[0]) {
+        kine.settings.update({ systemAudio: true, systemAudioDevice: inputs[0].id });
+        let both = false;
+        for (let i = 0; i < 40 && !both; i++) {
+          await sleep(300);
+          const l = (kine as any).capture.levels;
+          both = kine.capture.state === 'on' && !!l && l.system !== null && l.mic !== null;
+        }
+        await sleep(6000);
+        const multi = await kine.onClipHotkey();
+        multiClipId = multi?.id ?? null;
+        const probeText = multi ? await runFfmpeg(['-i', multi.file, '-f', 'null', '-t', '0.1', '-']).catch((e: Error) => e.message) : '';
+        // Jen vstupní část výpisu (za "Output #0" ffmpeg vypisuje i výstupní proudy).
+        const inputAudio = (text: string) => (String(text).split(/Output #0|Stream mapping/)[0].match(/Stream #0:\d+.*?Audio:/g) || []).length;
+        const audioStreams = inputAudio(probeText);
+        let gameOnly: any = null;
+        if (multi) gameOnly = await (kine as any).trimClip(multi.id, { start: 0, end: 2, mute: false, mode: 'new', audio: 'game' });
+        const gameProbe = gameOnly ? await runFfmpeg(['-i', gameOnly.file, '-f', 'null', '-t', '0.1', '-']).catch((e: Error) => e.message) : '';
+        result.multiTrack = { both, tracks: multi?.audioTracks, audioStreams, gameOnlyTracks: gameOnly?.audioTracks, gameOnlyStreams: inputAudio(gameProbe) };
+        // Na Kine jde kopie jen se smíchanou stopou (Kine hraje jednu); podruhé se vezme hotová, po nahrání zmizí.
+        let uploadCopy: any = null;
+        if (multi) {
+          const first = await (kine as any).uploadFileFor(kine.library.get(multi.id));
+          const second = await (kine as any).uploadFileFor(kine.library.get(multi.id));
+          const copyProbe = await runFfmpeg(['-i', first.file, '-f', 'null', '-t', '0.1', '-']).catch((e: Error) => e.message);
+          const hasVideo = /Stream #0:\d+.*?Video:/.test(String(copyProbe).split(/Output #0|Stream mapping/)[0]);
+          (kine as any).releaseUploadFile(multi.id);
+          uploadCopy = { fresh1: first.fresh, fresh2: second.fresh, same: first.file === second.file, other: first.file !== multi.file, audio: inputAudio(copyProbe), hasVideo, released: !existsSync(first.file) };
+        }
+        result.uploadCopy = uploadCopy;
+        const uploadCopyOk = !!uploadCopy && uploadCopy.fresh1 && !uploadCopy.fresh2 && uploadCopy.same && uploadCopy.other && uploadCopy.audio === 1 && uploadCopy.hasVideo && uploadCopy.released;
+        result.multiTrackOk = both && JSON.stringify(multi?.audioTracks) === '["mix","game","mic"]' && audioStreams === 3 && JSON.stringify(gameOnly?.audioTracks) === '["game"]' && inputAudio(gameProbe) === 1 && uploadCopyOk;
+        kine.settings.update({ systemAudioDevice: '', systemAudio: true });
+        for (let i = 0; i < 40; i++) {
+          await sleep(300);
+          if (kine.capture.state === 'on' && (kine as any).capture.levels) break;
+        }
+        await sleep(waitMs);
+      }
     }
     await kine.toast.show('Test toastu', 'ok');
     const clip1 = await kine.onClipHotkey();
@@ -155,10 +205,12 @@ export async function runTestDriver(kine: {
           await sleep(200);
           saved = montage ? kine.library.get(montage.id)?.uploadOptions ?? null : null;
         }
-        result.uploadDialogDebug = { manyOpened, manyDialog, closedByEsc, singleDialog, saved };
+        // Klipů z hraní je normálně 3 (dva + sestřih); s KINE_TEST_FAKE_AUDIO=full přibudou vícestopý a jeho ořez.
+        const sessionClips = kine.library.list().filter((c) => c.sessionId === clip1.sessionId && !c.deletedAt).length;
+        result.uploadDialogDebug = { manyOpened, manyDialog, closedByEsc, singleDialog, saved, sessionClips };
         result.uploadDialog =
           manyOpened &&
-          !!manyDialog && manyDialog.clips === 3 && manyDialog.vis === 3 && manyDialog.cats === 15 && manyDialog.note && manyDialog.clipsHeight > 100 &&
+          !!manyDialog && manyDialog.clips === sessionClips && sessionClips >= 3 && manyDialog.vis === 3 && manyDialog.cats === 15 && manyDialog.note && manyDialog.clipsHeight > 100 &&
           closedByEsc &&
           !!singleDialog && singleDialog.single && singleDialog.tags.includes('#klip') && /Kine/.test(singleDialog.desc) && singleDialog.tagsAfter.includes('#test_tag') &&
           !!saved && saved.visibility === 'subscribers' && Array.isArray(saved.hashtags) && saved.hashtags.includes('test_tag') && saved.category === 'catGaming' && saved.hashtags.includes('klip');
@@ -601,6 +653,12 @@ export async function runTestDriver(kine: {
       const timer = await recWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-record.recording'); const t = b && b.querySelector('.rec-time'); return !!t && /^0:0[1-9]$/.test(t.textContent.trim()); })()`);
       await shot(recWin, 'settings-recording');
       await sleep(4500);
+      // Pád uprostřed zápasu (appka nebo Windows): kopie rozjeté složky zásobníku jako po jiném, mrtvém
+      // procesu (<název>-99999) - při dalším startu se z ní má slepit nahrávka "obnoveno po pádu".
+      const bufDir: string = (kine as any).capture.bufferDir;
+      const leftover = `${bufDir}-99999`;
+      rmSync(leftover, { recursive: true, force: true });
+      cpSync(bufDir, leftover, { recursive: true });
       const beforeStop = new Set(kine.library.list().map((c) => c.id));
       await recWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-record.recording'); if (b) b.click(); return !!b; })()`);
       let rec: any = null;
@@ -628,9 +686,120 @@ export async function runTestDriver(kine: {
       const red = (p: number[]) => p[2] >= 240 && p[1] <= 90 && p[0] <= 90;
       result.trayDot = red(corner) && !red(opposite);
       result.recording = started && running && timer && !!rec && rec.durationSeconds >= 4 && /recording/i.test(rec.title) && badge && !(kine as any).capture.recordingInfo() && kine.capture.state === 'on';
+
+      // Obnova po pádu: složka mrtvého procesu se odloží a slepí; nic nezůstane v dočasné složce.
+      const { moved, waiting } = (kine as any).capture.salvageLeftovers();
+      const recovered: any[] = await (kine as any).recoverRecordings();
+      const rc = recovered[0];
+      const recoverDirs = readdirSync(dirname(bufDir)).filter((n) => n.startsWith(`${basename(bufDir)}.recover-`));
+      result.recoveryDebug = { moved, waiting, count: recovered.length, duration: rc?.durationSeconds, title: rc?.title, tracks: rc?.audioTracks, leftoverGone: !existsSync(leftover), recoverDirs };
+      result.recovery = moved === 1 && waiting === 1 && recovered.length === 1 && rc.durationSeconds >= 3 && rc.kind === 'recording' && /recovered/i.test(rc.title) && existsSync(rc.file) && !existsSync(leftover) && recoverDirs.length === 0;
+
+      // Spadne snímací stránka uprostřed nahrávání zápasu: kousky se odloží a slepí hned,
+      // zásobník se za pár sekund sám rozjede znovu.
+      await (kine as any).toggleRecording();
+      await sleep(5000);
+      const beforeCrash = new Set(kine.library.list().map((c) => c.id));
+      const capWin = (kine as any).capture.window as BrowserWindow | null;
+      if (capWin && !capWin.isDestroyed()) capWin.webContents.forcefullyCrashRenderer();
+      // Hra spadla s ním (konec hry hned po pádu snímání): uložení nahrávky nesmí kousky zahodit.
+      await sleep(400);
+      const finishedDuringCrash = await (kine as any).finishRecording('game-ended');
+      let crashRec: any = null;
+      let backOn = false;
+      for (let i = 0; i < 120 && !(crashRec && backOn); i++) {
+        await sleep(250);
+        crashRec = kine.library.list().find((c) => !beforeCrash.has(c.id) && c.kind === 'recording');
+        backOn = kine.capture.state === 'on';
+      }
+      result.crashRecovery = { recovered: !!crashRec, duration: crashRec?.durationSeconds, title: crashRec?.title, backOn, stillRecording: !!(kine as any).capture.recordingInfo(), finishedDuringCrash: !!finishedDuringCrash };
+      result.crashRecoveryOk = !!crashRec && crashRec.durationSeconds >= 3 && /recovered/i.test(crashRec.title) && backOn && !(kine as any).capture.recordingInfo() && !finishedDuringCrash;
+      await sleep(waitMs);
+
+      // Snímací stránka nahlásí chybu (nespadne) a nahrávka se pak zastaví: ani tak se kousky nezahodí.
+      await (kine as any).toggleRecording();
+      await sleep(4500);
+      const beforeError = new Set(kine.library.list().map((c) => c.id));
+      const gens = (kine as any).capture.generations as { id: number }[];
+      (kine as any).capture.handleEvent({ type: 'error', generation: gens[gens.length - 1]?.id ?? 0, message: 'test: MediaRecorder error' });
+      const finishedAfterError = await (kine as any).finishRecording('user');
+      // Nahrávka se slepí z kousků a zásobník se za pár sekund rozjede sám (chyba za běhu, ne při startu).
+      let errorRec: any = null;
+      let errorBackOn = false;
+      for (let i = 0; i < 120 && !(errorRec && errorBackOn); i++) {
+        await sleep(250);
+        errorRec = kine.library.list().find((c) => !beforeError.has(c.id) && c.kind === 'recording');
+        errorBackOn = kine.capture.state === 'on';
+      }
+      result.errorStopRecovery = { finished: !!finishedAfterError, recovered: !!errorRec, duration: errorRec?.durationSeconds, backOn: errorBackOn };
+      result.errorStopRecoveryOk = !finishedAfterError && !!errorRec && errorRec.durationSeconds >= 2 && errorBackOn && !(kine as any).capture.recordingInfo();
+      await sleep(waitMs);
       kine.openSettings('settings');
       await sleep(700);
       result.recordHotkeyField = await recWin.webContents.executeJavaScript(`document.querySelectorAll('.panel .field .hotkey').length === 3`);
+    }
+
+    // Kvalita: předvolba "Doporučené (1080p60)", řádek o tom, kdo kóduje (grafika / procesor), a posun zvuku ±300 ms.
+    kine.openSettings('settings');
+    await sleep(700);
+    const qWin = kine.settingsWindow;
+    if (qWin && !qWin.isDestroyed()) {
+      result.qualityPanel = await qWin.webContents.executeJavaScript(
+        `(() => { const r = document.querySelector('.quality-recommended'); const e = document.querySelector('.encoder-status'); const o = document.querySelector('input.audio-offset'); if (e) e.closest('.panel').scrollIntoView({ block: 'start' }); return !!r && !!e && e.textContent.trim().length > 10 && !!o && o.min === '-300' && o.max === '300'; })()`
+      );
+      await sleep(200);
+      await shot(qWin, 'settings-quality');
+    }
+
+    // Diagnostika pro podporu: verze, snímání, zvuk, konec protokolu - bez domovské složky; tlačítko v O aplikaci ji dá do schránky.
+    const diag: string = await (kine as any).diagnostics();
+    kine.openSettings('about');
+    await sleep(700);
+    const diagWin = kine.settingsWindow;
+    if (diagWin && !diagWin.isDestroyed()) {
+      await clipboard.writeText('');
+      await diagWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.copy-diagnostics'); if (b) b.click(); return !!b; })()`);
+      await sleep(900);
+      const copied = await diagWin.webContents.executeJavaScript(`!!document.querySelector('.diagnostics-copied')`);
+      const board = await clipboard.readText();
+      await diagWin.webContents.executeJavaScript(`(() => { const p = document.querySelector('.diagnostics'); if (p) p.scrollIntoView({ block: 'center' }); return true; })()`);
+      await shot(diagWin, 'settings-about-diagnostics');
+      result.diagnosticsHead = diag.split('\n').slice(0, 8);
+      result.diagnostics = /Capture: /.test(diag) && /Audio: /.test(diag) && /--- log ---/.test(diag) && !diag.includes(homedir() + '/') && copied && board.includes('Capture: ');
+    }
+
+    // Klip na výšku (9:16) má v knihovně stejně vysokou kartu jako ostatní: náhled 16:9, obraz uprostřed
+    // na rozmazaném pozadí a štítek 9:16 (dřív se karta natáhla přes dvě řady).
+    kine.openSettings('clips');
+    await sleep(800);
+    const gridWin = kine.settingsWindow;
+    if (gridWin && !gridWin.isDestroyed()) {
+      result.portraitCard = await gridWin.webContents.executeJavaScript(`(() => {
+        const cards = [...document.querySelectorAll('.clips .clip')];
+        const portrait = cards.find((c) => c.querySelector('.thumb.portrait'));
+        const landscape = cards.find((c) => !c.querySelector('.thumb.portrait'));
+        if (!portrait || !landscape) return { found: false };
+        const ph = portrait.querySelector('.thumb').getBoundingClientRect().height;
+        const lh = landscape.querySelector('.thumb').getBoundingClientRect().height;
+        return { found: true, ph, lh, badge: !!portrait.querySelector('.ratio-badge'), fg: !!portrait.querySelector('.thumb-fg'), bg: !!portrait.querySelector('.thumb-bg') };
+      })()`);
+      const pc = result.portraitCard as any;
+      result.portraitCardOk = !!pc.found && Math.abs(pc.ph - pc.lh) < 1 && pc.badge && pc.fg && pc.bg;
+      await gridWin.webContents.executeJavaScript(`(() => { const c = document.querySelector('.clips .clip .thumb.portrait'); if (c) c.scrollIntoView({ block: 'center' }); return true; })()`);
+      await shot(gridWin, 'settings-clips-portrait');
+
+      // Klip se samostatnými stopami: v úpravách je místo "bez zvuku" výběr zvuku (hra + mikrofon / jen hra / ...).
+      if (multiClipId) {
+        const opened = await gridWin.webContents.executeJavaScript(`(() => { const c = document.querySelector('.clips .clip[data-id="${multiClipId}"] .thumb'); if (c) { c.scrollIntoView({ block: 'center' }); c.click(); } return !!c; })()`);
+        await sleep(1200);
+        await gridWin.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head button')].find((x) => !x.disabled && x.textContent && !x.classList.contains('player-close') && !x.classList.contains('hidden')); if (b) b.click(); return !!b; })()`);
+        await sleep(600);
+        const trimAudio = await gridWin.webContents.executeJavaScript(`(() => { const r = document.querySelector('.player-box.editing .trim-audio-row'); const m = document.querySelector('.player-box.editing .trim input[type=checkbox]'); return { row: !!r && !r.classList.contains('hidden'), options: r ? r.querySelector('select').options.length : 0 }; })()`);
+        await shot(gridWin, 'settings-clips-trim-audio');
+        result.trimAudioSelect = opened && trimAudio.row && trimAudio.options === 4;
+        await gridWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.player-close'); if (b) b.click(); return !!b; })()`);
+        await sleep(400);
+      }
     }
 
     // Koš: smazání z karty (dvojí klik = potvrzení) dá klip do koše, tlačítko Koš ho ukáže,
@@ -723,6 +892,8 @@ export async function runTestDriver(kine: {
         // Skutečné hladiny z falešného mikrofonu: proužek mikrofonu se hýbe, hra žádná (Linux).
         await sleep(1500);
         const real = await audioWin.webContents.executeJavaScript(`(() => { const m = document.querySelector('.meter.mic > span'); const s = document.querySelector('.meter.system'); return { mic: m ? parseFloat(m.style.width) : -1, systemOff: !!s && s.classList.contains('off') }; })()`);
+        await audioWin.webContents.executeJavaScript(`(() => { const p = document.querySelector('.audio-panel'); if (p) p.scrollIntoView({ block: 'start' }); return true; })()`);
+        await sleep(200);
         await shot(audioWin, 'settings-audio');
         result.audioDebug = { panel, real };
         result.audioPanel = panel && real.mic > 5 && real.systemOff;
@@ -769,11 +940,12 @@ export async function runTestDriver(kine: {
       'inlinePlayer', 'gridUntouched', 'trimPanel', 'trimNewClip', 'trimReplace', 'vertical', 'verticalUi', 'autoClip', 'overlayClosed', 'filters',
       'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks', 'reviewMerge', 'updateUi',
       'playerNav', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
-      'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel',
+      'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
       'colorPicker', 'brandIcon', 'brandMarkSvg',
     ];
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];
     if (process.env.KINE_TEST_FAKE_AUDIO) checks.push('fakeAudioMeter', 'fakeAudioClip');
+    if (process.env.KINE_TEST_FAKE_AUDIO === 'full') checks.push('multiTrackOk', 'trimAudioSelect');
     result.failed = checks.filter((k) => result[k] !== true);
     result.ok = !!clip1 && !!clip2 && kine.capture.state === 'on' && (result.failed as string[]).length === 0 && result.brandColor === '#a34ff7';
   } catch (e) {

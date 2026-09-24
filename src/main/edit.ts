@@ -1,6 +1,6 @@
 import { statSync } from 'node:fs';
 import { spawnFfmpeg, probe, runFfmpeg } from './ffmpeg';
-import { GIF_FPS, GIF_WIDTH, gifArgs, mergePlan, progressPercent, verticalCropFilter, type MergeInput } from './editPlan';
+import { GIF_FPS, GIF_WIDTH, gifArgs, mergePlan, progressPercent, trimAudioPlan, verticalCropFilter, type AudioChoice, type AudioTrackKind, type MergeInput } from './editPlan';
 import { log } from './log';
 
 /**
@@ -27,9 +27,13 @@ export type TrimOptions = {
    * z téhož snímku (nic se neořízne).
    */
   vertical?: 'left' | 'center' | 'right' | 'blur';
+  /** Jaký zvuk nechat (klip se samostatnými stopami hra / mikrofon); bez tohohle všechno. */
+  audio?: AudioChoice;
+  /** Stopy zdroje (Clip.audioTracks) - podle nich se pozná, kde je hra a kde mikrofon. */
+  audioTracks?: AudioTrackKind[];
 };
 
-export type TrimResult = { file: string; durationSeconds: number; sizeBytes: number; width: number | null; height: number | null };
+export type TrimResult = { file: string; durationSeconds: number; sizeBytes: number; width: number | null; height: number | null; audioTracks?: AudioTrackKind[] | null };
 
 /**
  * Spustí ffmpeg s `-progress pipe:1` a hlásí procenta podle out_time
@@ -96,14 +100,17 @@ export async function trimClip(input: string, output: string, options: TrimOptio
   } else {
     args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart');
   }
-  if (options.mute) args.push('-an');
-  else args.push('-c:a', isWebm ? 'libopus' : 'aac', '-b:a', '160k');
+  // Obraz vždycky první video stopa; zvuk podle volby (všechny stopy / jen hra / jen mikrofon / nic).
+  const audio = trimAudioPlan(options.audioTracks, options.mute ? 'none' : options.audio);
+  args.push('-map', '0:v:0', ...audio.maps);
+  if (audio.maps.length === 0) args.push('-an');
+  else args.push('-c:a', isWebm ? 'libopus' : 'aac', '-b:a', isWebm ? '128k' : '192k');
   args.push(output);
 
   await runWithProgress(args, length, 'zkrácení klipu', onProgress);
   const result = await describe(output, length);
   onProgress?.(100);
-  return result;
+  return { ...result, audioTracks: audio.tracks };
 }
 
 /**

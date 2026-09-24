@@ -6,7 +6,7 @@ import { HotkeyRecorder, formatHotkey, hotkeyLabel } from '../shared/hotkeys';
 import { DISCORD_FILE_MAX_BYTES, isDiscordWebhook, suggestedMbps } from '../shared/settingsSchema';
 import { applyBrandColor, clipOptionsFor, maxClipSecondsFor } from '../shared/plan';
 import { performanceProfile } from '../shared/performance';
-import { clear, clipMeta, errorText, fileUrl, formatBytes, formatDate, formatDuration, h } from './ui';
+import { clear, clipMeta, errorText, fileUrl, formatBytes, formatDate, formatDuration, h, isPortrait, thumbImages } from './ui';
 import { closePlayer, openPlayer, openPlayerId, type Neighbors, type PlayerHandle } from './player';
 import { VIDEO_LANGS, openUploadDialog } from './uploadDialog';
 
@@ -133,11 +133,13 @@ async function init() {
   // Měřáky zvuku: jen proužky, celá stránka se překreslí až když se změní, co je k vidění (ticho / zvuk).
   void kine.getAudioLevels().then((l) => {
     audioLevels = l;
+    smoothLevels(l);
     updateMeters();
   });
   kine.onAudioLevels((l) => {
     const before = audioLevels;
     audioLevels = l;
+    smoothLevels(l);
     const silentBefore = !!before && before.system !== null && before.systemSilentSeconds >= 10;
     const silentNow = l.system !== null && l.systemSilentSeconds >= 10;
     const trackChanged = !before || (before.system === null) !== (l.system === null) || (before.mic === null) !== (l.mic === null) || before.systemDevice !== l.systemDevice;
@@ -509,6 +511,7 @@ function render() {
       : h('div', { class: 'main' }, h('div', { class: `page ${tab === 'clips' ? 'wide' : ''}` }, renderTab()));
   if (tab !== 'kine') app.append(renderSide());
   syncRecTimer();
+  syncAudioWatch();
   app.append(newMain);
   newMain.scrollTop = scrollTop;
   syncKineView();
@@ -527,6 +530,10 @@ function clipsPlus(): boolean {
 }
 
 /** Je zapnuté úsporné nastavení (720p / 30 fps / 5 Mb/s)? */
+function recommendedActive(): boolean {
+  return settings.maxHeight === 1080 && settings.fps === 60 && settings.videoMbps === 20;
+}
+
 function lowLoadActive(): boolean {
   return settings.maxHeight === 720 && settings.fps === 30 && settings.videoMbps <= 5;
 }
@@ -549,6 +556,16 @@ function statusText(): { text: string; cls: string } {
   if (settings.detection === 'always') return { text: t('trayIdleAlways'), cls: '' };
   return { text: t('trayIdle'), cls: '' };
 }
+
+/** Měřáky zvuku jsou vidět (Záznam, okno v popředí) -> ať chodí plynule; jinak jednou za sekundu. */
+let audioWatched = false;
+function syncAudioWatch() {
+  const want = tab === 'settings' && wizardStep === null && document.visibilityState === 'visible';
+  if (want === audioWatched) return;
+  audioWatched = want;
+  void kine.watchAudio(want);
+}
+document.addEventListener('visibilitychange', () => syncAudioWatch());
 
 /** Kolik nahrávka zápasu zatím trvá ("12:34"); tiká každou sekundu bez překreslování celé stránky. */
 function recordingTime(): string {
@@ -957,15 +974,29 @@ function renderSettings() {
         'div',
         { class: 'spread' },
         h('h2', { style: 'margin:0' }, t('qualityTitle')),
-        // Jedním klikem nejúspornější nastavení - pro slabší PC nebo když hra při nahrávání trhá.
         h(
-          'button',
-          {
-            class: `small ${lowLoadActive() ? 'quiet' : ''}`,
-            disabled: lowLoadActive(),
-            onclick: () => update({ maxHeight: 720, fps: 30, videoMbps: 5 }),
-          },
-          '🍃 ' + t('lowLoadPreset')
+          'div',
+          { class: 'row', style: 'gap:6px' },
+          // Doporučená kvalita pro hry (plynulý obraz, žádné kostičky) - s kódováním na grafice skoro nic nestojí.
+          h(
+            'button',
+            {
+              class: `small quality-recommended ${recommendedActive() ? 'quiet' : ''}`,
+              disabled: recommendedActive(),
+              onclick: () => update({ maxHeight: 1080, fps: 60, videoMbps: 20 }),
+            },
+            '⚡ ' + t('recommendedPreset')
+          ),
+          // Jedním klikem nejúspornější nastavení - pro slabší PC nebo když hra při nahrávání trhá.
+          h(
+            'button',
+            {
+              class: `small ${lowLoadActive() ? 'quiet' : ''}`,
+              disabled: lowLoadActive(),
+              onclick: () => update({ maxHeight: 720, fps: 30, videoMbps: 5 }),
+            },
+            '🍃 ' + t('lowLoadPreset')
+          )
         )
       ),
       h('p', { class: 'hint', style: 'margin-top:-4px' }, t('lowLoadHint')),
@@ -1011,6 +1042,12 @@ function renderSettings() {
         )
       ),
       h('p', { class: 'hint' }, t('videoMbpsHint', { mbps: suggestedMbps(settings.maxHeight, settings.fps) })),
+      // Kdo kóduje: grafika (skoro zadarmo) / procesor (náročné - appka pak nahrává nejvýš 30 fps).
+      h(
+        'p',
+        { class: `hint encoder-status ${status.hwEncoder === false ? 'warn-text' : status.hwEncoder ? 'ok' : ''}`, style: 'margin:0' },
+        status.hwEncoder === true ? '✓ ' + t('encoderHardware') : status.hwEncoder === false ? '⚠ ' + t('encoderSoftware') : t('encoderUnknown')
+      ),
       h(
         'label',
         {},
@@ -1138,11 +1175,37 @@ async function refreshAudioDevices(): Promise<void> {
   }
 }
 
+/**
+ * Co ukazují proužky: nahoru hned, dolů pomalu (jako měřák na mixpultu) -
+ * jinak proužek mezi slabikami a údery skáče a působí to sekaně.
+ * Za každé čtení (10x za sekundu) klesne nejvýš o 2,5 dB.
+ */
+const shownLevels: { system: number | null; mic: number | null } = { system: null, mic: null };
+function smoothLevels(l: AudioLevels | null) {
+  const next = (prev: number | null, value: number | null | undefined) => (value === null || value === undefined ? null : Math.max(value, (prev ?? 0) * 0.75));
+  shownLevels.system = next(shownLevels.system, l?.system);
+  shownLevels.mic = next(shownLevels.mic, l?.mic);
+}
+
+/** Hladina 0-1 -> šířka proužku v % (logaritmicky, -60 až 0 dB), ať je slyšitelný zvuk vidět. */
+function meterPercent(value: number | null | undefined): number {
+  if (value === null || value === undefined) return 0;
+  const db = value > 0 ? 20 * Math.log10(value) : -100;
+  return Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
+}
+
+/**
+ * Barvy proužku patří celé dráze, ne proužku: tichý zvuk je jen barva appky,
+ * oranžová a červená až u opravdu hlasitého (dřív měl i krátký proužek
+ * na konci červenou, jako by zvuk přebuzoval).
+ */
+function meterStyle(percent: number): string {
+  return `width:${percent}%;background-size:${percent > 0.5 ? (100 / percent) * 100 : 100}% 100%`;
+}
+
 /** Měřák hladiny 0-1: proužek v logaritmickém měřítku, ať je slyšitelný zvuk vidět. */
 function meter(value: number | null, cls: string) {
-  const db = value && value > 0 ? 20 * Math.log10(value) : -100;
-  const percent = value === null ? 0 : Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
-  return h('div', { class: `progress meter ${cls} ${value === null ? 'off' : ''}` }, h('span', { style: `width:${percent}%` }));
+  return h('div', { class: `progress meter ${cls} ${value === null ? 'off' : ''}` }, h('span', { style: meterStyle(meterPercent(value)) }));
 }
 
 /** Živě překreslované měřáky (jen proužky, ne celá stránka). */
@@ -1151,13 +1214,10 @@ function updateMeters() {
   const sys = app.querySelector('.meter.system > span') as HTMLElement | null;
   const mic = app.querySelector('.meter.mic > span') as HTMLElement | null;
   const set = (el: HTMLElement | null, value: number | null | undefined) => {
-    if (!el) return;
-    const v = value ?? null;
-    const db = v && v > 0 ? 20 * Math.log10(v) : -100;
-    el.style.width = `${v === null ? 0 : Math.max(0, Math.min(100, ((db + 60) / 60) * 100))}%`;
+    if (el) el.setAttribute('style', meterStyle(meterPercent(value)));
   };
-  set(sys, l?.system);
-  set(mic, l?.mic);
+  set(sys, l ? shownLevels.system : null);
+  set(mic, l ? shownLevels.mic : null);
   const note = app.querySelector('.audio-live-note') as HTMLElement | null;
   if (note) note.textContent = audioLiveNote();
 }
@@ -1170,6 +1230,39 @@ function audioLiveNote(): string {
   const device = l.systemDevice || t('audioDefaultDevice');
   if (l.systemSilentSeconds >= 10) return t('audioSilentNote', { device, seconds: l.systemSilentSeconds });
   return t('audioSourceNote', { device });
+}
+
+/** Zařízení Bluetooth (Chromium dává do názvu "(Bluetooth)", sluchátka v režimu hovoru "Hands-Free"). */
+function isBluetooth(label: string): boolean {
+  return /\(Bluetooth\)|hands-?free|\bLE Audio\b/i.test(label);
+}
+
+/** Posun zvuku vůči obrazu (-300..+300 ms): když zvuk v klipech sedí jinak, než by měl. */
+function offsetSlider() {
+  const value = settings.audioOffsetMs;
+  const label = (ms: number) => (ms === 0 ? t('audioOffsetNone') : ms > 0 ? t('audioOffsetLater', { ms }) : t('audioOffsetEarlier', { ms: -ms }));
+  const out = h('b', { style: 'min-width:120px;text-align:right' }, label(value));
+  return h(
+    'div',
+    { class: 'stack', style: 'gap:4px' },
+    h(
+      'label',
+      { class: 'gain' },
+      h('span', {}, t('audioOffset')),
+      h('input', {
+        type: 'range',
+        class: 'audio-offset',
+        min: '-300',
+        max: '300',
+        step: '10',
+        value: String(value),
+        oninput: (e: Event) => (out.textContent = label(Number((e.target as HTMLInputElement).value))),
+        onchange: (e: Event) => update({ audioOffsetMs: Number((e.target as HTMLInputElement).value) }),
+      }),
+      out
+    ),
+    h('p', { class: 'hint', style: 'margin:0' }, t('audioOffsetHint'))
+  );
 }
 
 function audioPanel(win: boolean) {
@@ -1205,12 +1298,16 @@ function audioPanel(win: boolean) {
       'div',
       { class: 'meters' },
       h('span', { class: 'faint' }, '🔊 ' + t('audioMeterSystem')),
-      meter(audioLevels?.system ?? null, 'system'),
+      meter(audioLevels ? shownLevels.system : null, 'system'),
       h('span', { class: 'faint' }, '🎤 ' + t('audioMeterMic')),
-      meter(audioLevels?.mic ?? null, 'mic')
+      meter(audioLevels ? shownLevels.mic : null, 'mic')
     ),
     h('p', { class: `hint audio-live-note ${silent ? 'error' : ''}`, style: 'margin:0' }, audioLiveNote()),
-    silent ? h('p', { class: 'hint audio-silent-help', style: 'margin:0' }, t('audioSilentHelp')) : null,
+    // Sluchátka Bluetooth: nejčastější důvod ticha i špatného zvuku (režim hovoru) - vlastní rada.
+    silent ? h('p', { class: 'hint audio-silent-help', style: 'margin:0' }, isBluetooth(audioLevels?.systemDevice ?? '') ? t('audioSilentHelpBluetooth') : t('audioSilentHelp')) : null,
+    status.capture === 'on' && audioLevels?.bluetoothMicAvoided
+      ? h('p', { class: 'hint audio-bt-note', style: 'margin:0' }, '🎧 ' + (audioLevels.micDevice ? t('audioBluetoothMicSwitched', { mic: audioLevels.micDevice }) : t('audioBluetoothMicOff')))
+      : null,
     checkbox('systemAudio', t('systemAudio'), win ? undefined : t('windowsOnly'), !win),
     settings.systemAudio && win
       ? h(
@@ -1239,15 +1336,20 @@ function audioPanel(win: boolean) {
             'select',
             { class: 'microphone-device', onchange: (e: Event) => update({ microphoneDevice: (e.target as HTMLSelectElement).value }) },
             h('option', { value: '', selected: settings.microphoneDevice === '' }, t('microphoneDefault')),
-            ...inputs.map((d) => h('option', { value: d.id, selected: settings.microphoneDevice === d.id }, d.label)),
+            ...inputs.map((d) => h('option', { value: d.id, selected: settings.microphoneDevice === d.id }, isBluetooth(d.label) ? `${d.label} · ${t('audioBluetoothTag')}` : d.label)),
             settings.microphoneDevice && !inputs.some((d) => d.id === settings.microphoneDevice)
               ? h('option', { value: settings.microphoneDevice, selected: true }, t('audioMissingDevice'))
               : null
-          )
+          ),
+          isBluetooth(inputs.find((d) => d.id === settings.microphoneDevice)?.label ?? '')
+            ? h('span', { class: 'sub hint warn-text', style: 'margin-top:4px;display:block' }, '⚠ ' + t('audioBluetoothMicChosen'))
+            : h('span', { class: 'sub hint', style: 'margin-top:4px;display:block' }, t('microphoneDeviceHint'))
         )
       : null,
     h('div', { class: 'stack', style: 'gap:6px' }, settings.systemAudio ? gainSlider('systemGain', t('systemGain')) : null, settings.microphone ? gainSlider('micGain', t('micGain')) : null),
-    h('p', { class: 'hint', style: 'margin:0' }, t('audioGainHint'))
+    h('p', { class: 'hint', style: 'margin:0' }, t('audioGainHint')),
+    settings.microphone && settings.systemAudio ? checkbox('separateMicTrack', t('separateMicTrack'), t('separateMicTrackHint')) : null,
+    offsetSlider()
   );
 }
 
@@ -2173,9 +2275,9 @@ function renderClips() {
 
     const thumb = h(
       'div',
-      { class: 'thumb', onclick: () => showClip(clip) },
+      { class: `thumb ${isPortrait(clip) ? 'portrait' : ''}`, onclick: () => showClip(clip) },
       // Náhledy se načítají, až když se karta dostane na obrazovku - u stovek klipů to šetří paměť i disk.
-      clip.thumb ? h('img', { src: fileUrl(clip.thumb), alt: '', loading: 'lazy', decoding: 'async' }) : null,
+      ...thumbImages(clip),
       h('span', { class: 'play-badge' }, '▶'),
       clip.kind === 'recording' ? h('span', { class: 'kind-badge' }, '⏺ ' + t('libraryRecordingBadge')) : null,
       h('span', { class: 'dur' }, formatDuration(clip.durationSeconds))
@@ -2257,7 +2359,11 @@ function updateStatus(r: NonNullable<typeof updateResult>) {
   return box;
 }
 
+/** Kdy se naposledy zkopírovala diagnostika (hláška "Zkopírováno" na pár sekund). */
+let diagnosticsCopiedAt = 0;
+
 function renderAbout() {
+  const copied = Date.now() - diagnosticsCopiedAt < 5000;
   return h(
     'div',
     { class: 'stack' },
@@ -2289,6 +2395,33 @@ function renderAbout() {
         h('button', { class: 'small quiet', onclick: () => void kine.openKine() }, t('trayOpenKine'))
       ),
       updateResult ? updateStatus(updateResult) : null
+    ),
+    // Když něco nejde: technické údaje do schránky, hráč je vloží do zprávy.
+    h(
+      'div',
+      { class: 'panel stack diagnostics' },
+      h('h2', { style: 'margin:0' }, t('aboutDiagnosticsTitle')),
+      h('p', { class: 'hint', style: 'margin:0' }, t('aboutDiagnosticsHint')),
+      h(
+        'div',
+        { class: 'row', style: 'align-items:center' },
+        h(
+          'button',
+          {
+            class: 'small copy-diagnostics',
+            onclick: () =>
+              void kine.copyDiagnostics().then(() => {
+                diagnosticsCopiedAt = Date.now();
+                render();
+                setTimeout(() => {
+                  if (tab === 'about') render();
+                }, 5200);
+              }),
+          },
+          '📋 ' + t('aboutDiagnostics')
+        ),
+        copied ? h('span', { class: 'ok diagnostics-copied' }, t('aboutDiagnosticsCopied')) : null
+      )
     ),
     h('div', { class: 'row' }, h('button', { class: 'quiet danger', onclick: () => void kine.quit() }, t('trayQuit')))
   );

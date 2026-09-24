@@ -40,7 +40,7 @@ const kine = {
   pickClipsDir: (): Promise<string | null> => ipcRenderer.invoke('clips:pickDir'),
   clipNow: (): Promise<Clip | null> => ipcRenderer.invoke('clips:clipNow'),
   /** Zkrácení / ztlumení klipu; 'new' = nový klip vedle, 'replace' = přepsat původní. */
-  trimClip: (id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur' }): Promise<Clip> => ipcRenderer.invoke('clips:trim', id, opts),
+  trimClip: (id: string, opts: { start: number; end: number; mute: boolean; mode: 'new' | 'replace'; vertical?: 'left' | 'center' | 'right' | 'blur'; audio?: 'mix' | 'game' | 'mic' | 'none' }): Promise<Clip> => ipcRenderer.invoke('clips:trim', id, opts),
   /** Text do schránky (odkaz na klip). */
   copyText: (text: string): Promise<void> => ipcRenderer.invoke('app:copy', text),
   /** Klip na Discord (webhook z nastavení): nahraný jako odkaz, jinak jako soubor do 10 MB. */
@@ -90,6 +90,7 @@ const kine = {
   /** Kontrola aktualizací: stav, verze, odkud, důvod chyby, odkaz na ruční stažení (viz main/updater.ts). */
   checkUpdate: (): Promise<{ status: string; version?: string; url?: string; message?: string; source?: string; waitingForGame?: boolean }> => ipcRenderer.invoke('app:checkUpdate'),
   openLogs: (): Promise<string> => ipcRenderer.invoke('app:openLogs'),
+  copyDiagnostics: (): Promise<boolean> => ipcRenderer.invoke('app:copyDiagnostics'),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
   /** Otevře Kine: v režimu "Kine + klipy" jako záložku hlavního okna, jinak v prohlížeči. */
   openKine: (path?: string): Promise<void> => ipcRenderer.invoke('app:openKine', path ?? ''),
@@ -110,12 +111,15 @@ const kine = {
   onAudioLevels: (cb: (levels: AudioLevels) => void) => on<AudioLevels>('audio:levels', cb),
   /** Poslední známé hladiny (null = zásobník neběží). */
   getAudioLevels: (): Promise<AudioLevels | null> => ipcRenderer.invoke('audio:levels'),
+  /** Měřáky jsou na obrazovce - plynule (true), nebo už ne (false). */
+  watchAudio: (fast: boolean): Promise<void> => ipcRenderer.invoke('audio:watch', fast),
 };
 
 const kineCapture = {
   platform: process.platform,
   onCommand: (cb: (c: CaptureCommand) => void) => on<CaptureCommand>('capture:command', cb),
-  chunk: (generation: number, data: ArrayBuffer) => ipcRenderer.send('capture:chunk', generation, data),
+  /** Kousek proudu: 'av' (obraz + zvuk hry, výchozí) nebo 'mic' (samostatný proud mikrofonu). */
+  chunk: (generation: number, data: ArrayBuffer, kind: 'av' | 'mic' = 'av') => ipcRenderer.send('capture:chunk', generation, data, kind),
   event: (event: CaptureEvent) => ipcRenderer.send('capture:event', event),
   sources: (): Promise<{ id: string; name: string; display_id: string }[]> => ipcRenderer.invoke('capture:sources'),
   getSettings: (): Promise<Settings> => ipcRenderer.invoke('settings:get'),

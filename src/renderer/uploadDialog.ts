@@ -3,7 +3,7 @@ import { CATEGORY_KEYS, VISIBILITIES } from '../shared/types';
 import type { Key } from '../shared/i18n';
 import { gameHashtag } from '../shared/clipNaming';
 import { formatHashtags, parseHashtags } from '../shared/upload';
-import { clear, fileUrl, h } from './ui';
+import { clear, h, isPortrait, thumbImages } from './ui';
 
 /**
  * Nastavení nahrání na Kine - to samé, co má web ve formuláři nahrávání:
@@ -108,7 +108,7 @@ export function openUploadDialog(options: UploadDialogOptions): UploadDialogHand
       h(
         'div',
         { class: 'upload-clip' },
-        h('div', { class: 'thumb' }, clip.thumb ? h('img', { src: fileUrl(clip.thumb), alt: '' }) : null),
+        h('div', { class: `thumb ${isPortrait(clip) ? 'portrait' : ''}` }, ...thumbImages(clip, false)),
         h(
           'div',
           { class: 'stack', style: 'gap:4px;min-width:0' },

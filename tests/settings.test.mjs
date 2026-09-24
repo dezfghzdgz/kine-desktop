@@ -9,7 +9,8 @@ import { PERFORMANCE, performanceProfile } from '../dist/esm/performance.js';
 test('rozbité nastavení se srovná na výchozí', () => {
   const s = sanitizeSettings({ clipSeconds: 'abc', fps: 45, codec: 'av1', clipHotkey: 'Ctrl+', detection: 'x', customGames: { ' CS2.EXE ': 'CS' }, siteUrl: 'ftp://x' });
   assert.equal(s.clipSeconds, DEFAULT_SETTINGS.clipSeconds);
-  assert.equal(s.fps, 30);
+  assert.equal(s.fps, DEFAULT_SETTINGS.fps);
+  assert.equal(DEFAULT_SETTINGS.fps, 60);
   assert.equal(s.codec, 'auto');
   assert.equal(s.clipHotkey, 'F8');
   assert.equal(s.detection, 'games');
@@ -96,7 +97,9 @@ test('překlady: dosazení proměnných a jazyk ze systému', () => {
   assert.equal(langFromLocale('sk'), 'sk');
   assert.equal(langFromLocale('uk-UA'), 'uk');
   assert.equal(langFromLocale('ja-JP'), null);
-  assert.equal(suggestedMbps(1080, 60), 12);
+  assert.equal(suggestedMbps(1080, 60), 20);
+  assert.equal(suggestedMbps(720, 30), 6);
+  assert.equal(suggestedMbps(1440, 60), 33);
   assert.equal(DEFAULT_SETTINGS.lang, 'en', 'výchozí jazyk je angličtina');
 });
 
@@ -181,4 +184,30 @@ test('hashtagy: bez #, malými písmeny, bez dvojic a mezer, s diakritikou, nejv
   assert.deepEqual(parseHashtags(''), []);
   assert.deepEqual(parseHashtags('a b c d e f g h i j k l m n o p q').length, 15);
   assert.equal(formatHashtags(['klip', 'cs2']), '#klip #cs2');
+});
+
+test('nastavení ze starší verze: nedotčená kvalita 1080p30 8 Mb/s se zvedne na 1080p60 20 Mb/s, ručně nastavená zůstane', () => {
+  const untouched = sanitizeSettings({ version: 2, fps: 30, videoMbps: 8, maxHeight: 1080, microphone: false });
+  assert.equal(untouched.version, 3);
+  assert.equal(untouched.fps, 60);
+  assert.equal(untouched.videoMbps, 20);
+  // Přechod z 2 na 3 nesmí zapnout mikrofon jako přechod z 1 na 2.
+  assert.equal(untouched.microphone, false);
+  const custom = sanitizeSettings({ version: 2, fps: 30, videoMbps: 12, maxHeight: 1080 });
+  assert.equal(custom.fps, 30);
+  assert.equal(custom.videoMbps, 12);
+  const lowLoad = sanitizeSettings({ version: 2, fps: 30, videoMbps: 5, maxHeight: 720 });
+  assert.equal(lowLoad.fps, 30);
+  assert.equal(lowLoad.maxHeight, 720);
+  // Verze 3 se už nepřepisuje, i když má stará čísla schválně.
+  const v3 = sanitizeSettings({ version: 3, fps: 30, videoMbps: 8, maxHeight: 1080 });
+  assert.equal(v3.fps, 30);
+  assert.equal(v3.videoMbps, 8);
+  // Nové položky zvuku.
+  const audio = sanitizeSettings({ version: 3, audioOffsetMs: 1234.6, separateMicTrack: false, systemGain: 5 });
+  assert.equal(audio.audioOffsetMs, 500);
+  assert.equal(audio.separateMicTrack, false);
+  assert.equal(audio.systemGain, 2);
+  assert.equal(sanitizeSettings({}).audioOffsetMs, 0);
+  assert.equal(sanitizeSettings({}).separateMicTrack, true);
 });

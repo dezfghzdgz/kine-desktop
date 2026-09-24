@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs';
+import { appendFileSync, closeSync, mkdirSync, openSync, readSync, renameSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -30,5 +30,28 @@ export function log(message: string): void {
     appendFileSync(file, line);
   } catch {
     // Když nejde ani zapsat protokol, nemá smysl to hlásit.
+  }
+}
+
+/** Posledních `count` řádků protokolu (čte jen konec souboru) - do diagnostiky pro podporu. */
+export function tailLog(count: number): string[] {
+  if (!dir) return [];
+  const file = join(dir, 'kine.log');
+  try {
+    const size = statSync(file).size;
+    const length = Math.min(size, 96 * 1024);
+    const buffer = Buffer.alloc(length);
+    const fd = openSync(file, 'r');
+    try {
+      readSync(fd, buffer, 0, length, size - length);
+    } finally {
+      closeSync(fd);
+    }
+    const lines = buffer.toString('utf8').split(/\r?\n/).filter(Boolean);
+    // První řádek může být useknutý uprostřed (čte se od půlky souboru).
+    if (length < size) lines.shift();
+    return lines.slice(-count);
+  } catch {
+    return [];
   }
 }

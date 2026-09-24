@@ -10,7 +10,7 @@ import { isHotkey } from './hotkeys';
  * k rozumným hodnotám.
  */
 export const DEFAULT_SETTINGS: Settings = {
-  version: 2,
+  version: 3,
   lang: 'en',
   appMode: 'clipper',
   appModeChosen: false,
@@ -19,14 +19,16 @@ export const DEFAULT_SETTINGS: Settings = {
   recordHotkey: 'Ctrl+F8',
   clipSeconds: 30,
   maxHeight: 1080,
-  fps: 30,
+  fps: 60,
   codec: 'auto',
-  videoMbps: 8,
+  videoMbps: 20,
   systemAudio: true,
   systemAudioDevice: '',
   microphoneDevice: '',
   systemGain: 1,
   micGain: 1,
+  separateMicTrack: true,
+  audioOffsetMs: 0,
   // Mikrofon od začátku - hráč nemá co nastavovat, klip má i jeho hlas.
   microphone: true,
   displayId: '',
@@ -60,6 +62,13 @@ export const CLIP_SECONDS_MAX = 300;
 
 function oneOf<T extends string | number>(value: unknown, allowed: readonly T[], fallback: T): T {
   return (allowed as readonly unknown[]).includes(value) ? (value as T) : fallback;
+}
+
+/** Posun zvuku -500..500 ms, celé ms. */
+function offsetMs(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.round(Math.max(-500, Math.min(500, n)));
 }
 
 /** Hlasitost 0-2 (1 = beze změny), zaokrouhlená na setiny. */
@@ -98,10 +107,14 @@ export function sanitizeSettings(input: unknown): Settings {
 
   // Nastavení ze starší verze (před 0.3): mikrofon se jednou zapne (dřív
   // byl vypnutý a hráč to musel hledat) a režim se znovu odvodí z instalátoru.
-  const upgrade = raw.version !== 2;
+  const upgrade = raw.version !== 2 && raw.version !== 3;
+  // Před 0.9.3 byl základ 1080p / 30 fps / 8 Mb/s - na hry málo (trhaný a
+  // kostičkovaný obraz). Kdo si kvalitu nikdy nesáhl, dostane nový základ
+  // 1080p60 20 Mb/s; kdo si ji nastavil, tomu zůstane.
+  const oldDefaults = raw.version !== 3 && (raw.fps === 30 || raw.fps === undefined) && (raw.videoMbps === 8 || raw.videoMbps === undefined) && (raw.maxHeight === 1080 || raw.maxHeight === undefined);
 
   return {
-    version: 2,
+    version: 3,
     lang: oneOf(raw.lang, LANGS, d.lang),
     appMode: oneOf(raw.appMode, ['clipper', 'full'] as const, d.appMode),
     appModeChosen: upgrade ? false : bool(raw.appModeChosen, d.appModeChosen),
@@ -113,14 +126,16 @@ export function sanitizeSettings(input: unknown): Settings {
       ? Math.min(CLIP_SECONDS_MAX, Math.max(CLIP_SECONDS_MIN, Math.round(clipSeconds)))
       : d.clipSeconds,
     maxHeight: oneOf(raw.maxHeight, [0, 720, 1080, 1440] as const, d.maxHeight),
-    fps: oneOf(raw.fps, [30, 60] as const, d.fps),
+    fps: oldDefaults ? d.fps : oneOf(raw.fps, [30, 60] as const, d.fps),
     codec: oneOf(raw.codec, ['auto', 'h264', 'vp9', 'vp8'] as const, d.codec),
-    videoMbps: Number.isFinite(videoMbps) ? Math.min(50, Math.max(1, videoMbps)) : d.videoMbps,
+    videoMbps: oldDefaults ? d.videoMbps : Number.isFinite(videoMbps) ? Math.min(50, Math.max(1, videoMbps)) : d.videoMbps,
     systemAudio: bool(raw.systemAudio, d.systemAudio),
     systemAudioDevice: text(raw.systemAudioDevice, d.systemAudioDevice, 200),
     microphoneDevice: text(raw.microphoneDevice, d.microphoneDevice, 200),
     systemGain: gain(raw.systemGain, d.systemGain),
     micGain: gain(raw.micGain, d.micGain),
+    separateMicTrack: bool(raw.separateMicTrack, d.separateMicTrack),
+    audioOffsetMs: offsetMs(raw.audioOffsetMs, d.audioOffsetMs),
     microphone: upgrade ? true : bool(raw.microphone, d.microphone),
     displayId: text(raw.displayId, d.displayId, 100),
     detection: oneOf(raw.detection, ['games', 'always', 'manual'] as const, d.detection),
@@ -164,7 +179,8 @@ export const isAccelerator = isHotkey;
  * dává Twitch/YouTube za "dobrou kvalitu"; víc nemá u klipu smysl.
  */
 export function suggestedMbps(maxHeight: Settings['maxHeight'], fps: Settings['fps']): number {
+  // Hry mají rychlý pohyb - na kostičky je potřeba víc než u filmu: 1080p60 ~20 Mb/s (ShadowPlay dává 50).
   const h = maxHeight === 0 ? 1080 : maxHeight;
-  const base = h >= 1440 ? 16 : h >= 1080 ? 8 : 5;
-  return fps === 60 ? Math.round(base * 1.5) : base;
+  const base = h >= 1440 ? 20 : h >= 1080 ? 12 : 6;
+  return fps === 60 ? Math.round(base * 1.65) : base;
 }

@@ -63,6 +63,15 @@ export class Uploader {
       uploadThumbnail?: (videoId: string, file: string) => Promise<void>;
       /** Rozvrh čekání na zpracování (testy ho zkrátí). */
       readySchedule?: () => number[];
+      /**
+       * Soubor, který se opravdu nahraje. Klip s víc zvukovými stopami (hra +
+       * mikrofon, hra, mikrofon) jde na Kine jako kopie jen s první, smíchanou
+       * stopou - Kine hraje jednu. `fresh` = kopie je nová, rozjeté nahrávání
+       * jiné kopie nejde navázat.
+       */
+      prepareFile?: (clip: Clip) => Promise<{ file: string; fresh: boolean }>;
+      /** Nahrávání klipu skončilo (hotovo nebo chyba) - kopie z prepareFile může pryč. */
+      releaseFile?: (clip: Clip) => void;
     }
   ) {}
 
@@ -224,6 +233,7 @@ export class Uploader {
     this.current = { request, abort };
     try {
       const url = await this.uploadOne(clip, request, abort.signal);
+      this.release(clip);
       const fresh = this.deps.library.get(clip.id) ?? clip;
       this.emit({ type: 'done', clip: fresh, url });
     } catch (e) {
@@ -237,6 +247,7 @@ export class Uploader {
         this.queue.unshift(request);
       } else {
         const message = e instanceof Error ? e.message : String(e);
+        this.release(clip);
         this.deps.log(`nahrání selhalo: ${clip.file}: ${message}`);
         this.deps.library.setUpload(clip.id, { state: 'error', message });
         this.emit({ type: 'error', clip, message });
@@ -248,14 +259,26 @@ export class Uploader {
     }
   }
 
+  private release(clip: Clip): void {
+    try {
+      this.deps.releaseFile?.(clip);
+    } catch {
+      // Úklid kopie nesmí shodit nahrávání.
+    }
+  }
+
   private async uploadOne(clip: Clip, request: UploadRequest, signal: AbortSignal): Promise<string> {
     const { library, api } = this.deps;
-    const size = statSync(clip.file).size;
+    const prepared = this.deps.prepareFile ? await this.deps.prepareFile(clip) : { file: clip.file, fresh: false };
+    const file = prepared.file;
+    const size = statSync(file).size;
     const prev = clip.upload;
 
-    // Navázat na rozjeté nahrávání, když z něj něco zbylo.
-    let tusUrl = prev && (prev.state === 'paused' || prev.state === 'uploading') ? prev.tusUrl : undefined;
-    let videoId = prev && (prev.state === 'paused' || prev.state === 'uploading') ? prev.videoId : undefined;
+    // Navázat na rozjeté nahrávání, když z něj něco zbylo (a nahrává se pořád ten samý soubor).
+    const resumable = !!prev && (prev.state === 'paused' || prev.state === 'uploading') && !(prepared.fresh && file !== clip.file);
+    let tusUrl = resumable && prev && (prev.state === 'paused' || prev.state === 'uploading') ? prev.tusUrl : undefined;
+    let videoId = resumable && prev && (prev.state === 'paused' || prev.state === 'uploading') ? prev.videoId : undefined;
+    const startPercent = resumable && prev && 'percent' in prev ? prev.percent : 0;
     let mode: 'tus' | 'basic' = 'tus';
 
     if (!tusUrl || !videoId) {
@@ -268,15 +291,15 @@ export class Uploader {
     const setProgress = (uploaded: number) => {
       library.setUpload(clip.id, { state: 'uploading', percent: Math.min(100, Math.round((uploaded / size) * 100)), tusUrl, videoId });
     };
-    setProgress(prev && 'percent' in prev ? Math.round((prev.percent / 100) * size) : 0);
+    setProgress(Math.round((startPercent / 100) * size));
 
     if (mode === 'tus') {
-      const fd = openSync(clip.file, 'r');
+      const fd = openSync(file, 'r');
       try {
         await tusUpload({
           url: tusUrl,
           size,
-          offset: prev && 'percent' in prev ? Math.floor((prev.percent / 100) * size) : 0,
+          offset: Math.floor((startPercent / 100) * size),
           read: async (offset, length) => {
             const buffer = Buffer.alloc(length);
             const got = readSync(fd, buffer, 0, length, offset);
@@ -290,7 +313,7 @@ export class Uploader {
         closeSync(fd);
       }
     } else {
-      await basicUpload(tusUrl, clip.file, signal, this.deps.fetchImpl ?? fetch);
+      await basicUpload(tusUrl, file, signal, this.deps.fetchImpl ?? fetch);
       setProgress(size);
     }
 

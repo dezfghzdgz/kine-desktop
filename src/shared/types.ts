@@ -78,8 +78,8 @@ export const CATEGORY_KEYS = [
 export type CategoryKey = (typeof CATEGORY_KEYS)[number];
 
 export type Settings = {
-  /** 2 = od verze 0.3 (mikrofon zapnutý v základu, volba režimu zvlášť). */
-  version: 2;
+  /** 2 = od verze 0.3 (mikrofon zapnutý v základu, volba režimu zvlášť); 3 = od 0.9.3 (výchozí kvalita 1080p60 20 Mb/s). */
+  version: 3;
   lang: Lang;
   appMode: AppMode;
   /** Hráč (nebo instalátor) režim vybral; dokud ne, appka ho zkusí odvodit z názvu instalátoru. */
@@ -115,6 +115,10 @@ export type Settings = {
   systemGain: number;
   /** Hlasitost mikrofonu v klipu (1 = beze změny, 0-2). */
   micGain: number;
+  /** Mikrofon i jako druhá, samostatná zvuková stopa v klipu (první je hra + mikrofon). */
+  separateMicTrack: boolean;
+  /** Posun zvuku vůči obrazu v ms (kladné = zvuk později) - kalibrace, když zvuk „nesedí“. */
+  audioOffsetMs: number;
   /** Prázdné = hlavní obrazovka. Jinak id obrazovky z Electronu. */
   displayId: string;
   detection: DetectionMode;
@@ -202,6 +206,12 @@ export type Clip = {
   deletedAt?: string;
   /** S čím se klip nahrává / nahrál (ať se po restartu appky neztratí hashtagy a spol.). */
   uploadOptions?: UploadRequest;
+  /**
+   * Zvukové stopy v souboru, v pořadí: 'mix' (hra + mikrofon), 'game', 'mic'.
+   * Starší klipy to nemají (jedna stopa). Podle toho jde v úpravách vybrat,
+   * jestli klip uložit jen se zvukem hry, jen s mikrofonem, nebo se vším.
+   */
+  audioTracks?: ('mix' | 'game' | 'mic')[];
 };
 
 /** Jak dlouho klip leží v koši, než zmizí sám. */
@@ -260,6 +270,8 @@ export type Status = {
   autoClipsLive: 'cs2' | 'lol' | 'dota2' | 'minecraft' | null;
   /** Běží nahrávání celého zápasu? Od kdy (ms od epochy). */
   recordingSince: number | null;
+  /** Hardwarový kodér H.264 dostupný (podle WebCodecs); null = zásobník ještě neběžel / nejde zjistit. */
+  hwEncoder: boolean | null;
 };
 
 export type GameSource = 'steam' | 'custom' | 'known' | 'fullscreen';
@@ -272,14 +284,31 @@ export type ProcessInfo = { exe: string; name: string; hasWindow: boolean };
 export type CaptureCommand =
   | { type: 'start'; settings: Settings; generation: number }
   | { type: 'restart'; generation: number }
-  | { type: 'stop' };
+  | { type: 'stop' }
+  /** Měřáky zvuku rychle (někdo se dívá do nastavení), nebo jednou za sekundu. */
+  | { type: 'meters'; fast: boolean };
 
 export type CaptureEvent =
-  | { type: 'started'; generation: number; at: number; mimeType: string; audio: boolean }
+  | {
+      type: 'started';
+      generation: number;
+      at: number;
+      mimeType: string;
+      /** Má proud obrazu zvuk hry? */
+      audio: boolean;
+      /** Běží vedle i proud mikrofonu (druhý MediaRecorder)? */
+      mic?: boolean;
+      /** Zpoždění mikrofonu podle Chromia (ms; o tolik je záznam mikrofonu za skutečností). */
+      micLatencyMs?: number;
+      /** Je v počítači hardwarový kodér H.264 (podle WebCodecs)? null = nejde zjistit. */
+      hwEncoder?: boolean | null;
+      /** Snímky za sekundu, se kterými se opravdu nahrává (bez hardwarového kodéru nejvýš 30). */
+      fps?: number;
+    }
   | { type: 'stopped'; generation: number; at: number }
   | { type: 'error'; generation: number; message: string }
   /** Něco nejde, ale nahrává se dál (třeba mikrofon není). */
-  | { type: 'warning'; generation: number; kind: 'microphone' | 'systemAudio'; message: string }
+  | { type: 'warning'; generation: number; kind: 'microphone' | 'systemAudio' | 'bluetoothMic'; message: string }
   /** Hladiny zvuku (0-1, RMS) zhruba každou sekundu - měřáky v nastavení a hlídání ticha. */
   | { type: 'levels'; generation: number; levels: AudioLevels }
   /** Změnilo se výchozí výstupní zařízení Windows (nový název) - loopback je přilepený na staré, snímání se má rozjet znovu. */
@@ -295,6 +324,10 @@ export type AudioLevels = {
   systemDevice: string;
   /** Jak dlouho (s) je zvuk hry úplně tichý (digitální nula) - když hra běží, něco je špatně. */
   systemSilentSeconds: number;
+  /** Mikrofon, který se nahrává (název; prázdné = neznámý / žádný). */
+  micDevice?: string;
+  /** Výchozí mikrofon jsou sluchátka Bluetooth - appka ho nepoužila (vzala jiný, nebo žádný). */
+  bluetoothMicAvoided?: boolean;
 };
 
 /** Zvukové zařízení pro výběr v nastavení (z enumerateDevices v okně). */

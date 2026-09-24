@@ -327,8 +327,15 @@ kbd {
   transition: border-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
 }
 .clip.selected { border-color: rgba(var(--brand-rgb), 0.7); box-shadow: 0 0 0 3px var(--brand-soft); }
-.clip .thumb { position: relative; aspect-ratio: 16 / 9; background: #000; cursor: pointer; }
-.clip .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* Náhled je vždycky 16:9: obrázek leží absolutně, takže vysoký (na výšku) rámeček neroztáhne - dřív
+   se karta klipu 9:16 natáhla přes dvě řady. */
+.clip .thumb { position: relative; aspect-ratio: 16 / 9; background: #000; cursor: pointer; overflow: hidden; }
+.clip .thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+/* Klip na výšku: celý uprostřed, kolem rozmazaná kopie. */
+.thumb.portrait .thumb-bg { object-fit: cover; filter: blur(16px) brightness(0.5) saturate(1.2); transform: scale(1.2); }
+.thumb.portrait .thumb-fg { object-fit: contain; }
+.thumb.portrait video.preview { object-fit: contain !important; background: transparent; }
+.thumb .ratio-badge { position: absolute; left: 8px; bottom: 6px; padding: 1px 7px; border-radius: var(--radius-xs); font-size: var(--fs-2xs); font-weight: 700; letter-spacing: 0.03em; color: #fff; background: rgba(0, 0, 0, 0.72); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18); }
 .clip .thumb .dur { position: absolute; right: 6px; bottom: 6px; background: rgba(0, 0, 0, 0.72); padding: 1px 6px; border-radius: var(--radius-xs); font-size: var(--fs-xs); font-weight: 500; }
 .clip .thumb .play-badge {
   position: absolute; left: 50%; top: 50%; width: 44px; height: 44px; margin: -22px 0 0 -22px;
@@ -474,8 +481,9 @@ button.side-audio-warn { background: none; box-shadow: none; padding: 0; min-hei
 button.side-audio-warn:hover { text-decoration: underline; background: none; }
 .meters { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; font-size: var(--fs-sm); }
 .meter { height: 8px; border-radius: 4px; }
-.meter > span { transition: width 180ms linear; background: linear-gradient(90deg, var(--brand) 0%, var(--brand) 70%, var(--warn) 88%, var(--danger) 100%); }
+.meter > span { transition: width 110ms linear, background-size 110ms linear; background-image: linear-gradient(90deg, var(--brand) 0%, var(--brand) 70%, var(--warn) 88%, var(--danger) 100%); background-repeat: no-repeat; background-position: left center; }
 .meter.off { opacity: 0.35; }
+.warn-text { color: var(--warn) !important; }
 .gain { display: grid; grid-template-columns: 180px 1fr max-content; gap: 12px; align-items: center; font-size: var(--fs-sm); color: var(--text-dim); }
 .gain input[type="range"] { width: 100%; accent-color: var(--brand); margin: 0; }
 .gain b { color: var(--text); font-variant-numeric: tabular-nums; }
@@ -486,8 +494,8 @@ button.side-audio-warn:hover { text-decoration: underline; background: none; }
 .upload-clips { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow: auto; flex: none; }
 .upload-clip { display: grid; grid-template-columns: 96px 1fr; gap: 12px; align-items: center; }
 .upload-clips.single .upload-clip { grid-template-columns: 180px 1fr; }
-.upload-clip .thumb { aspect-ratio: 16 / 9; background: #000; border-radius: var(--radius-sm); overflow: hidden; }
-.upload-clip .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.upload-clip .thumb { position: relative; aspect-ratio: 16 / 9; background: #000; border-radius: var(--radius-sm); overflow: hidden; }
+.upload-clip .thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
 .upload-dialog textarea { resize: vertical; min-height: 64px; line-height: 1.45; }
 .upload-tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 22px; font-size: var(--fs-sm); }
 .upload-tags .tag { padding: 1px 8px; border-radius: var(--radius-pill); background: var(--brand-soft); color: var(--brand); font-weight: 600; font-size: var(--fs-xs); }

@@ -35,6 +35,28 @@ export function fileUrl(path: string): string {
   return encodeURI(normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`).replace(/#/g, '%23').replace(/\?/g, '%3F');
 }
 
+/** Klip na výšku (9:16 export, telefon)? */
+export function isPortrait(clip: Pick<Clip, 'width' | 'height'>): boolean {
+  return !!clip.width && !!clip.height && clip.height > clip.width;
+}
+
+/**
+ * Náhled do karty: rámeček je vždycky 16:9 (mřížka se nerozhodí). Klip na
+ * výšku je uprostřed celý a kolem je jeho rozmazaná kopie - jako na
+ * YouTube Shorts v počítači - plus štítek 9:16.
+ */
+export function thumbImages(clip: Pick<Clip, 'thumb' | 'width' | 'height'>, lazy = true): HTMLElement[] {
+  if (!clip.thumb) return [];
+  const src = fileUrl(clip.thumb);
+  const attrs = lazy ? { loading: 'lazy', decoding: 'async' } : {};
+  if (!isPortrait(clip)) return [h('img', { src, alt: '', ...attrs })];
+  return [
+    h('img', { src, alt: '', class: 'thumb-bg', 'aria-hidden': 'true', ...attrs }),
+    h('img', { src, alt: '', class: 'thumb-fg', ...attrs }),
+    h('span', { class: 'ratio-badge' }, '9:16'),
+  ];
+}
+
 export function clipMeta(clip: Clip, lang: Lang): string {
   const date = new Date(clip.createdAt);
   const when = date.toLocaleString(LOCALES[lang] ?? 'en-GB', { day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' });

@@ -33,9 +33,9 @@ test('sestřih: společný rozměr, ticho místo chybějícího zvuku, concat', 
   assert.equal(plan.fps, 60, 'nejvyšší fps ze vstupů');
   assert.equal(plan.totalSeconds, 9.3);
   const filter = plan.args[plan.args.indexOf('-filter_complex') + 1];
-  assert.match(filter, /\[0:v\]scale=1280:800:force_original_aspect_ratio=decrease,pad=1280:800/);
-  assert.match(filter, /\[1:v\]scale=1280:800/);
-  assert.match(filter, /\[0:a\]aresample=48000/);
+  assert.match(filter, /\[0:v:0\]scale=1280:800:force_original_aspect_ratio=decrease,pad=1280:800/);
+  assert.match(filter, /\[1:v:0\]scale=1280:800/);
+  assert.match(filter, /\[0:a:0\]aresample=48000/);
   assert.match(filter, /aevalsrc=0:s=48000:c=stereo:d=2\.000\[a1\]/, 'klip bez zvuku dostane ticho stejné délky');
   assert.match(filter, /\[v0\]\[a0\]\[v1\]\[a1\]concat=n=2:v=1:a=1\[v\]\[a\]$/);
   assert.equal(plan.args.filter((a) => a === '-i').length, 2);
@@ -89,4 +89,84 @@ test('na výšku 9:16: výřez vlevo/střed/vpravo, rozmazané pozadí jako jede
   assert.match(blur, /\[fg\]scale=.*:h=-2\[fgs\]/);
   assert.match(blur, /\[bgb\]\[fgs\]overlay=x='\(W-w\)\/2':y='\(H-h\)\/2'$/);
   assert.equal((blur.match(/;/g) || []).length, 3);
+});
+
+import { clipMuxArgs, clipAudioTracks } from '../dist/esm/editPlan.js';
+
+const mapsOf = (args) => {
+  const maps = [];
+  for (let i = 0; i < args.length; i++) if (args[i] === '-map') maps.push(args[i + 1]);
+  return maps;
+};
+
+test('slepení klipu: jen obraz + zvuk hry', () => {
+  const args = clipMuxArgs({ videoList: 'v.txt', hasSystemAudio: true, container: 'mp4', output: 'out.mp4', durationSeconds: 30 });
+  assert.deepEqual(args.slice(0, 10), ['-loglevel', 'error', '-fflags', '+genpts', '-f', 'concat', '-safe', '0', '-i', 'v.txt']);
+  // mp4: zvuk hry přes srovnání podle časů (mezery/překryvy mezi kousky) a do AAC.
+  const fc = args[args.indexOf('-filter_complex') + 1];
+  assert.equal(fc, '[0:a]aresample=async=1:min_hard_comp=0.010:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[g1]');
+  assert.deepEqual(mapsOf(args), ['0:v:0', '[g1]']);
+  assert.deepEqual(args.slice(args.indexOf('-c:v'), args.indexOf('-c:v') + 6), ['-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k']);
+  assert.equal(args[args.length - 1], 'out.mp4');
+  assert.ok(args.includes('+faststart'));
+  assert.equal(args[args.indexOf('-t') + 1], '30.050');
+  // WebM bez úprav: zvuk se jen kopíruje, žádný filtr.
+  const webm = clipMuxArgs({ videoList: 'v.txt', hasSystemAudio: true, container: 'webm', output: 'out.webm', durationSeconds: 30 });
+  assert.ok(!webm.includes('-filter_complex'));
+  assert.deepEqual(mapsOf(webm), ['0:v:0', '0:a:0']);
+  assert.deepEqual(webm.slice(webm.indexOf('-c:a'), webm.indexOf('-c:a') + 2), ['-c:a', 'copy']);
+  // Bez zvuku vůbec: žádné -c:a.
+  const silent = clipMuxArgs({ videoList: 'v.txt', hasSystemAudio: false, container: 'mp4', output: 'o.mp4', durationSeconds: 5 });
+  assert.ok(!silent.includes('-c:a'));
+  assert.deepEqual(mapsOf(silent), ['0:v:0']);
+});
+
+test('slepení klipu: hra + mikrofon = tři stopy (mix, hra, mikrofon) s hlasitostmi, posunem a limiterem', () => {
+  const args = clipMuxArgs({
+    videoList: 'v.txt',
+    hasSystemAudio: true,
+    micList: 'm.txt',
+    micOffsetMs: -1250,
+    systemGain: 0.8,
+    micGain: 1.5,
+    audioOffsetMs: 40,
+    separateTracks: true,
+    container: 'mp4',
+    output: 'out.mp4',
+    durationSeconds: 30,
+  });
+  const fc = args[args.indexOf('-filter_complex') + 1];
+  assert.equal(args.filter((a) => a === '-i').length, 2);
+  assert.match(fc, /\[0:a\]aresample=async=1:min_hard_comp=0\.010:first_pts=0,volume=0\.80,adelay=delays=40:all=1,aformat=[^,]*,asplit=2\[g1\]\[g2\]/);
+  // Mikrofon: -1250 + 40 = -1210 ms -> uříznout 1.210 s.
+  assert.match(fc, /\[1:a\]aresample=[^,]*,volume=1\.50,atrim=start=1\.210,asetpts=PTS-STARTPTS,aformat=[^,]*,asplit=2\[m1\]\[m2\]/);
+  assert.match(fc, /\[g1\]\[m1\]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0\.97[^\[]*\[mix\]/);
+  assert.deepEqual(mapsOf(args), ['0:v:0', '[mix]', '[g2]', '[m2]']);
+  assert.ok(args.includes('title=Game + mic') && args.includes('title=Game') && args.includes('title=Mic'));
+  assert.deepEqual(args.slice(args.indexOf('-disposition:a:0'), args.indexOf('-disposition:a:0') + 2), ['-disposition:a:0', 'default']);
+  // Bez samostatných stop: jen mix; WebM zvuk v Opusu.
+  const one = clipMuxArgs({ videoList: 'v.txt', hasSystemAudio: true, micList: 'm.txt', separateTracks: false, container: 'webm', output: 'o.webm', durationSeconds: 10 });
+  assert.deepEqual(mapsOf(one), ['0:v:0', '[mix]']);
+  assert.ok(one.includes('libopus'));
+  assert.ok(!one.some((a) => /asplit/.test(a)));
+  // Jen mikrofon (zvuk hry vypnutý).
+  const micOnly = clipMuxArgs({ videoList: 'v.txt', hasSystemAudio: false, micList: 'm.txt', micOffsetMs: 300, container: 'mp4', output: 'o.mp4', durationSeconds: 10 });
+  assert.match(micOnly[micOnly.indexOf('-filter_complex') + 1], /^\[1:a\]aresample=[^,]*,adelay=delays=300:all=1,aformat=[^,]*\[m1\]$/);
+  assert.deepEqual(mapsOf(micOnly), ['0:v:0', '[m1]']);
+  assert.deepEqual(clipAudioTracks(true, true, true), ['mix', 'game', 'mic']);
+  assert.deepEqual(clipAudioTracks(true, true, false), ['mix']);
+  assert.deepEqual(clipAudioTracks(false, false, true), []);
+});
+
+import { trimAudioPlan } from '../dist/esm/editPlan.js';
+
+test('úprava klipu: zvuk všechno / jen hra / jen mikrofon / nic podle stop zdroje', () => {
+  const layout = ['mix', 'game', 'mic'];
+  assert.deepEqual(trimAudioPlan(layout, 'mix'), { maps: ['-map', '0:a?'], tracks: layout });
+  assert.deepEqual(trimAudioPlan(layout, 'game'), { maps: ['-map', '0:a:1'], tracks: ['game'] });
+  assert.deepEqual(trimAudioPlan(layout, 'mic'), { maps: ['-map', '0:a:2'], tracks: ['mic'] });
+  assert.deepEqual(trimAudioPlan(layout, 'none'), { maps: [], tracks: [] });
+  // Starší klip (stopy neznámé): všechno jako dřív; "jen mikrofon" u klipu bez mikrofonu = první stopa.
+  assert.deepEqual(trimAudioPlan(undefined, 'mic'), { maps: ['-map', '0:a?'], tracks: null });
+  assert.deepEqual(trimAudioPlan(['game'], 'mic'), { maps: ['-map', '0:a:0?'], tracks: ['game'] });
 });

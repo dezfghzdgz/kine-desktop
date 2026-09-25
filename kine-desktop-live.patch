@@ -1,0 +1,1142 @@
+From 971b36fc724f403d905ad7d83284f0e7ca5c5c8b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 24 Sep 2026 21:49:56 +0000
+Subject: [PATCH] =?UTF-8?q?Z=C3=A1lo=C5=BEka=20Live:=20nastaven=C3=AD=20vy?=
+ =?UTF-8?q?s=C3=ADl=C3=A1n=C3=AD,=20hl=C3=A1=C5=A1en=C3=AD=20stavu=20na=20?=
+ =?UTF-8?q?Kine?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/main/kineApi.ts          |  10 ++
+ src/main/live.ts             |  84 +++++++++++---
+ src/main/main.ts             |  12 +-
+ src/renderer/capture.ts      |  11 +-
+ src/renderer/liveDialog.ts   | 135 -----------------------
+ src/renderer/settings.ts     | 207 +++++++++++++++++++++++++++++------
+ src/renderer/style.css       |   5 +
+ src/shared/i18n/cs.ts        |  19 ++++
+ src/shared/i18n/de.ts        |  19 ++++
+ src/shared/i18n/en.ts        |  19 ++++
+ src/shared/i18n/es.ts        |  19 ++++
+ src/shared/i18n/fr.ts        |  19 ++++
+ src/shared/i18n/pl.ts        |  19 ++++
+ src/shared/i18n/sk.ts        |  19 ++++
+ src/shared/i18n/uk.ts        |  19 ++++
+ src/shared/live.ts           |  24 ++++
+ src/shared/settingsSchema.ts |  14 ++-
+ src/shared/types.ts          |  18 ++-
+ tests/live.test.mjs          |  33 +++++-
+ 19 files changed, 512 insertions(+), 193 deletions(-)
+ delete mode 100644 src/renderer/liveDialog.ts
+
+diff --git a/src/main/kineApi.ts b/src/main/kineApi.ts
+index d6552ed..aa4ca7b 100644
+--- a/src/main/kineApi.ts
++++ b/src/main/kineApi.ts
+@@ -65,6 +65,12 @@ export type KineApi = {
+   liveCreate(): Promise<LiveSetup>;
+   /** Název, popis a kategorie přenosu (vidí je diváci na Kine). */
+   liveDetails(details: { title: string; description: string; category: string | null }): Promise<void>;
++  /**
++   * Appka řekne Kine, že vysílá (started / ping po ~15 s / stopped). Kine podle
++   * toho ukáže vysílání jako živé hned, ne až když ho najde u Cloudflare.
++   * `confirmed`: Cloudflare proud opravdu přijímá.
++   */
++  liveSignal(action: 'started' | 'ping' | 'stopped'): Promise<{ confirmed: boolean }>;
+ };
+ 
+ function liveSetupFrom(data: any): LiveSetup {
+@@ -156,6 +162,10 @@ export function createKineApi(deps: {
+     async liveCreate() {
+       return liveSetupFrom({ configured: true, migrated: true, ...(await post('/api/live/me', { action: 'create' })) });
+     },
++    async liveSignal(action) {
++      const data: any = await post('/api/live/me', { action });
++      return { confirmed: data?.confirmed === true };
++    },
+     async liveDetails(details) {
+       await post('/api/live/me', { action: 'details', title: details.title.slice(0, 100), description: details.description.slice(0, 2000), category: details.category });
+     },
+diff --git a/src/main/live.ts b/src/main/live.ts
+index 1ebcb22..dd75561 100644
+--- a/src/main/live.ts
++++ b/src/main/live.ts
+@@ -1,6 +1,6 @@
+ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+-import type { CaptureCommand, CaptureEvent, CaptureState, LiveQuality, LiveStatus, Settings } from '../shared/types';
+-import { LIVE_PRESETS, liveElapsed, liveErrorKind } from '../shared/live';
++import type { CaptureCommand, CaptureEvent, CaptureState, LiveAudio, LiveQuality, LiveStatus, Settings } from '../shared/types';
++import { LIVE_PRESETS, liveElapsed, liveErrorKind, livePresetFor } from '../shared/live';
+ import { LIVE_MAX_BACKLOG_BYTES, liveFfmpegArgs, liveProgressSeconds, liveRetryDelay, maskLiveUrl, rtmpUrl } from './livePlan';
+ import type { KineApi } from './kineApi';
+ 
+@@ -40,10 +40,14 @@ export type LiveDeps = {
+ };
+ 
+ export class LiveController {
+-  private status: LiveStatus = { state: 'idle', since: null, title: '', watchUrl: null, error: null };
++  private status: LiveStatus = { state: 'idle', since: null, title: '', watchUrl: null, error: null, confirmed: null };
+   private wanted = false;
+   private url: string | null = null;
+   private quality: LiveQuality = '720p30';
++  private bitrateKbps = 0;
++  private audio: LiveAudio = { game: true, mic: true };
++  /** Jednou za pár sekund appka Kine řekne, že vysílá (a zjistí, jestli Kine proud vidí). */
++  private pingTimer: ReturnType<typeof setInterval> | null = null;
+   private nextGen = 1;
+   /** Generace, která právě vysílá (0 = žádná). */
+   private gen = 0;
+@@ -76,14 +80,26 @@ export class LiveController {
+   }
+ 
+   /** Začne vysílat. Chyba (nepřihlášený, Kine vysílání nemá...) se vrátí a nic neběží. */
+-  async start(opts: { title: string; quality: LiveQuality }): Promise<LiveStatus> {
++  async start(opts: {
++    title: string;
++    quality: LiveQuality;
++    /** Prázdný = zůstane popis ze studia na Kine. */
++    description?: string;
++    category?: string | null;
++    /** kb/s; 0 / chybí = podle kvality. */
++    bitrateKbps?: number;
++    game?: boolean;
++    mic?: boolean;
++  }): Promise<LiveStatus> {
+     if (this.wanted) return this.current();
+     this.wanted = true;
+     this.attempts = 0;
+     this.slowWarned = false;
+     this.quality = LIVE_PRESETS[opts.quality] ? opts.quality : '720p30';
++    this.bitrateKbps = opts.bitrateKbps ?? 0;
++    this.audio = { game: opts.game ?? true, mic: opts.mic ?? true };
+     const title = opts.title.trim().slice(0, 100);
+-    this.set({ state: 'starting', since: null, title, watchUrl: null, error: null });
++    this.set({ state: 'starting', since: null, title, watchUrl: null, error: null, confirmed: null });
+     try {
+       if (this.deps.testUrl) {
+         this.url = this.deps.testUrl;
+@@ -96,9 +112,11 @@ export class LiveController {
+         if (!setup.input) throw new Error('live-not-configured');
+         this.url = rtmpUrl(setup.input.rtmpsUrl, setup.input.streamKey);
+         if (setup.stream?.ownerId) this.set({ watchUrl: `${this.deps.siteUrl()}/live/${setup.stream.ownerId}` });
+-        // Název vidí diváci; popis a kategorie z webového studia zůstávají.
++        // Název, popis a kategorii vidí diváci. Co hráč nevyplnil v appce (popis), zůstává ze studia na Kine.
++        const description = opts.description?.trim() ? opts.description.trim() : setup.stream?.description ?? '';
++        const category = opts.category ?? setup.stream?.category ?? this.deps.settings().uploadCategory ?? null;
+         await api
+-          .liveDetails({ title, description: setup.stream?.description ?? '', category: setup.stream?.category ?? this.deps.settings().uploadCategory ?? null })
++          .liveDetails({ title, description, category })
+           .catch((e) => this.deps.log(`vysílání: název se nepovedlo uložit: ${(e as Error).message}`));
+       }
+       if (!this.wanted) return this.current();
+@@ -112,7 +130,7 @@ export class LiveController {
+       this.deps.log(`vysílání nezačalo: ${message}`);
+       this.wanted = false;
+       this.killProcess();
+-      this.set({ state: 'idle', since: null, error: message });
++      this.set({ state: 'idle', since: null, error: message, confirmed: null });
+       throw e;
+     }
+   }
+@@ -126,6 +144,7 @@ export class LiveController {
+     if (this.retryTimer) clearTimeout(this.retryTimer);
+     this.retryTimer = null;
+     this.stopWatchdog();
++    this.stopPing();
+     this.deps.capture.sendLive({ type: 'live-stop' });
+     const child = this.ffmpeg;
+     if (child) {
+@@ -143,7 +162,9 @@ export class LiveController {
+     }
+     this.gen = 0;
+     this.deps.log(`vysílání ukončeno${wasLive ? ` (${duration})` : ''}`);
+-    this.set({ state: 'idle', since: null, error: null });
++    this.set({ state: 'idle', since: null, error: null, confirmed: null });
++    // Kine ať přestane ukazovat "živě" hned (při ukončení appky nejvýš 2 s čekání).
++    if (wasLive) await Promise.race([this.signal('stopped'), new Promise((r) => setTimeout(r, reason === 'quit' ? 1500 : 4000))]);
+     if (wasLive && reason === 'user') this.deps.notify('ended', { duration });
+     this.deps.onEnded?.();
+   }
+@@ -227,7 +248,7 @@ export class LiveController {
+       this.stderr += `\n${e.message}`;
+       exit(-1);
+     });
+-    if (!this.deps.capture.sendLive({ type: 'live-start', generation: gen, preset: LIVE_PRESETS[this.quality] })) {
++    if (!this.deps.capture.sendLive({ type: 'live-start', generation: gen, preset: livePresetFor(this.quality, this.bitrateKbps), audio: { ...this.audio } })) {
+       this.onFailure(gen, 'capture-off');
+     }
+   }
+@@ -239,8 +260,14 @@ export class LiveController {
+     if (this.status.state !== 'live') {
+       const first = this.status.since === null;
+       this.set({ state: 'live', since: this.status.since ?? Date.now(), error: null });
+-      if (first) this.deps.notify('live', {});
+-      else this.deps.log('vysílání: znovu připojeno');
++      if (first) {
++        this.deps.notify('live', {});
++        void this.signal('started');
++      } else {
++        this.deps.log('vysílání: znovu připojeno');
++        void this.signal('ping');
++      }
++      this.startPing();
+     }
+     // Minuta bez výpadku = další výpadek začíná počítat pokusy od nuly.
+     if (this.connectedAt && Date.now() - this.connectedAt > 60_000) this.attempts = 0;
+@@ -259,9 +286,12 @@ export class LiveController {
+     if (delay === null) {
+       this.deps.log(`vysílání se vzdává (${this.attempts} pokusů): ${reason}`);
+       const duration = liveElapsed(this.status.since);
++      const wasLive = this.status.since !== null;
+       this.wanted = false;
+       this.stopWatchdog();
+-      this.set({ state: 'idle', since: null, error: reason });
++      this.stopPing();
++      this.set({ state: 'idle', since: null, error: reason, confirmed: null });
++      if (wasLive) void this.signal('stopped');
+       this.deps.notify('failed', { error: reason, duration });
+       this.deps.onEnded?.();
+       return;
+@@ -311,6 +341,34 @@ export class LiveController {
+     this.watchdog = null;
+   }
+ 
++  // ---- hlášení Kine ------------------------------------------------------------------
++
++  /** Řekne Kine, že se vysílá (started / ping) nebo že už ne. Chyba se jen zapíše - vysílání to nesmí shodit. */
++  private async signal(action: 'started' | 'ping' | 'stopped'): Promise<void> {
++    if (this.deps.testUrl) return;
++    try {
++      const result = await this.deps.api().liveSignal(action);
++      if (action !== 'stopped' && this.wanted && this.status.state === 'live' && this.status.confirmed !== result.confirmed) {
++        this.set({ confirmed: result.confirmed });
++      }
++    } catch (e) {
++      this.deps.log(`vysílání: Kine se nepodařilo říct stav (${action}): ${(e as Error).message}`);
++    }
++  }
++
++  private startPing(): void {
++    if (this.pingTimer || this.deps.testUrl) return;
++    this.pingTimer = setInterval(() => {
++      if (this.wanted && this.status.state === 'live') void this.signal('ping');
++    }, 15_000);
++    this.pingTimer.unref?.();
++  }
++
++  private stopPing(): void {
++    if (this.pingTimer) clearInterval(this.pingTimer);
++    this.pingTimer = null;
++  }
++
+   private killProcess(): void {
+     const child = this.ffmpeg;
+     this.ffmpeg = null;
+diff --git a/src/main/main.ts b/src/main/main.ts
+index 1e9633d..aeb028d 100644
+--- a/src/main/main.ts
++++ b/src/main/main.ts
+@@ -899,7 +899,17 @@ class KineApp {
+     if (!this.auth.current() && !(process.env.KINE_TEST && process.env.KINE_TEST_LIVE_URL)) throw new Error('not-logged-in');
+     this.settings.update({ liveTitle: title, liveQuality: quality });
+     if (!this.live.active()) this.liveStartedCapture = this.capture.state !== 'on';
+-    return this.live.start({ title, quality });
++    const status = await this.live.start({
++      title,
++      quality,
++      description: s.liveDescription,
++      category: s.liveCategory,
++      bitrateKbps: s.liveBitrateKbps,
++      game: s.liveGameAudio,
++      mic: s.liveMic,
++    });
++    if (s.liveOpenPage) this.openLivePage();
++    return status;
+   }
+ 
+   async stopLive(): Promise<void> {
+diff --git a/src/renderer/capture.ts b/src/renderer/capture.ts
+index 51e5dbf..23151b3 100644
+--- a/src/renderer/capture.ts
++++ b/src/renderer/capture.ts
+@@ -1,5 +1,5 @@
+ import type { KineCaptureBridge } from '../preload/preload';
+-import type { CaptureCommand, LivePreset, Settings } from '../shared/types';
++import type { CaptureCommand, LiveAudio, LivePreset, Settings } from '../shared/types';
+ 
+ /**
+  * Skrytá snímací stránka.
+@@ -468,7 +468,7 @@ function liveMime(): string | null {
+   return null;
+ }
+ 
+-async function startLive(gen: number, preset: LivePreset): Promise<void> {
++async function startLive(gen: number, preset: LivePreset, wanted: LiveAudio = { game: true, mic: true }): Promise<void> {
+   stopLive();
+   if (!stream) throw new Error('capture-off: snímání neběží');
+   const source = stream.getVideoTracks()[0];
+@@ -501,8 +501,9 @@ async function startLive(gen: number, preset: LivePreset): Promise<void> {
+     ctx.createMediaStreamSource(new MediaStream([track])).connect(node);
+     node.connect(limiter);
+   };
+-  const systemTrack = stream.getAudioTracks()[0] ?? null;
+-  const micTrack = micStream?.getAudioTracks()[0] ?? null;
++  // Hráč si ve vysílání může zvuk hry nebo mikrofon vypnout (klipy se tím nemění).
++  const systemTrack = wanted.game ? stream.getAudioTracks()[0] ?? null : null;
++  const micTrack = wanted.mic ? micStream?.getAudioTracks()[0] ?? null : null;
+   if (systemTrack) mix(systemTrack, currentSettings?.systemGain ?? 1);
+   if (micTrack) mix(micTrack, currentSettings?.micGain ?? 1);
+   if (!systemTrack && !micTrack) {
+@@ -573,7 +574,7 @@ bridge.onCommand(async (command: CaptureCommand) => {
+   // Vysílání má vlastní hlášení chyb - chyba vysílání nesmí shodit zásobník s klipy.
+   if (command.type === 'live-start' || command.type === 'live-stop') {
+     try {
+-      if (command.type === 'live-start') await startLive(command.generation, command.preset);
++      if (command.type === 'live-start') await startLive(command.generation, command.preset, command.audio);
+       else stopLive();
+     } catch (e) {
+       report({ type: 'live-error', generation: command.type === 'live-start' ? command.generation : live?.generation ?? 0, message: (e as Error).message ?? String(e) });
+diff --git a/src/renderer/liveDialog.ts b/src/renderer/liveDialog.ts
+deleted file mode 100644
+index 73612df..0000000
+--- a/src/renderer/liveDialog.ts
++++ /dev/null
+@@ -1,135 +0,0 @@
+-import type { LiveQuality, Settings } from '../shared/types';
+-import type { Key } from '../shared/i18n';
+-import { LIVE_QUALITIES, cleanLiveError, liveErrorTextKey, livePresetLabel } from '../shared/live';
+-import { h } from './ui';
+-
+-/**
+- * Dialog "Vysílat na Kine": název přenosu a kvalita, pak jedno tlačítko.
+- * Klíč pro vysílání si appka vezme z Kine sama; popis, kategorie a záznamy
+- * jsou ve studiu na webu (odkaz dole). Když vysílání nejde (nepřihlášený,
+- * Kine ho ještě nemá zapnuté, špatný internet), řekne to tady a nic neběží.
+- */
+-type T = (key: Key, vars?: Record<string, string | number>) => string;
+-
+-export type LiveDialogOptions = {
+-  settings: Settings;
+-  t: T;
+-  /** Předvyplněný název (poslední vysílání, hra). */
+-  defaultTitle: string;
+-  loggedIn: boolean;
+-  onStart: (opts: { title: string; quality: LiveQuality }) => Promise<void>;
+-  onOpenStudio: () => void;
+-  onSignIn: () => void;
+-};
+-
+-export type LiveDialogHandle = { close: () => void };
+-
+-let current: LiveDialogHandle | null = null;
+-
+-export function liveDialogOpen(): boolean {
+-  return !!current;
+-}
+-
+-export function openLiveDialog(o: LiveDialogOptions): LiveDialogHandle {
+-  current?.close();
+-  const { t } = o;
+-  let busy = false;
+-
+-  const titleInput = h('input', { type: 'text', class: 'live-title', maxlength: '100', placeholder: t('liveDefaultTitle') }) as HTMLInputElement;
+-  titleInput.value = o.defaultTitle;
+-  const quality = h('select', { class: 'live-quality' }, ...LIVE_QUALITIES.map((q) => h('option', { value: q }, livePresetLabel(q)))) as HTMLSelectElement;
+-  quality.value = o.settings.liveQuality;
+-  const error = h('p', { class: 'hint warn live-error hidden' });
+-  const start = h('button', { class: 'primary live-start', onclick: () => void go() }, '● ' + t('liveDialogStart')) as HTMLButtonElement;
+-
+-  const overlay = h('div', { class: 'overlay live-overlay' });
+-  const box = h(
+-    'div',
+-    { class: 'player-box live-dialog', role: 'dialog', 'aria-modal': 'true' },
+-    h(
+-      'div',
+-      { class: 'player-head' },
+-      h('div', { class: 'title' }, h('span', { class: 'live-dot' }), t('liveDialogTitle')),
+-      h('button', { class: 'small quiet player-close', title: t('close'), onclick: () => close() }, '✕')
+-    ),
+-    h(
+-      'div',
+-      { class: 'live-body stack' },
+-      h('p', { class: 'hint' }, t('liveDialogIntro')),
+-      o.loggedIn
+-        ? null
+-        : h(
+-            'p',
+-            { class: 'hint warn live-login' },
+-            t('liveNeedLogin'),
+-            ' ',
+-            h(
+-              'button',
+-              {
+-                class: 'small',
+-                onclick: () => {
+-                  close();
+-                  o.onSignIn();
+-                },
+-              },
+-              t('sideSignIn')
+-            )
+-          ),
+-      h('div', { class: 'field' }, h('label', {}, t('liveDialogName')), titleInput),
+-      h('div', { class: 'field' }, h('label', {}, t('liveDialogQuality')), quality, h('p', { class: 'hint' }, t('liveDialogQualityHint'))),
+-      h('button', { class: 'small quiet live-studio', onclick: () => o.onOpenStudio() }, t('liveDialogStudio') + ' →'),
+-      error,
+-      h('div', { class: 'row live-actions' }, start, h('button', { class: 'quiet', onclick: () => close() }, t('cancel')))
+-    )
+-  );
+-  overlay.append(box);
+-  overlay.addEventListener('mousedown', (e) => {
+-    if (e.target === overlay && !busy) close();
+-  });
+-
+-  async function go() {
+-    if (busy) return;
+-    busy = true;
+-    start.disabled = true;
+-    start.textContent = t('liveDialogStarting');
+-    error.classList.add('hidden');
+-    try {
+-      await o.onStart({ title: titleInput.value.trim(), quality: quality.value as LiveQuality });
+-      close();
+-    } catch (e) {
+-      const message = cleanLiveError((e as Error).message ?? String(e));
+-      const key = liveErrorTextKey(message);
+-      error.textContent = t(key, key === 'liveErrOther' ? { message: message.slice(0, 160) } : {});
+-      error.classList.remove('hidden');
+-      busy = false;
+-      start.disabled = false;
+-      start.textContent = '● ' + t('liveDialogStart');
+-    }
+-  }
+-
+-  function onKey(e: KeyboardEvent) {
+-    if (e.key === 'Escape' && !busy) {
+-      e.stopPropagation();
+-      e.preventDefault();
+-      close();
+-    } else if (e.key === 'Enter' && (e.target === titleInput || e.target === quality)) {
+-      e.preventDefault();
+-      void go();
+-    }
+-  }
+-
+-  function close() {
+-    if (!overlay.isConnected) return;
+-    overlay.remove();
+-    document.removeEventListener('keydown', onKey, true);
+-    if (current === handle) current = null;
+-  }
+-
+-  const handle: LiveDialogHandle = { close };
+-  current = handle;
+-  document.body.append(overlay);
+-  document.addEventListener('keydown', onKey, true);
+-  titleInput.focus();
+-  titleInput.select();
+-  return handle;
+-}
+diff --git a/src/renderer/settings.ts b/src/renderer/settings.ts
+index 77f8b93..ee2d0df 100644
+--- a/src/renderer/settings.ts
++++ b/src/renderer/settings.ts
+@@ -1,5 +1,5 @@
+ import type { KineBridge } from '../preload/preload';
+-import type { AudioDevice, AudioLevels, Clip, DisplayInfo, GameSource, Lang, ProcessInfo, Settings, Status, UploadRequest } from '../shared/types';
++import type { AudioDevice, AudioLevels, Clip, DisplayInfo, GameSource, Lang, LiveQuality, ProcessInfo, Settings, Status, UploadRequest } from '../shared/types';
+ import { CATEGORY_KEYS, LANGS, TRASH_DAYS, VISIBILITIES } from '../shared/types';
+ import { LANG_NAMES, makeT, type Key } from '../shared/i18n';
+ import { HotkeyRecorder, formatHotkey, hotkeyLabel } from '../shared/hotkeys';
+@@ -9,8 +9,7 @@ import { performanceProfile } from '../shared/performance';
+ import { clear, clipMeta, errorText, fileUrl, formatBytes, formatDate, formatDuration, h, isPortrait, thumbImages } from './ui';
+ import { closePlayer, openPlayer, openPlayerId, type Neighbors, type PlayerHandle } from './player';
+ import { VIDEO_LANGS, openUploadDialog } from './uploadDialog';
+-import { openLiveDialog } from './liveDialog';
+-import { liveElapsed } from '../shared/live';
++import { LIVE_BITRATES_KBPS, LIVE_QUALITIES, cleanLiveError, liveElapsed, liveErrorTextKey, livePresetFor, livePresetLabel, liveUploadMbps } from '../shared/live';
+ 
+ /**
+  * Hlavní okno: v režimu "Kine + klipy" první záložka Kine - web Kine přes
+@@ -30,9 +29,9 @@ declare const window: Window & { kine: KineBridge };
+ const kine = window.kine;
+ const app = document.getElementById('app') as HTMLDivElement;
+ 
+-type Tab = 'kine' | 'clips' | 'settings' | 'games' | 'upload' | 'account' | 'about';
+-const TABS: Tab[] = ['kine', 'clips', 'settings', 'games', 'upload', 'account', 'about'];
+-const TAB_KEYS: Record<Tab, Key> = { kine: 'tabKine', clips: 'tabClips', settings: 'tabSettings', games: 'tabGames', upload: 'tabUpload', account: 'tabAccount', about: 'tabAbout' };
++type Tab = 'kine' | 'clips' | 'live' | 'settings' | 'games' | 'upload' | 'account' | 'about';
++const TABS: Tab[] = ['kine', 'clips', 'live', 'settings', 'games', 'upload', 'account', 'about'];
++const TAB_KEYS: Record<Tab, Key> = { kine: 'tabKine', clips: 'tabClips', live: 'tabLive', settings: 'tabSettings', games: 'tabGames', upload: 'tabUpload', account: 'tabAccount', about: 'tabAbout' };
+ /** Barvy jako na webu (components/BrandLogo.tsx). */
+ const PRESET_COLORS = ['#00c9a7', '#4f8ef7', '#f7484f', '#f7b84f', '#a34ff7', '#f74fd6', '#4ff77c', '#ffffff'];
+ 
+@@ -85,6 +84,8 @@ let brandClickTimer: ReturnType<typeof setTimeout> | null = null;
+ let kineShown = false;
+ let kineFailed: string | null = null;
+ let renderQueued = false;
++/** Záložka Live: chyba posledního pokusu o vysílání (text pro hráče). */
++let liveError: string | null = null;
+ 
+ const t = (key: Key, vars?: Record<string, string | number>) => makeT(settings.lang)(key, vars);
+ 
+@@ -98,12 +99,10 @@ async function init() {
+   const wanted = params.get('tab');
+   if (!settings.onboarded || wanted === 'wizard') wizardStep = 0;
+   else if (wanted && visibleTabs().includes(wanted as Tab)) tab = wanted as Tab;
+-  else if (wanted === 'live') tab = 'clips';
+   else if (settings.appMode === 'full') tab = 'kine';
+   document.documentElement.lang = settings.lang;
+   document.title = status.variant === 'clipper' ? 'Kine Clipper' : 'Kine';
+   render();
+-  if (wanted === 'live' && wizardStep === null) openLive();
+   void refreshGameNames();
+ 
+   kine.onSettings((s) => {
+@@ -155,14 +154,6 @@ async function init() {
+     void refreshAudioDevices();
+   });
+   kine.onNavigate((target) => {
+-    if (target === 'live') {
+-      // Lišta u hodin: "Vysílat na Kine…" - okno s dialogem.
+-      if (!visibleTabs().includes(tab) || tab === 'kine') tab = 'clips';
+-      wizardStep = null;
+-      render();
+-      openLive();
+-      return;
+-    }
+     if (visibleTabs().includes(target as Tab)) {
+       tab = target as Tab;
+       wizardStep = null;
+@@ -606,6 +597,7 @@ function syncRecTimer() {
+ const TAB_ICONS: Record<Tab, string> = {
+   kine: '<rect x="3" y="4" width="18" height="14" rx="3"/><path d="M10 8.3v5.4l4.8-2.7z" fill="currentColor" stroke="none"/>',
+   clips: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7.5 4v16M16.5 4v16M3 9h4.5M3 15h4.5M16.5 9H21M16.5 15H21"/>',
++  live: '<circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 4.9a10 10 0 0 0 0 14.2M19.1 4.9a10 10 0 0 1 0 14.2"/>',
+   settings: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>',
+   games: '<path d="M7 8h10a4.5 4.5 0 0 1 4.5 4.5V15a2.6 2.6 0 0 1-4.7 1.5L15.4 14.5H8.6L7.2 16.5A2.6 2.6 0 0 1 2.5 15v-2.5A4.5 4.5 0 0 1 7 8z"/><path d="M8 10.5v3M6.5 12h3"/><circle cx="15.5" cy="11.2" r=".9" fill="currentColor" stroke="none"/><circle cx="17.5" cy="13" r=".9" fill="currentColor" stroke="none"/>',
+   upload: '<path d="M12 15V5M8 9l4-4 4 4"/><path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15"/>',
+@@ -645,7 +637,7 @@ function tabButton(name: Tab) {
+ function liveButton(): HTMLElement {
+   const live = status.live;
+   if (live.state === 'idle') {
+-    return h('button', { class: 'small quiet side-live', title: t('liveDialogTitle'), onclick: () => openLive() }, h('span', { class: 'live-dot' }), t('sideLive'));
++    return h('button', { class: 'small quiet side-live', title: t('liveDialogTitle'), onclick: () => { tab = 'live'; render(); } }, h('span', { class: 'live-dot' }), t('sideLive'));
+   }
+   if (live.state === 'starting') {
+     return h('button', { class: 'small side-live pending', disabled: true }, h('span', { class: 'live-dot' }), t('sideLiveConnecting'));
+@@ -660,30 +652,171 @@ function liveButton(): HTMLElement {
+   );
+ }
+ 
+-/** Dialog "Vysílat na Kine" (tlačítko v panelu, lišta u hodin). */
+-function openLive() {
+-  if (status.live.state !== 'idle') return;
+-  openLiveDialog({
+-    settings,
+-    t,
+-    defaultTitle: settings.liveTitle || status.game || '',
+-    loggedIn: !!status.account,
+-    onStart: async (opts) => {
+-      await kine.startLive(opts);
+-    },
+-    onOpenStudio: () => void kine.openKine('/live'),
+-    onSignIn: () => {
+-      tab = 'account';
+-      render();
+-    },
+-  });
++/** Uloží nastavení bez překreslení - text psaný v poli se nesmí ztratit ani "sebrat" kliknutí na Vysílat. */
++function saveQuiet(patch: Partial<Settings>) {
++  settings = { ...settings, ...patch };
++  void kine.updateSettings(patch);
++}
++
++async function goLive() {
++  liveError = null;
++  render();
++  try {
++    await kine.startLive({ title: settings.liveTitle || status.game || t('liveDefaultTitle'), quality: settings.liveQuality });
++  } catch (e) {
++    const message = cleanLiveError((e as Error).message ?? String(e));
++    const key = liveErrorTextKey(message);
++    liveError = t(key, key === 'liveErrOther' ? { message: message.slice(0, 160) } : {});
++  }
++  render();
++}
++
++/** Záložka Live: co a jak se vysílá na Kine + tlačítko Vysílat / stav vysílání. */
++function renderLive() {
++  const live = status.live;
++  const idle = live.state === 'idle';
++  const kbps = livePresetFor(settings.liveQuality, settings.liveBitrateKbps).videoKbps;
++  const err = liveError ?? (idle ? live.error : null);
++
++  // Nahoře: stav vysílání, nebo velké tlačítko Vysílat.
++  const statusPanel = idle
++    ? h(
++        'div',
++        { class: 'panel stack live-panel' },
++        h('p', { class: 'hint', style: 'margin:0' }, t('liveDialogIntro')),
++        status.account
++          ? null
++          : h('p', { class: 'hint warn live-login' }, t('liveNeedLogin'), ' ', h('button', { class: 'small', onclick: () => { tab = 'account'; render(); } }, t('sideSignIn'))),
++        err ? h('p', { class: 'hint warn live-error' }, err) : null,
++        h('div', { class: 'row live-actions' }, h('button', { class: 'primary live-start', disabled: !status.account, onclick: () => void goLive() }, '● ' + t('liveDialogStart')))
++      )
++    : h(
++        'div',
++        { class: 'panel stack live-panel' },
++        h(
++          'div',
++          { class: 'row' },
++          h('span', { class: 'rec-dot' }),
++          h('b', {}, live.state === 'starting' ? t('sideLiveConnecting') : live.state === 'reconnecting' ? t('sideLiveReconnecting') : t('liveNow')),
++          live.state === 'live' ? h('span', { class: 'live-time' }, liveElapsed(live.since)) : null,
++          h('span', { class: 'grow' }),
++          live.watchUrl ? h('button', { class: 'small quiet', onclick: () => void kine.openLivePage() }, '💬 ' + t('sideLiveOpen')) : null,
++          h('button', { class: 'small', disabled: live.state === 'starting', onclick: () => void kine.stopLive() }, t('sideLiveStop'))
++        ),
++        live.state === 'live' && live.confirmed !== null
++          ? h('p', { class: live.confirmed ? 'ok' : 'hint warn', style: 'margin:0' }, live.confirmed ? '✓ ' + t('liveConfirmedOk') : t('liveConfirmedWait'))
++          : null
++      );
++
++  const locked = !idle; // za běhu vysílání se nastavení už nemění (platí od dalšího)
++  const micOff = !settings.microphone;
++  const gameOff = !settings.systemAudio;
++
++  return h(
++    'div',
++    { class: 'stack' },
++    h('h1', {}, t('tabLive')),
++    statusPanel,
++
++    h(
++      'div',
++      { class: 'panel stack' },
++      h('h2', { style: 'margin:0' }, t('liveSecInfo')),
++      h(
++        'label',
++        {},
++        t('liveDialogName'),
++        h('input', {
++          type: 'text',
++          class: 'live-title',
++          maxlength: '100',
++          value: settings.liveTitle,
++          placeholder: status.game || t('liveDefaultTitle'),
++          disabled: locked,
++          onchange: (e: Event) => saveQuiet({ liveTitle: (e.target as HTMLInputElement).value.trim() }),
++        })
++      ),
++      h(
++        'label',
++        {},
++        t('liveDescriptionLabel'),
++        h('textarea', {
++          class: 'live-description',
++          rows: '3',
++          maxlength: '2000',
++          disabled: locked,
++          onchange: (e: Event) => saveQuiet({ liveDescription: (e.target as HTMLTextAreaElement).value.trim() }),
++        }, settings.liveDescription),
++        h('span', { class: 'hint' }, t('liveDescriptionHint'))
++      ),
++      h(
++        'label',
++        { style: 'max-width:280px' },
++        t('liveCategoryLabel'),
++        h(
++          'select',
++          { class: 'live-category', disabled: locked, onchange: (e: Event) => saveQuiet({ liveCategory: (e.target as HTMLSelectElement).value }) },
++          ...CATEGORY_KEYS.map((key) => h('option', { value: key, selected: settings.liveCategory === key }, t(key)))
++        )
++      )
++    ),
++
++    h(
++      'div',
++      { class: 'panel stack' },
++      h('h2', { style: 'margin:0' }, t('liveSecWhat')),
++      h(
++        'div',
++        { class: 'row' },
++        h('p', { class: 'hint grow', style: 'margin:0' }, t('liveWhatPicture')),
++        h('button', { class: 'small quiet', onclick: () => { tab = 'settings'; render(); } }, t('liveChangeCapture'))
++      ),
++      checkbox('liveGameAudio', t('liveGameAudio'), gameOff ? t('liveAudioOffInCapture') : undefined, locked),
++      checkbox('liveMic', t('liveMicOn'), micOff ? t('liveAudioOffInCapture') : undefined, locked)
++    ),
++
++    h(
++      'div',
++      { class: 'panel stack' },
++      h('h2', { style: 'margin:0' }, t('liveSecHow')),
++      h(
++        'div',
++        { class: 'row', style: 'gap:12px;align-items:flex-end' },
++        h(
++          'label',
++          { class: 'grow' },
++          t('liveDialogQuality'),
++          h(
++            'select',
++            { class: 'live-quality', disabled: locked, onchange: (e: Event) => update({ liveQuality: (e.target as HTMLSelectElement).value as LiveQuality }) },
++            ...LIVE_QUALITIES.map((q) => h('option', { value: q, selected: settings.liveQuality === q }, livePresetLabel(q)))
++          )
++        ),
++        h(
++          'label',
++          { class: 'grow' },
++          t('liveBitrateLabel'),
++          h(
++            'select',
++            { class: 'live-bitrate', disabled: locked, onchange: (e: Event) => update({ liveBitrateKbps: Number((e.target as HTMLSelectElement).value) }) },
++            h('option', { value: '0', selected: settings.liveBitrateKbps === 0 }, t('liveBitrateAuto')),
++            ...LIVE_BITRATES_KBPS.map((k) => h('option', { value: String(k), selected: settings.liveBitrateKbps === k }, `${k / 1000} Mb/s`))
++          )
++        )
++      ),
++      h('p', { class: 'hint', style: 'margin:0' }, t('liveDialogQualityHint') + ' ' + t('liveUploadNeed', { mbps: liveUploadMbps(kbps) })),
++      checkbox('liveOpenPage', t('liveOpenPage'))
++    ),
++
++    h('div', {}, h('button', { class: 'small quiet live-studio', onclick: () => void kine.openKine('/live') }, t('liveDialogStudio') + ' →'))
++  );
+ }
+ 
+ function renderSide() {
+   const st = statusText();
+   const tabs = visibleTabs();
+-  const top = tabs.filter((x) => x === 'kine' || x === 'clips');
+-  const rest = tabs.filter((x) => x !== 'kine' && x !== 'clips');
++  const top = tabs.filter((x) => x === 'kine' || x === 'clips' || x === 'live');
++  const rest = tabs.filter((x) => x !== 'kine' && x !== 'clips' && x !== 'live');
+   const capturing = status.capture === 'on';
+   const manual = settings.detection === 'manual';
+   const account = status.account;
+@@ -825,6 +958,8 @@ function renderTab() {
+       return renderKineTab();
+     case 'clips':
+       return renderClips();
++    case 'live':
++      return renderLive();
+     case 'settings':
+       return renderSettings();
+     case 'games':
+diff --git a/src/renderer/style.css b/src/renderer/style.css
+index cd5e50e..fa666d0 100644
+--- a/src/renderer/style.css
++++ b/src/renderer/style.css
+@@ -565,3 +565,8 @@ button.side-sub.side-live-open:hover { color: var(--text); text-decoration: unde
+ .live-actions .live-start { min-width: 160px; }
+ .kine-bar .bar-live { margin: 0 6px 0 0; }
+ .kine-bar .bar-live button.small { flex: none; }
++
++/* Záložka Live */
++.live-panel .live-time { font-variant-numeric: tabular-nums; color: var(--text-dim); }
++textarea.live-description { width: 100%; resize: vertical; min-height: 64px; }
++.live-category, .live-quality, .live-bitrate { width: 100%; }
+diff --git a/src/shared/i18n/cs.ts b/src/shared/i18n/cs.ts
+index ee2be4d..483fa9f 100644
+--- a/src/shared/i18n/cs.ts
++++ b/src/shared/i18n/cs.ts
+@@ -560,4 +560,23 @@ export const cs: Record<Key, string> = {
+   trayLiveStart: 'Vysílat na Kine…',
+   trayLiveStop: 'Ukončit vysílání ({time})',
+   liveBadge: 'ŽIVĚ',
++  tabLive: 'Živě',
++  liveSecInfo: 'O vysílání',
++  liveDescriptionLabel: 'Popis',
++  liveDescriptionHint: 'Když ho nevyplníš, zůstane popis ze studia na Kine.',
++  liveCategoryLabel: 'Kategorie',
++  liveSecWhat: 'Co jde do vysílání',
++  liveWhatPicture: 'Obraz: stejná obrazovka nebo hra, kterou snímá klipovač.',
++  liveChangeCapture: 'Změnit v Záznamu',
++  liveGameAudio: 'Zvuk hry',
++  liveMicOn: 'Mikrofon',
++  liveAudioOffInCapture: 'V Záznamu je vypnutý, takže není co posílat.',
++  liveSecHow: 'Jak se vysílá',
++  liveBitrateLabel: 'Datový tok obrazu',
++  liveBitrateAuto: 'Automaticky (podle kvality)',
++  liveUploadNeed: 'Potřebuješ upload zhruba {mbps} Mb/s.',
++  liveOpenPage: 'Po začátku vysílání otevřít stránku vysílání s chatem',
++  liveNow: 'Jsi živě',
++  liveConfirmedOk: 'Kine tvůj přenos přijímá.',
++  liveConfirmedWait: 'Kine přenos zatím nevidí - může to trvat až půl minuty.',
+ };
+diff --git a/src/shared/i18n/de.ts b/src/shared/i18n/de.ts
+index 79297a9..bd4e4af 100644
+--- a/src/shared/i18n/de.ts
++++ b/src/shared/i18n/de.ts
+@@ -560,4 +560,23 @@ export const de: Record<Key, string> = {
+   trayLiveStart: 'Live auf Kine…',
+   trayLiveStop: 'Stream beenden ({time})',
+   liveBadge: 'LIVE',
++  tabLive: 'Live',
++  liveSecInfo: 'Über den Stream',
++  liveDescriptionLabel: 'Beschreibung',
++  liveDescriptionHint: 'Leer lassen, um die Beschreibung aus dem Studio auf Kine zu behalten.',
++  liveCategoryLabel: 'Kategorie',
++  liveSecWhat: 'Was gesendet wird',
++  liveWhatPicture: 'Bild: derselbe Bildschirm oder dasselbe Spiel, das der Clipper aufnimmt.',
++  liveChangeCapture: 'In Aufnahme ändern',
++  liveGameAudio: 'Spielton',
++  liveMicOn: 'Mikrofon',
++  liveAudioOffInCapture: 'In der Aufnahme ist es ausgeschaltet, also gibt es nichts zu senden.',
++  liveSecHow: 'Wie gesendet wird',
++  liveBitrateLabel: 'Video-Bitrate',
++  liveBitrateAuto: 'Automatisch (nach Qualität)',
++  liveUploadNeed: 'Du brauchst etwa {mbps} Mb/s Upload.',
++  liveOpenPage: 'Stream-Seite und Chat öffnen, sobald ich live gehe',
++  liveNow: 'Du bist live',
++  liveConfirmedOk: 'Kine empfängt deinen Stream.',
++  liveConfirmedWait: 'Kine sieht den Stream noch nicht - das kann bis zu einer halben Minute dauern.',
+ };
+diff --git a/src/shared/i18n/en.ts b/src/shared/i18n/en.ts
+index 34e0f52..72c931d 100644
+--- a/src/shared/i18n/en.ts
++++ b/src/shared/i18n/en.ts
+@@ -575,6 +575,25 @@ export const en = {
+   trayLiveStart: 'Go live on Kine…',
+   trayLiveStop: 'End stream ({time})',
+   liveBadge: 'LIVE',
++  tabLive: 'Live',
++  liveSecInfo: 'About the stream',
++  liveDescriptionLabel: 'Description',
++  liveDescriptionHint: 'Leave it empty to keep the description from the studio on Kine.',
++  liveCategoryLabel: 'Category',
++  liveSecWhat: 'What goes on air',
++  liveWhatPicture: 'Picture: the same screen or game the clipper captures.',
++  liveChangeCapture: 'Change in Capture',
++  liveGameAudio: 'Game sound',
++  liveMicOn: 'Microphone',
++  liveAudioOffInCapture: 'It\'s turned off in Capture, so there\'s nothing to send.',
++  liveSecHow: 'How it streams',
++  liveBitrateLabel: 'Video bitrate',
++  liveBitrateAuto: 'Automatic (by quality)',
++  liveUploadNeed: 'You need about {mbps} Mb/s of upload speed.',
++  liveOpenPage: 'Open the stream page and chat when I go live',
++  liveNow: 'You\'re live',
++  liveConfirmedOk: 'Kine is receiving your stream.',
++  liveConfirmedWait: 'Kine doesn\'t see the stream yet - it can take up to half a minute.',
+ } as const;
+ 
+ export type Key = keyof typeof en;
+diff --git a/src/shared/i18n/es.ts b/src/shared/i18n/es.ts
+index 5466c9a..07190e1 100644
+--- a/src/shared/i18n/es.ts
++++ b/src/shared/i18n/es.ts
+@@ -560,4 +560,23 @@ export const es: Record<Key, string> = {
+   trayLiveStart: 'Emitir en Kine…',
+   trayLiveStop: 'Terminar directo ({time})',
+   liveBadge: 'EN DIRECTO',
++  tabLive: 'En directo',
++  liveSecInfo: 'Sobre el directo',
++  liveDescriptionLabel: 'Descripción',
++  liveDescriptionHint: 'Déjala vacía para mantener la descripción del estudio de Kine.',
++  liveCategoryLabel: 'Categoría',
++  liveSecWhat: 'Qué sale en directo',
++  liveWhatPicture: 'Imagen: la misma pantalla o juego que captura el clipper.',
++  liveChangeCapture: 'Cambiar en Captura',
++  liveGameAudio: 'Sonido del juego',
++  liveMicOn: 'Micrófono',
++  liveAudioOffInCapture: 'Está desactivado en Captura, así que no hay nada que enviar.',
++  liveSecHow: 'Cómo se emite',
++  liveBitrateLabel: 'Bitrate de vídeo',
++  liveBitrateAuto: 'Automático (según la calidad)',
++  liveUploadNeed: 'Necesitas unos {mbps} Mb/s de subida.',
++  liveOpenPage: 'Abrir la página del directo con el chat al empezar',
++  liveNow: 'Estás en directo',
++  liveConfirmedOk: 'Kine está recibiendo tu directo.',
++  liveConfirmedWait: 'Kine aún no ve el directo - puede tardar hasta medio minuto.',
+ };
+diff --git a/src/shared/i18n/fr.ts b/src/shared/i18n/fr.ts
+index efc84b2..8ebfb72 100644
+--- a/src/shared/i18n/fr.ts
++++ b/src/shared/i18n/fr.ts
+@@ -560,4 +560,23 @@ export const fr: Record<Key, string> = {
+   trayLiveStart: 'Direct sur Kine…',
+   trayLiveStop: 'Arrêter le direct ({time})',
+   liveBadge: 'EN DIRECT',
++  tabLive: 'En direct',
++  liveSecInfo: 'À propos du direct',
++  liveDescriptionLabel: 'Description',
++  liveDescriptionHint: 'Laisse vide pour garder la description du studio sur Kine.',
++  liveCategoryLabel: 'Catégorie',
++  liveSecWhat: 'Ce qui part à l\'antenne',
++  liveWhatPicture: 'Image : le même écran ou jeu que capture le clipper.',
++  liveChangeCapture: 'Modifier dans Capture',
++  liveGameAudio: 'Son du jeu',
++  liveMicOn: 'Micro',
++  liveAudioOffInCapture: 'Il est désactivé dans Capture, donc il n\'y a rien à envoyer.',
++  liveSecHow: 'Comment ça diffuse',
++  liveBitrateLabel: 'Débit vidéo',
++  liveBitrateAuto: 'Automatique (selon la qualité)',
++  liveUploadNeed: 'Il te faut environ {mbps} Mb/s en envoi.',
++  liveOpenPage: 'Ouvrir la page du direct avec le chat au démarrage',
++  liveNow: 'Tu es en direct',
++  liveConfirmedOk: 'Kine reçoit ton direct.',
++  liveConfirmedWait: 'Kine ne voit pas encore le direct - ça peut prendre jusqu\'à une demi-minute.',
+ };
+diff --git a/src/shared/i18n/pl.ts b/src/shared/i18n/pl.ts
+index 81c571f..7f74f2c 100644
+--- a/src/shared/i18n/pl.ts
++++ b/src/shared/i18n/pl.ts
+@@ -560,4 +560,23 @@ export const pl: Record<Key, string> = {
+   trayLiveStart: 'Transmisja na Kine…',
+   trayLiveStop: 'Zakończ transmisję ({time})',
+   liveBadge: 'NA ŻYWO',
++  tabLive: 'Na żywo',
++  liveSecInfo: 'O transmisji',
++  liveDescriptionLabel: 'Opis',
++  liveDescriptionHint: 'Zostaw puste, aby zachować opis ze studia na Kine.',
++  liveCategoryLabel: 'Kategoria',
++  liveSecWhat: 'Co idzie na antenę',
++  liveWhatPicture: 'Obraz: ten sam ekran lub gra, które nagrywa clipper.',
++  liveChangeCapture: 'Zmień w Nagrywaniu',
++  liveGameAudio: 'Dźwięk gry',
++  liveMicOn: 'Mikrofon',
++  liveAudioOffInCapture: 'W Nagrywaniu jest wyłączony, więc nie ma czego wysyłać.',
++  liveSecHow: 'Jak nadawać',
++  liveBitrateLabel: 'Bitrate obrazu',
++  liveBitrateAuto: 'Automatycznie (wg jakości)',
++  liveUploadNeed: 'Potrzebujesz około {mbps} Mb/s uploadu.',
++  liveOpenPage: 'Po starcie transmisji otwórz stronę transmisji z czatem',
++  liveNow: 'Jesteś na żywo',
++  liveConfirmedOk: 'Kine odbiera Twoją transmisję.',
++  liveConfirmedWait: 'Kine jeszcze nie widzi transmisji - może to potrwać do pół minuty.',
+ };
+diff --git a/src/shared/i18n/sk.ts b/src/shared/i18n/sk.ts
+index a2817a0..84d996c 100644
+--- a/src/shared/i18n/sk.ts
++++ b/src/shared/i18n/sk.ts
+@@ -560,4 +560,23 @@ export const sk: Record<Key, string> = {
+   trayLiveStart: 'Vysielať na Kine…',
+   trayLiveStop: 'Ukončiť vysielanie ({time})',
+   liveBadge: 'NAŽIVO',
++  tabLive: 'Naživo',
++  liveSecInfo: 'O vysielaní',
++  liveDescriptionLabel: 'Popis',
++  liveDescriptionHint: 'Ak ho nevyplníš, zostane popis zo štúdia na Kine.',
++  liveCategoryLabel: 'Kategória',
++  liveSecWhat: 'Čo ide do vysielania',
++  liveWhatPicture: 'Obraz: rovnaká obrazovka alebo hra, ktorú zaznamenáva klipovač.',
++  liveChangeCapture: 'Zmeniť v Zázname',
++  liveGameAudio: 'Zvuk hry',
++  liveMicOn: 'Mikrofón',
++  liveAudioOffInCapture: 'V Zázname je vypnutý, takže nie je čo posielať.',
++  liveSecHow: 'Ako sa vysiela',
++  liveBitrateLabel: 'Dátový tok obrazu',
++  liveBitrateAuto: 'Automaticky (podľa kvality)',
++  liveUploadNeed: 'Potrebuješ upload zhruba {mbps} Mb/s.',
++  liveOpenPage: 'Po začiatku vysielania otvoriť stránku vysielania s chatom',
++  liveNow: 'Si naživo',
++  liveConfirmedOk: 'Kine tvoj prenos prijíma.',
++  liveConfirmedWait: 'Kine prenos zatiaľ nevidí - môže to trvať až pol minúty.',
+ };
+diff --git a/src/shared/i18n/uk.ts b/src/shared/i18n/uk.ts
+index d015c72..c1fdeff 100644
+--- a/src/shared/i18n/uk.ts
++++ b/src/shared/i18n/uk.ts
+@@ -560,4 +560,23 @@ export const uk: Record<Key, string> = {
+   trayLiveStart: 'Ефір на Kine…',
+   trayLiveStop: 'Завершити ефір ({time})',
+   liveBadge: 'ЕФІР',
++  tabLive: 'Наживо',
++  liveSecInfo: 'Про трансляцію',
++  liveDescriptionLabel: 'Опис',
++  liveDescriptionHint: 'Залиш порожнім, щоб зберегти опис зі студії на Kine.',
++  liveCategoryLabel: 'Категорія',
++  liveSecWhat: 'Що йде в ефір',
++  liveWhatPicture: 'Картинка: той самий екран або гра, які записує кліпер.',
++  liveChangeCapture: 'Змінити в Записі',
++  liveGameAudio: 'Звук гри',
++  liveMicOn: 'Мікрофон',
++  liveAudioOffInCapture: 'У Записі він вимкнений, тож нічого надсилати.',
++  liveSecHow: 'Як транслюється',
++  liveBitrateLabel: 'Бітрейт відео',
++  liveBitrateAuto: 'Автоматично (за якістю)',
++  liveUploadNeed: 'Потрібно приблизно {mbps} Мб/с аплоаду.',
++  liveOpenPage: 'Після старту відкрити сторінку трансляції з чатом',
++  liveNow: 'Ти в ефірі',
++  liveConfirmedOk: 'Kine приймає твою трансляцію.',
++  liveConfirmedWait: 'Kine ще не бачить трансляцію - це може тривати до пів хвилини.',
+ };
+diff --git a/src/shared/live.ts b/src/shared/live.ts
+index d85a2df..3906c10 100644
+--- a/src/shared/live.ts
++++ b/src/shared/live.ts
+@@ -17,6 +17,30 @@ export const LIVE_PRESETS: Record<LiveQuality, LivePreset> = {
+   '1080p60': { width: 1920, height: 1080, fps: 60, videoKbps: 6000 },
+ };
+ 
++/** Nabídka datového toku obrazu (kb/s) ve výběru; 0 = podle kvality. */
++export const LIVE_BITRATES_KBPS = [1500, 2500, 3500, 4500, 6000, 8000] as const;
++export const LIVE_BITRATE_MIN = 1000;
++export const LIVE_BITRATE_MAX = 12000;
++
++/** Datový tok z nastavení: 0 (podle kvality) nebo číslo v rozumném rozsahu, jinak 0. */
++export function liveBitrate(value: unknown): number {
++  const n = Number(value);
++  if (!Number.isFinite(n) || n <= 0) return 0;
++  return Math.min(LIVE_BITRATE_MAX, Math.max(LIVE_BITRATE_MIN, Math.round(n / 100) * 100));
++}
++
++/** Předvolba kvality, u které se datový tok případně přepsal vlastním. */
++export function livePresetFor(quality: LiveQuality, bitrateKbps = 0): LivePreset {
++  const base = LIVE_PRESETS[quality] ?? LIVE_PRESETS['720p30'];
++  const kbps = liveBitrate(bitrateKbps);
++  return kbps > 0 ? { ...base, videoKbps: kbps } : { ...base };
++}
++
++/** Kolik Mb/s uploadu vysílání potřebuje (obraz + zvuk + rezerva 20 %). */
++export function liveUploadMbps(kbps: number): number {
++  return Math.round(((kbps + 160) * 1.2) / 100) / 10;
++}
++
+ /** "720p · 30 fps · 3 Mb/s" - popisek do výběru kvality. */
+ export function livePresetLabel(quality: LiveQuality): string {
+   const p = LIVE_PRESETS[quality];
+diff --git a/src/shared/settingsSchema.ts b/src/shared/settingsSchema.ts
+index fdcb28c..c0d4f6d 100644
+--- a/src/shared/settingsSchema.ts
++++ b/src/shared/settingsSchema.ts
+@@ -1,6 +1,6 @@
+ import { CATEGORY_KEYS, LANGS, VISIBILITIES, type Settings } from './types';
+ import { isHotkey } from './hotkeys';
+-import { LIVE_QUALITIES } from './live';
++import { LIVE_QUALITIES, liveBitrate } from './live';
+ 
+ /**
+  * Výchozí nastavení a jeho očištění po načtení ze souboru.
+@@ -21,6 +21,12 @@ export const DEFAULT_SETTINGS: Settings = {
+   screenshotHotkey: 'Alt+F8',
+   liveQuality: '720p30',
+   liveTitle: '',
++  liveDescription: '',
++  liveCategory: 'catGaming',
++  liveBitrateKbps: 0,
++  liveGameAudio: true,
++  liveMic: true,
++  liveOpenPage: false,
+   clipSeconds: 30,
+   maxHeight: 1080,
+   fps: 60,
+@@ -129,6 +135,12 @@ export function sanitizeSettings(input: unknown): Settings {
+     screenshotHotkey: raw.screenshotHotkey === '' ? '' : isHotkey(raw.screenshotHotkey) ? (raw.screenshotHotkey as string) : d.screenshotHotkey,
+     liveQuality: oneOf(raw.liveQuality, LIVE_QUALITIES, d.liveQuality),
+     liveTitle: text(raw.liveTitle, d.liveTitle, 100),
++    liveDescription: text(raw.liveDescription, d.liveDescription, 2000),
++    liveCategory: oneOf(raw.liveCategory, CATEGORY_KEYS, d.liveCategory),
++    liveBitrateKbps: liveBitrate(raw.liveBitrateKbps),
++    liveGameAudio: bool(raw.liveGameAudio, d.liveGameAudio),
++    liveMic: bool(raw.liveMic, d.liveMic),
++    liveOpenPage: bool(raw.liveOpenPage, d.liveOpenPage),
+     clipSeconds: Number.isFinite(clipSeconds)
+       ? Math.min(CLIP_SECONDS_MAX, Math.max(CLIP_SECONDS_MIN, Math.round(clipSeconds)))
+       : d.clipSeconds,
+diff --git a/src/shared/types.ts b/src/shared/types.ts
+index c43bd95..b52d4f8 100644
+--- a/src/shared/types.ts
++++ b/src/shared/types.ts
+@@ -99,6 +99,18 @@ export type Settings = {
+   liveQuality: LiveQuality;
+   /** Název posledního vysílání (předvyplní se příště). */
+   liveTitle: string;
++  /** Popis vysílání (prázdný = zůstane popis ze studia na Kine). */
++  liveDescription: string;
++  /** Kategorie vysílání na Kine. */
++  liveCategory: string;
++  /** Datový tok obrazu ve vysílání v kb/s; 0 = podle zvolené kvality. */
++  liveBitrateKbps: number;
++  /** Do vysílání jde zvuk hry. */
++  liveGameAudio: boolean;
++  /** Do vysílání jde mikrofon. */
++  liveMic: boolean;
++  /** Po začátku vysílání otevřít stránku vysílání s chatem. */
++  liveOpenPage: boolean;
+   /** Kolik sekund zpět klip sahá. */
+   clipSeconds: number;
+   /** Výška obrazu: 0 = jako obrazovka. */
+@@ -299,7 +311,7 @@ export type CaptureCommand =
+   | { type: 'restart'; generation: number }
+   | { type: 'stop' }
+   /** Živé vysílání: druhý recorder (nižší datový tok, hra + mikrofon smíchané) na stejném snímání. */
+-  | { type: 'live-start'; generation: number; preset: LivePreset }
++  | { type: 'live-start'; generation: number; preset: LivePreset; audio?: LiveAudio }
+   | { type: 'live-stop' }
+   /** Měřáky zvuku rychle (někdo se dívá do nastavení), nebo jednou za sekundu. */
+   | { type: 'meters'; fast: boolean };
+@@ -338,6 +350,8 @@ export type CaptureEvent =
+ /** Kvalita živého vysílání: rozlišení, snímky, datový tok. */
+ export type LiveQuality = '720p30' | '1080p30' | '1080p60';
+ export type LivePreset = { width: number; height: number; fps: number; videoKbps: number };
++/** Co jde do zvuku vysílání (hra a mikrofon se míchají do jedné stopy). */
++export type LiveAudio = { game: boolean; mic: boolean };
+ 
+ /** Stav živého vysílání z appky (tlačítko Vysílat). */
+ export type LiveStatus = {
+@@ -349,6 +363,8 @@ export type LiveStatus = {
+   watchUrl: string | null;
+   /** Proč vysílání nešlo začít / spadlo (text pro hráče). */
+   error: string | null;
++  /** Vidí Kine proud u Cloudflare? null = ještě se nevědělo (nebo nevysílá se). */
++  confirmed: boolean | null;
+ };
+ 
+ /** Co právě teče do zvuku klipu. */
+diff --git a/tests/live.test.mjs b/tests/live.test.mjs
+index 47437c3..5371c2d 100644
+--- a/tests/live.test.mjs
++++ b/tests/live.test.mjs
+@@ -2,7 +2,7 @@ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ import { EventEmitter } from 'node:events';
+ import { PassThrough } from 'node:stream';
+-import { LIVE_PRESETS, LIVE_QUALITIES, cleanLiveError, liveElapsed, liveErrorKind, liveErrorTextKey, livePresetLabel } from '../dist/esm/live.js';
++import { LIVE_PRESETS, LIVE_QUALITIES, cleanLiveError, liveBitrate, liveElapsed, liveErrorKind, liveErrorTextKey, livePresetFor, livePresetLabel, liveUploadMbps } from '../dist/esm/live.js';
+ import { LIVE_MAX_ATTEMPTS, liveFfmpegArgs, liveProgressSeconds, liveRetryDelay, maskLiveUrl, rtmpUrl } from '../dist/esm/livePlan.js';
+ import { LiveController } from '../dist/esm/liveController.js';
+ import { sanitizeSettings, DEFAULT_SETTINGS } from '../dist/esm/settingsSchema.js';
+@@ -199,3 +199,34 @@ test('vysílání: špatný klíč se neopakuje - rovnou konec s chybou', async
+   assert.ok(notices.includes('failed'));
+   assert.equal(ended(), 1);
+ });
++
++test('vysílání: vlastní datový tok přepíše kvalitu, nesmysl se zahodí', () => {
++  assert.equal(liveBitrate(0), 0);
++  assert.equal(liveBitrate('abc'), 0);
++  assert.equal(liveBitrate(50), 1000);
++  assert.equal(liveBitrate(99999), 12000);
++  assert.equal(liveBitrate(4520), 4500);
++  assert.deepEqual(livePresetFor('1080p60'), LIVE_PRESETS['1080p60']);
++  assert.deepEqual(livePresetFor('1080p60', 8000), { ...LIVE_PRESETS['1080p60'], videoKbps: 8000 });
++  assert.equal(liveUploadMbps(3000), 3.8);
++});
++
++test('vysílání: nová nastavení mají výchozí hodnoty a jsou očištěná', () => {
++  assert.equal(DEFAULT_SETTINGS.liveGameAudio, true);
++  assert.equal(DEFAULT_SETTINGS.liveMic, true);
++  assert.equal(DEFAULT_SETTINGS.liveOpenPage, false);
++  assert.equal(DEFAULT_SETTINGS.liveBitrateKbps, 0);
++  const s = sanitizeSettings({ liveBitrateKbps: 99999, liveCategory: 'nesmysl', liveDescription: 'x'.repeat(5000), liveMic: 'ano' });
++  assert.equal(s.liveBitrateKbps, 12000);
++  assert.equal(s.liveCategory, DEFAULT_SETTINGS.liveCategory);
++  assert.equal(s.liveDescription.length, 2000);
++  assert.equal(s.liveMic, true);
++});
++
++test('vysílání: recorder dostane kvalitu s vlastním tokem a co jde do zvuku', async () => {
++  const { live, commands } = makeController();
++  await live.start({ title: 'x', quality: '1080p30', bitrateKbps: 6000, game: true, mic: false });
++  assert.deepEqual(commands[0].preset, { ...LIVE_PRESETS['1080p30'], videoKbps: 6000 });
++  assert.deepEqual(commands[0].audio, { game: true, mic: false });
++  await live.stop('quit');
++});
+-- 
+2.43.0
+

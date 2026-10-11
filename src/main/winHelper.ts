@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from './log';
+import { lowerPriority } from './ffmpeg';
 
 /**
  * Pomocník pro Windows: jeden dlouho běžící PowerShell, který se ptá
@@ -169,6 +170,12 @@ $tick = 0
 $lastPid = [uint32]0
 $lastExe = ''
 $names = @{}
+# Posila se jen zmena (okno v popredi, seznam procesu) + obcas "pořád stejné",
+# at appka vi, ze pomocnik zije - mene vystupu = mene prace pro obe strany.
+$lastFgKey = ''
+$lastFgAt = [DateTime]::MinValue
+$lastProcKey = ''
+$lastProcAt = [DateTime]::MinValue
 Write-Output '{"t":"ready"}'
 
 function KeyDown($vk) {
@@ -232,8 +239,15 @@ while ($true) {
       $fs = ($mw -gt 0) -and ($w -ge $mw) -and ($hh -ge $mh) -and (-not $caption)
       $sb = New-Object System.Text.StringBuilder 256
       [void][KineWin.Native]::GetWindowTextW($h, $sb, 256)
-      $o = @{ t = 'fg'; pid = [int]$fpid; exe = [string]$lastExe; title = $sb.ToString(); w = [int]$w; h = [int]$hh; fs = [bool]$fs }
-      Write-Output ($o | ConvertTo-Json -Compress)
+      $title = $sb.ToString()
+      $fgKey = "$fpid|$w|$hh|$fs|$title"
+      $nowFg = [DateTime]::UtcNow
+      if ($fgKey -ne $lastFgKey -or ($nowFg - $lastFgAt).TotalSeconds -ge 4) {
+        $lastFgKey = $fgKey
+        $lastFgAt = $nowFg
+        $o = @{ t = 'fg'; pid = [int]$fpid; exe = [string]$lastExe; title = $title; w = [int]$w; h = [int]$hh; fs = [bool]$fs }
+        Write-Output ($o | ConvertTo-Json -Compress)
+      }
     }
     if ($tick % $procEvery -eq 1) {
       # Bezici programy + ty s oknem + hra podle Steamu - jednou za ~5 s, vsechno
@@ -256,8 +270,18 @@ while ($true) {
       }
       $steam = 0
       try { $steam = [int](Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -Name RunningAppID -ErrorAction Stop).RunningAppID } catch {}
-      $o = @{ t = 'procs'; exes = [string[]]@($exes); win = [string[]]@($win); steam = $steam }
-      Write-Output ($o | ConvertTo-Json -Compress)
+      $exeArr = [string[]]@($exes)
+      $winArr = [string[]]@($win)
+      [Array]::Sort($exeArr)
+      [Array]::Sort($winArr)
+      $procKey = [string]::Join(',', $exeArr) + '|' + [string]::Join(',', $winArr) + '|' + $steam
+      $nowProc = [DateTime]::UtcNow
+      if ($procKey -ne $lastProcKey -or ($nowProc - $lastProcAt).TotalSeconds -ge 9) {
+        $lastProcKey = $procKey
+        $lastProcAt = $nowProc
+        $o = @{ t = 'procs'; exes = $exeArr; win = $winArr; steam = $steam }
+        Write-Output ($o | ConvertTo-Json -Compress)
+      }
     }
   } catch {
     Write-Output ('{"t":"err","m":' + (ConvertTo-Json ([string]$_)) + '}')
@@ -388,6 +412,9 @@ export class WinHelper {
       },
     });
     this.proc = proc;
+    // Bez složených zkratek pomocník jen jednou za sekundu kouká, co je v popředí - nižší priorita, hra má přednost.
+    // Se zkratkami (kombinace, myš, ovladač) zůstává normální, ať stisk nečeká.
+    if (this.chords.length === 0) lowerPriority(proc);
     this.buffer = '';
     proc.stdout?.setEncoding('utf8');
     proc.stdout?.on('data', (chunk: string) => this.onData(chunk));

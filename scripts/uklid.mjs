@@ -8,6 +8,8 @@ import { existsSync, rmSync } from 'node:fs';
 export const ZBYTKY = [
   'src/shared/i18n.ts', // nahradila složka src/shared/i18n/ (osm jazyků)
   'src/shared/accelerator.ts', // nahradil src/shared/hotkeys.ts (zkratky z více kláves)
+  'src/renderer/liveDialog.ts', // 0.9.6: dialog Vysílat nahradila záložka Živě
+  'kine-desktop-live.patch', // záplata z 25. 9. - je zapracovaná přímo v kódu
 ];
 
 export function uklid() {

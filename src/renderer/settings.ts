@@ -1,6 +1,6 @@
 import type { KineBridge } from '../preload/preload';
-import type { AudioDevice, AudioLevels, Clip, DisplayInfo, GameSource, Lang, ProcessInfo, Settings, Status, UploadRequest } from '../shared/types';
-import { CATEGORY_KEYS, LANGS, TRASH_DAYS, VISIBILITIES } from '../shared/types';
+import type { AppNotice, AudioDevice, AudioLevels, Clip, DisplayInfo, GameSource, Lang, LiveQuality, ProcessInfo, ResourceUsage, Settings, Status, UploadRequest } from '../shared/types';
+import { CATEGORY_KEYS, LANGS, STORAGE_LIMITS_GB, TRASH_DAYS, VISIBILITIES } from '../shared/types';
 import { LANG_NAMES, makeT, type Key } from '../shared/i18n';
 import { HotkeyRecorder, formatHotkey, hotkeyLabel } from '../shared/hotkeys';
 import { DISCORD_FILE_MAX_BYTES, isDiscordWebhook, suggestedMbps } from '../shared/settingsSchema';
@@ -9,8 +9,8 @@ import { performanceProfile } from '../shared/performance';
 import { clear, clipMeta, errorText, fileUrl, formatBytes, formatDate, formatDuration, h, isPortrait, thumbImages } from './ui';
 import { closePlayer, openPlayer, openPlayerId, type Neighbors, type PlayerHandle } from './player';
 import { VIDEO_LANGS, openUploadDialog } from './uploadDialog';
-import { openLiveDialog } from './liveDialog';
-import { liveElapsed } from '../shared/live';
+import { LIVE_BITRATES_KBPS, LIVE_QUALITIES, cleanLiveError, liveElapsed, liveErrorTextKey, livePresetFor, livePresetLabel, liveUploadMbps } from '../shared/live';
+import { cameraRect } from '../shared/liveLayout';
 
 /**
  * Hlavní okno: v režimu "Kine + klipy" první záložka Kine - web Kine přes
@@ -30,9 +30,9 @@ declare const window: Window & { kine: KineBridge };
 const kine = window.kine;
 const app = document.getElementById('app') as HTMLDivElement;
 
-type Tab = 'kine' | 'clips' | 'settings' | 'games' | 'upload' | 'account' | 'about';
-const TABS: Tab[] = ['kine', 'clips', 'settings', 'games', 'upload', 'account', 'about'];
-const TAB_KEYS: Record<Tab, Key> = { kine: 'tabKine', clips: 'tabClips', settings: 'tabSettings', games: 'tabGames', upload: 'tabUpload', account: 'tabAccount', about: 'tabAbout' };
+type Tab = 'kine' | 'clips' | 'live' | 'settings' | 'games' | 'upload' | 'account' | 'about';
+const TABS: Tab[] = ['kine', 'clips', 'live', 'settings', 'games', 'upload', 'account', 'about'];
+const TAB_KEYS: Record<Tab, Key> = { kine: 'tabKine', clips: 'tabClips', live: 'tabLive', settings: 'tabSettings', games: 'tabGames', upload: 'tabUpload', account: 'tabAccount', about: 'tabAbout' };
 /** Barvy jako na webu (components/BrandLogo.tsx). */
 const PRESET_COLORS = ['#00c9a7', '#4f8ef7', '#f7484f', '#f7b84f', '#a34ff7', '#f74fd6', '#4ff77c', '#ffffff'];
 
@@ -52,7 +52,8 @@ let tab: Tab = 'clips';
 let wizardStep: number | null = null;
 let authWaiting = false;
 let authError: string | null = null;
-let hotkeyRecording: 'clipHotkey' | 'toggleHotkey' | 'recordHotkey' | 'screenshotHotkey' | null = null;
+type HotkeyField = 'clipHotkey' | 'toggleHotkey' | 'recordHotkey' | 'screenshotHotkey' | 'liveBrbHotkey';
+let hotkeyRecording: HotkeyField | null = null;
 let hotkeyError: string | null = null;
 const recorder = new HotkeyRecorder();
 let updateResult: { status: string; version?: string; url?: string; message?: string; source?: string; waitingForGame?: boolean } | null = null;
@@ -85,6 +86,8 @@ let brandClickTimer: ReturnType<typeof setTimeout> | null = null;
 let kineShown = false;
 let kineFailed: string | null = null;
 let renderQueued = false;
+/** Záložka Live: chyba posledního pokusu o vysílání (text pro hráče). */
+let liveError: string | null = null;
 
 const t = (key: Key, vars?: Record<string, string | number>) => makeT(settings.lang)(key, vars);
 
@@ -98,12 +101,10 @@ async function init() {
   const wanted = params.get('tab');
   if (!settings.onboarded || wanted === 'wizard') wizardStep = 0;
   else if (wanted && visibleTabs().includes(wanted as Tab)) tab = wanted as Tab;
-  else if (wanted === 'live') tab = 'clips';
   else if (settings.appMode === 'full') tab = 'kine';
   document.documentElement.lang = settings.lang;
   document.title = status.variant === 'clipper' ? 'Kine Clipper' : 'Kine';
   render();
-  if (wanted === 'live' && wizardStep === null) openLive();
   void refreshGameNames();
 
   kine.onSettings((s) => {
@@ -155,14 +156,6 @@ async function init() {
     void refreshAudioDevices();
   });
   kine.onNavigate((target) => {
-    if (target === 'live') {
-      // Lišta u hodin: "Vysílat na Kine…" - okno s dialogem.
-      if (!visibleTabs().includes(tab) || tab === 'kine') tab = 'clips';
-      wizardStep = null;
-      render();
-      openLive();
-      return;
-    }
     if (visibleTabs().includes(target as Tab)) {
       tab = target as Tab;
       wizardStep = null;
@@ -408,6 +401,15 @@ function finishIfDone(done: ReturnType<HotkeyRecorder['keyUp']>) {
   }
   const field = hotkeyRecording;
   const text = formatHotkey(done);
+  // Stejná zkratka na dvě věci by jedna z nich nikdy nedostala.
+  const HOTKEY_LABELS: Record<HotkeyField, Key> = { clipHotkey: 'clipHotkey', toggleHotkey: 'toggleHotkey', recordHotkey: 'recordHotkey', screenshotHotkey: 'screenshotHotkey', liveBrbHotkey: 'liveBrbHotkey' };
+  const duplicate = (Object.keys(HOTKEY_LABELS) as HotkeyField[]).find((f) => f !== field && !!settings[f] && settings[f].toLowerCase() === text.toLowerCase());
+  if (duplicate) {
+    hotkeyError = t('hotkeyDuplicate', { name: t(HOTKEY_LABELS[duplicate]) });
+    recorder.reset();
+    render();
+    return;
+  }
   void kine.hotkeyAvailable(text).then((result) => {
     if (result !== 'ok') {
       hotkeyError =
@@ -461,7 +463,7 @@ function stopPadPoll() {
   padTimer = null;
 }
 
-function hotkeyField(field: 'clipHotkey' | 'toggleHotkey' | 'recordHotkey' | 'screenshotHotkey', label: string, hint?: string, options: { clearable?: boolean } = {}) {
+function hotkeyField(field: HotkeyField, label: string, hint?: string, options: { clearable?: boolean } = {}) {
   const recording = hotkeyRecording === field;
   const held = recording ? recorder.current() : null;
   const heldText = held && held.mods.length + held.keys.length + held.mouse.length + held.pad.length > 0 ? hotkeyLabel(formatHotkey(held)) : '';
@@ -507,6 +509,9 @@ function render() {
   const scrollTop = main ? main.scrollTop : 0;
   const active = document.activeElement as HTMLElement | null;
   const searchHadFocus = focusSearch || (active?.classList.contains('clips-search') ?? false);
+  // Pole, do kterého se zrovna píše (název vysílání, popis…): po překreslení
+  // (stav chodí z hlavního procesu kdykoli) zůstane s kurzorem i rozepsaným textem.
+  const keep = keptField(active);
   // Karta s náhledem se právě zahodí - video pustit z ruky, ať nehraje v odpojeném prvku.
   stopPreview();
   clear(app);
@@ -524,6 +529,7 @@ function render() {
   if (tab !== 'kine') app.append(renderSide());
   syncRecTimer();
   syncAudioWatch();
+  syncUsageWatch();
   app.append(newMain);
   newMain.scrollTop = scrollTop;
   syncKineView();
@@ -535,6 +541,54 @@ function render() {
     }
   }
   focusSearch = false;
+  if (keep) restoreField(keep);
+  syncCamPreview();
+}
+
+type KeptField = { key: string; value: string; start: number | null; end: number | null };
+
+/** Pole s data-keep, ve kterém je kurzor - jeho hodnota a výběr pro obnovení po překreslení. */
+function keptField(el: HTMLElement | null): KeptField | null {
+  if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) || !el.dataset.keep) return null;
+  let start: number | null = null;
+  let end: number | null = null;
+  try {
+    start = el.selectionStart;
+    end = el.selectionEnd;
+  } catch {
+    // typ pole bez výběru (number…)
+  }
+  return { key: el.dataset.keep, value: el.value, start, end };
+}
+
+function restoreField(k: KeptField) {
+  const el = app.querySelector(`[data-keep="${k.key}"]`) as HTMLInputElement | HTMLTextAreaElement | null;
+  if (!el || el.disabled) return;
+  if (el.value !== k.value) el.value = k.value;
+  el.focus();
+  try {
+    if (k.start !== null && k.end !== null) el.setSelectionRange(k.start, k.end);
+  } catch {
+    // nevadí
+  }
+}
+
+/**
+ * Text z pole do nastavení: hned v okně (překreslení ho nezahodí), do
+ * hlavního procesu s malým zpožděním (ne každý stisk klávesy) a hned při
+ * opuštění pole.
+ */
+const textSaveTimers = new Map<keyof Settings, ReturnType<typeof setTimeout>>();
+function saveText<K extends keyof Settings>(field: K, value: Settings[K], now = false) {
+  settings = { ...settings, [field]: value };
+  const timer = textSaveTimers.get(field);
+  if (timer) clearTimeout(timer);
+  const send = () => {
+    textSaveTimers.delete(field);
+    void kine.updateSettings({ [field]: value } as Partial<Settings>);
+  };
+  if (now) send();
+  else textSaveTimers.set(field, setTimeout(send, 700));
 }
 
 function clipsPlus(): boolean {
@@ -606,6 +660,7 @@ function syncRecTimer() {
 const TAB_ICONS: Record<Tab, string> = {
   kine: '<rect x="3" y="4" width="18" height="14" rx="3"/><path d="M10 8.3v5.4l4.8-2.7z" fill="currentColor" stroke="none"/>',
   clips: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7.5 4v16M16.5 4v16M3 9h4.5M3 15h4.5M16.5 9H21M16.5 15H21"/>',
+  live: '<circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 4.9a10 10 0 0 0 0 14.2M19.1 4.9a10 10 0 0 1 0 14.2"/>',
   settings: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>',
   games: '<path d="M7 8h10a4.5 4.5 0 0 1 4.5 4.5V15a2.6 2.6 0 0 1-4.7 1.5L15.4 14.5H8.6L7.2 16.5A2.6 2.6 0 0 1 2.5 15v-2.5A4.5 4.5 0 0 1 7 8z"/><path d="M8 10.5v3M6.5 12h3"/><circle cx="15.5" cy="11.2" r=".9" fill="currentColor" stroke="none"/><circle cx="17.5" cy="13" r=".9" fill="currentColor" stroke="none"/>',
   upload: '<path d="M12 15V5M8 9l4-4 4 4"/><path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15"/>',
@@ -645,45 +700,545 @@ function tabButton(name: Tab) {
 function liveButton(): HTMLElement {
   const live = status.live;
   if (live.state === 'idle') {
-    return h('button', { class: 'small quiet side-live', title: t('liveDialogTitle'), onclick: () => openLive() }, h('span', { class: 'live-dot' }), t('sideLive'));
+    return h('button', { class: 'small quiet side-live', title: t('liveDialogTitle'), onclick: () => { tab = 'live'; render(); } }, h('span', { class: 'live-dot' }), t('sideLive'));
   }
   if (live.state === 'starting') {
     return h('button', { class: 'small side-live pending', disabled: true }, h('span', { class: 'live-dot' }), t('sideLiveConnecting'));
   }
+  if (live.state === 'stopping') {
+    return h('button', { class: 'small side-live pending', disabled: true }, h('span', { class: 'spin' }), t('sideLiveStopping'));
+  }
   const reconnecting = live.state === 'reconnecting';
   return h(
     'button',
-    { class: `small side-live on ${reconnecting ? 'reconnecting' : ''}`, title: live.title, onclick: () => void kine.stopLive() },
+    { class: `small side-live on ${reconnecting ? 'reconnecting' : ''} ${status.live.scene?.brb ? 'brb' : ''}`, title: live.title, onclick: (e: Event) => stopLiveClick(e) },
     h('span', { class: 'rec-dot' }),
     h('span', { class: 'live-time' }, reconnecting ? t('sideLiveReconnecting') : liveElapsed(live.since)),
     ' · ' + t('sideLiveStop')
   );
 }
 
-/** Dialog "Vysílat na Kine" (tlačítko v panelu, lišta u hodin). */
-function openLive() {
-  if (status.live.state !== 'idle') return;
-  openLiveDialog({
-    settings,
-    t,
-    defaultTitle: settings.liveTitle || status.game || '',
-    loggedIn: !!status.account,
-    onStart: async (opts) => {
-      await kine.startLive(opts);
-    },
-    onOpenStudio: () => void kine.openKine('/live'),
-    onSignIn: () => {
-      tab = 'account';
-      render();
-    },
-  });
+/** Ukončit vysílání: tlačítko hned zešedne ("Ukončuji…") - druhý klik nic nespustí. */
+function stopLiveClick(e: Event) {
+  const btn = e.currentTarget as HTMLButtonElement;
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.classList.remove('on');
+  btn.classList.add('pending');
+  clear(btn);
+  btn.append(h('span', { class: 'spin' }), t('sideLiveStopping'));
+  void kine.stopLive();
+}
+
+/** Řádek upozornění v panelu: text (klik = kde se to řeší) a křížek (schovat). */
+function noticeRow(n: AppNotice) {
+  const target = n.tab && visibleTabs().includes(n.tab as Tab) ? (n.tab as Tab) : null;
+  return h(
+    'div',
+    { class: `side-sub side-notice ${n.kind}` },
+    h(
+      'button',
+      {
+        class: 'notice-text',
+        title: n.text,
+        onclick: () => {
+          if (!target) return;
+          tab = target;
+          render();
+        },
+      },
+      (n.kind === 'info' ? 'ℹ ' : '⚠ ') + n.text
+    ),
+    h('button', { class: 'notice-x', title: t('close'), 'aria-label': t('close'), onclick: () => void kine.dismissNotice(n.id) }, '✕')
+  );
+}
+
+/** Stop nahrávání: tlačítko se hned přepne na "Ukládám…" a nejde zmáčknout znovu (dřív se nahrávka uložila víckrát). */
+function stopRecordingClick(e: Event) {
+  const btn = e.currentTarget as HTMLButtonElement;
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.classList.remove('recording');
+  btn.classList.add('saving');
+  clear(btn);
+  btn.append(h('span', { class: 'spin' }), t('sideRecordSaving'));
+  void kine.toggleRecording();
+}
+
+/** Uloží nastavení bez překreslení - text psaný v poli se nesmí ztratit ani "sebrat" kliknutí na Vysílat. */
+function saveQuiet(patch: Partial<Settings>) {
+  settings = { ...settings, ...patch };
+  void kine.updateSettings(patch);
+}
+
+async function goLive() {
+  if (liveStarting) return;
+  liveStarting = true;
+  liveError = null;
+  // Rozepsaný název / popis se uloží hned, ať jde do vysílání.
+  for (const [field, timer] of textSaveTimers) {
+    clearTimeout(timer);
+    textSaveTimers.delete(field);
+    void kine.updateSettings({ [field]: settings[field] } as Partial<Settings>);
+  }
+  render();
+  try {
+    await kine.startLive({ title: settings.liveTitle || status.game || t('liveDefaultTitle'), quality: settings.liveQuality });
+  } catch (e) {
+    const message = cleanLiveError((e as Error).message ?? String(e));
+    const key = liveErrorTextKey(message);
+    liveError = t(key, key === 'liveErrOther' ? { message: message.slice(0, 160) } : {});
+  } finally {
+    liveStarting = false;
+  }
+  render();
+}
+
+/** Klik na Vysílat už běží (připojování) - druhý klik nic nespustí. */
+let liveStarting = false;
+
+// ---- kamera v záložce Živě: náhled a seznam kamer ----------------------------------------
+
+/** Náhled kamery v okně (jen když je záložka Živě vidět a kamera zapnutá). */
+let camPreview: { deviceId: string; stream: MediaStream | null; error: string | null } | null = null;
+let videoInputs: { id: string; label: string }[] = [];
+let videoInputsAt = 0;
+
+async function refreshVideoInputs(force = false): Promise<void> {
+  if (!force && Date.now() - videoInputsAt < 5000) return;
+  videoInputsAt = Date.now();
+  try {
+    const list = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput' && d.deviceId && d.deviceId !== 'default');
+    const next = list.map((d, i) => ({ id: d.deviceId, label: d.label || t('liveCameraN', { n: i + 1 }) }));
+    if (JSON.stringify(next) !== JSON.stringify(videoInputs)) {
+      videoInputs = next;
+      scheduleRender();
+    }
+  } catch {
+    // bez seznamu jen "výchozí kamera"
+  }
+}
+
+/** Proč kamera nejde (stejné klíče jako snímací stránka - viz liveCompositor.cameraErrorText). */
+function cameraErrorMessage(code: string): string {
+  if (code.startsWith('camera-busy')) return t('liveCameraBusy');
+  if (code.startsWith('camera-missing')) return t('liveCameraMissing');
+  if (code.startsWith('camera-denied')) return t('liveCameraDenied');
+  if (code.startsWith('camera-unsupported')) return t('liveCameraUnsupported');
+  if (code.startsWith('camera disconnected')) return t('liveCameraDisconnected');
+  return t('liveCameraFailed', { message: code.replace(/^camera:\s*/, '').slice(0, 120) });
+}
+
+function syncCamPreview() {
+  const want = tab === 'live' && wizardStep === null && settings.liveCamera && document.visibilityState === 'visible';
+  if (!want) {
+    stopCamPreview();
+    return;
+  }
+  const id = settings.liveCameraDevice;
+  if (camPreview && camPreview.deviceId === id) return;
+  stopCamPreview();
+  const preview: { deviceId: string; stream: MediaStream | null; error: string | null } = { deviceId: id, stream: null, error: null };
+  camPreview = preview;
+  navigator.mediaDevices
+    .getUserMedia({ audio: false, video: { ...(id ? { deviceId: { exact: id } } : {}), width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 30, max: 30 } } })
+    .then(
+      (stream) => {
+        if (camPreview !== preview) {
+          for (const tr of stream.getTracks()) tr.stop();
+          return;
+        }
+        preview.stream = stream;
+        void refreshVideoInputs(true);
+        scheduleRender();
+      },
+      (e) => {
+        if (camPreview !== preview) return;
+        const name = (e as { name?: string })?.name ?? '';
+        preview.error =
+          name === 'NotReadableError' || name === 'TrackStartError'
+            ? 'camera-busy'
+            : name === 'NotFoundError' || name === 'OverconstrainedError'
+              ? 'camera-missing'
+              : name === 'NotAllowedError'
+                ? 'camera-denied'
+                : `camera: ${String((e as Error)?.message ?? e)}`;
+        scheduleRender();
+      }
+    );
+}
+
+function stopCamPreview() {
+  for (const tr of camPreview?.stream?.getTracks() ?? []) tr.stop();
+  camPreview = null;
+}
+document.addEventListener('visibilitychange', () => syncCamPreview());
+
+/**
+ * Náhled toho, co uvidí diváci: plocha 16:9 (hra) a kamera přesně tam a tak
+ * velká, jak ji nakreslí vysílání (shared/liveLayout - stejná čísla), nebo
+ * obrazovka "Hned jsem zpět".
+ */
+function livePreview() {
+  const W = 1280;
+  const H = 720;
+  const brb = !!status.live.scene?.brb && status.live.state !== 'idle';
+  const box = h('div', { class: `live-preview ${brb ? 'brb' : ''}` });
+  if (brb) {
+    box.append(h('div', { class: 'live-preview-brb' }, h('b', {}, settings.liveBrbText.trim() || t('liveBrbDefault')), h('span', { class: 'bar' })));
+    return box;
+  }
+  box.append(h('div', { class: 'live-preview-game' }, h('span', {}, status.game ?? t('liveWhatPictureShort'))));
+  if (!settings.liveCamera) return box;
+  const track = camPreview?.stream?.getVideoTracks()[0] ?? null;
+  const cs = track?.getSettings();
+  const r = cameraRect(W, H, cs?.width ?? 1280, cs?.height ?? 720, { position: settings.liveCameraPosition, size: settings.liveCameraSize, shape: settings.liveCameraShape });
+  const style = `left:${(r.x / W) * 100}%;top:${(r.y / H) * 100}%;width:${(r.w / W) * 100}%;height:${(r.h / H) * 100}%;border-radius:${settings.liveCameraShape === 'circle' ? '50%' : `${(r.radius / r.w) * 100}% / ${(r.radius / r.h) * 100}%`}`;
+  const cam = h('div', { class: 'live-preview-cam', style });
+  if (camPreview?.stream) {
+    const video = h('video', { autoplay: '', muted: '', playsinline: '', class: settings.liveCameraMirror ? 'mirror' : '' }) as HTMLVideoElement;
+    video.muted = true;
+    video.srcObject = camPreview.stream;
+    void video.play().catch(() => undefined);
+    cam.append(video);
+  } else {
+    cam.append(h('span', { class: 'faint' }, camPreview?.error ? '⚠' : '…'));
+  }
+  box.append(cam);
+  return box;
+}
+
+/** Rohy pro kameru jako čtyři tlačítka v obdélníku (kde bude kamera, je hned vidět). */
+function cornerPicker(disabled: boolean) {
+  const corners: { value: Settings['liveCameraPosition']; label: Key }[] = [
+    { value: 'top-left', label: 'liveCameraTopLeft' },
+    { value: 'top-right', label: 'liveCameraTopRight' },
+    { value: 'bottom-left', label: 'liveCameraBottomLeft' },
+    { value: 'bottom-right', label: 'liveCameraBottomRight' },
+  ];
+  return h(
+    'div',
+    { class: 'corner-picker', role: 'radiogroup', 'aria-label': t('liveCameraPosition') },
+    ...corners.map((c) =>
+      h('button', {
+        class: `corner ${c.value} ${settings.liveCameraPosition === c.value ? 'active' : ''}`,
+        role: 'radio',
+        'aria-checked': settings.liveCameraPosition === c.value ? 'true' : 'false',
+        title: t(c.label),
+        'aria-label': t(c.label),
+        disabled,
+        onclick: () => update({ liveCameraPosition: c.value }),
+      })
+    )
+  );
+}
+
+/** Záložka Živě: co a jak se vysílá na Kine + tlačítko Vysílat / stav vysílání, kamera, "Hned jsem zpět". */
+function renderLive() {
+  const live = status.live;
+  const idle = live.state === 'idle';
+  const onAir = live.state === 'live' || live.state === 'reconnecting';
+  const kbps = livePresetFor(settings.liveQuality, settings.liveBitrateKbps).videoKbps;
+  const err = liveError ?? (idle ? live.error : null);
+  if (settings.liveCamera) void refreshVideoInputs();
+
+  // Nahoře: stav vysílání, nebo velké tlačítko Vysílat.
+  let statusPanel: HTMLElement;
+  if (idle) {
+    statusPanel = h(
+      'div',
+      { class: 'panel stack live-panel' },
+      h('p', { class: 'hint', style: 'margin:0' }, t('liveDialogIntro')),
+      status.account
+        ? null
+        : h('p', { class: 'hint warn live-login' }, t('liveNeedLogin'), ' ', h('button', { class: 'small', onclick: () => { tab = 'account'; render(); } }, t('sideSignIn'))),
+      err ? h('p', { class: 'hint warn live-error' }, err) : null,
+      h(
+        'div',
+        { class: 'row live-actions' },
+        h('button', { class: 'primary live-start', disabled: liveStarting, onclick: () => void goLive() }, liveStarting ? t('liveDialogStarting') : '● ' + t('liveDialogStart'))
+      )
+    );
+  } else {
+    const stats = live.stats;
+    const slow = !!stats && ((stats.speed !== null && stats.speed < 0.92) || stats.backlogMb > 4);
+    const brb = !!live.scene?.brb;
+    const micMuted = !!live.scene?.micMuted;
+    statusPanel = h(
+      'div',
+      { class: 'panel stack live-panel on-air' },
+      h(
+        'div',
+        { class: 'row live-state' },
+        live.state === 'stopping' ? h('span', { class: 'spin' }) : h('span', { class: 'rec-dot' }),
+        h(
+          'b',
+          {},
+          live.state === 'starting'
+            ? t('sideLiveConnecting')
+            : live.state === 'reconnecting'
+              ? t('sideLiveReconnecting')
+              : live.state === 'stopping'
+                ? t('sideLiveStopping')
+                : t('liveNow')
+        ),
+        onAir && live.since ? h('span', { class: 'live-time' }, liveElapsed(live.since)) : null,
+        live.viewers !== null && onAir ? h('span', { class: 'live-viewers', title: t('liveViewersHint') }, '👁 ' + t('liveViewers', { count: live.viewers })) : null,
+        h('span', { class: 'grow' }),
+        live.watchUrl ? h('button', { class: 'small quiet', onclick: () => void kine.openLivePage() }, '💬 ' + t('sideLiveOpen')) : null,
+        h('button', { class: 'small', disabled: live.state === 'starting' || live.state === 'stopping', onclick: (e: Event) => stopLiveClick(e) }, t('sideLiveStop'))
+      ),
+      onAir
+        ? h(
+            'div',
+            { class: 'row live-controls' },
+            h(
+              'button',
+              { class: `small live-brb-toggle ${brb ? 'active' : ''}`, 'aria-pressed': brb ? 'true' : 'false', title: settings.liveBrbHotkey ? hotkeyLabel(settings.liveBrbHotkey) : t('liveBrbHint'), onclick: () => void kine.liveBrb() },
+              brb ? '▶ ' + t('liveBrbBack') : '⏸ ' + t('liveBrbOn')
+            ),
+            live.scene && (settings.liveMic && settings.microphone)
+              ? h(
+                  'button',
+                  { class: `small live-mute ${micMuted ? 'active' : ''}`, 'aria-pressed': micMuted ? 'true' : 'false', onclick: () => void kine.liveMuteMic(!micMuted) },
+                  micMuted ? '🔇 ' + t('liveMicUnmute') : '🎤 ' + t('liveMicMute')
+                )
+              : null
+          )
+        : null,
+      stats && onAir
+        ? h(
+            'p',
+            { class: `hint live-stats ${slow ? 'warn' : ''}`, style: 'margin:0' },
+            [
+              stats.kbps !== null ? t('liveStatsRate', { mbps: (Math.round(stats.kbps / 100) / 10).toLocaleString(settings.lang) }) : null,
+              stats.fps !== null ? `${Math.round(stats.fps)} fps` : null,
+              slow ? '⚠ ' + t('liveStatsSlow') : null,
+            ]
+              .filter(Boolean)
+              .join(' · ')
+          )
+        : null,
+      live.state === 'live' && live.confirmed !== null
+        ? h(
+            'p',
+            { class: live.confirmed ? 'ok' : 'hint warn', style: 'margin:0' },
+            live.confirmed
+              ? '✓ ' + t('liveConfirmedOk')
+              : // Kine nepotvrzený přenos po 3 minutách z "Živě" stáhne - po 90 s je čas to říct naplno.
+                live.since !== null && Date.now() - live.since > 90_000
+                ? t('liveConfirmedLong')
+                : t('liveConfirmedWait')
+          )
+        : null,
+      live.cameraError ? h('p', { class: 'hint warn', style: 'margin:0' }, '📷 ' + cameraErrorMessage(live.cameraError)) : null
+    );
+  }
+
+  const locked = !idle; // název, kvalita a zvuk platí od dalšího vysílání; kamera a "Hned jsem zpět" jdou měnit i za běhu
+  const micOff = !settings.microphone;
+  const gameOff = !settings.systemAudio;
+
+  return h(
+    'div',
+    { class: 'stack' },
+    h('h1', {}, t('tabLive')),
+    statusPanel,
+
+    h(
+      'div',
+      { class: 'panel stack' },
+      h('h2', { style: 'margin:0' }, t('liveSecInfo')),
+      h(
+        'label',
+        {},
+        t('liveDialogName'),
+        h('input', {
+          type: 'text',
+          class: 'live-title',
+          'data-keep': 'live-title',
+          maxlength: '100',
+          value: settings.liveTitle,
+          placeholder: status.game || t('liveDefaultTitle'),
+          disabled: locked,
+          oninput: (e: Event) => saveText('liveTitle', (e.target as HTMLInputElement).value),
+          onchange: (e: Event) => saveText('liveTitle', (e.target as HTMLInputElement).value.trim(), true),
+        })
+      ),
+      h(
+        'label',
+        {},
+        t('liveDescriptionLabel'),
+        h(
+          'textarea',
+          {
+            class: 'live-description',
+            'data-keep': 'live-description',
+            rows: '3',
+            maxlength: '2000',
+            disabled: locked,
+            oninput: (e: Event) => saveText('liveDescription', (e.target as HTMLTextAreaElement).value),
+            onchange: (e: Event) => saveText('liveDescription', (e.target as HTMLTextAreaElement).value.trim(), true),
+          },
+          settings.liveDescription
+        ),
+        h('span', { class: 'hint' }, t('liveDescriptionHint'))
+      ),
+      h(
+        'label',
+        { style: 'max-width:280px' },
+        t('liveCategoryLabel'),
+        h(
+          'select',
+          { class: 'live-category', disabled: locked, onchange: (e: Event) => saveQuiet({ liveCategory: (e.target as HTMLSelectElement).value }) },
+          ...CATEGORY_KEYS.map((key) => h('option', { value: key, selected: settings.liveCategory === key }, t(key)))
+        )
+      )
+    ),
+
+    // Co diváci vidí: náhled (hra + kamera), kamera a její místo, tvar, velikost.
+    h(
+      'div',
+      { class: 'panel stack live-scene-panel' },
+      h('h2', { style: 'margin:0' }, t('liveSecWhat')),
+      h(
+        'div',
+        { class: 'row' },
+        h('p', { class: 'hint grow', style: 'margin:0' }, t('liveWhatPicture')),
+        h('button', { class: 'small quiet', onclick: () => { tab = 'settings'; render(); } }, t('liveChangeCapture'))
+      ),
+      checkbox('liveGameAudio', t('liveGameAudio'), gameOff ? t('liveAudioOffInCapture') : undefined, locked),
+      checkbox('liveMic', t('liveMicOn'), micOff ? t('liveAudioOffInCapture') : undefined, locked),
+      h('div', { class: 'live-scene-grid' },
+        livePreview(),
+        h(
+          'div',
+          { class: 'stack live-camera-settings' },
+          checkbox('liveCamera', '📷 ' + t('liveCamera'), t('liveCameraHint')),
+          settings.liveCamera
+            ? h(
+                'div',
+                { class: 'stack', style: 'gap:10px' },
+                h(
+                  'label',
+                  {},
+                  t('liveCameraDevice'),
+                  h(
+                    'select',
+                    { class: 'live-camera-device', onchange: (e: Event) => update({ liveCameraDevice: (e.target as HTMLSelectElement).value }) },
+                    h('option', { value: '', selected: settings.liveCameraDevice === '' }, t('liveCameraDefault')),
+                    ...videoInputs.map((d) => h('option', { value: d.id, selected: settings.liveCameraDevice === d.id }, d.label)),
+                    settings.liveCameraDevice && !videoInputs.some((d) => d.id === settings.liveCameraDevice)
+                      ? h('option', { value: settings.liveCameraDevice, selected: true }, t('audioMissingDevice'))
+                      : null
+                  )
+                ),
+                h('div', { class: 'row', style: 'gap:14px;align-items:flex-start' },
+                  h('div', { class: 'field' }, h('label', {}, t('liveCameraPosition')), cornerPicker(false)),
+                  h(
+                    'div',
+                    { class: 'stack grow', style: 'gap:8px' },
+                    h(
+                      'label',
+                      {},
+                      t('liveCameraSize'),
+                      h(
+                        'select',
+                        { class: 'live-camera-size', onchange: (e: Event) => update({ liveCameraSize: (e.target as HTMLSelectElement).value as Settings['liveCameraSize'] }) },
+                        h('option', { value: 'small', selected: settings.liveCameraSize === 'small' }, t('liveCameraSmall')),
+                        h('option', { value: 'medium', selected: settings.liveCameraSize === 'medium' }, t('liveCameraMedium')),
+                        h('option', { value: 'large', selected: settings.liveCameraSize === 'large' }, t('liveCameraLarge'))
+                      )
+                    ),
+                    h(
+                      'label',
+                      {},
+                      t('liveCameraShape'),
+                      h(
+                        'select',
+                        { class: 'live-camera-shape', onchange: (e: Event) => update({ liveCameraShape: (e.target as HTMLSelectElement).value as Settings['liveCameraShape'] }) },
+                        h('option', { value: 'rounded', selected: settings.liveCameraShape === 'rounded' }, t('liveCameraRounded')),
+                        h('option', { value: 'rect', selected: settings.liveCameraShape === 'rect' }, t('liveCameraRect')),
+                        h('option', { value: 'circle', selected: settings.liveCameraShape === 'circle' }, t('liveCameraCircle'))
+                      )
+                    )
+                  )
+                ),
+                checkbox('liveCameraMirror', t('liveCameraMirror'), t('liveCameraMirrorHint')),
+                camPreview?.error ? h('p', { class: 'hint warn', style: 'margin:0' }, '⚠ ' + cameraErrorMessage(camPreview.error)) : null
+              )
+            : null
+        )
+      )
+    ),
+
+    // "Hned jsem zpět": soukromí a pauza během vysílání (hra i kamera se schovají).
+    h(
+      'div',
+      { class: 'panel stack' },
+      h('h2', { style: 'margin:0' }, '⏸ ' + t('liveBrbTitle')),
+      h('p', { class: 'hint', style: 'margin:0' }, t('liveBrbIntro')),
+      h(
+        'label',
+        {},
+        t('liveBrbTextLabel'),
+        h('input', {
+          type: 'text',
+          class: 'live-brb-text',
+          'data-keep': 'live-brb-text',
+          maxlength: '80',
+          value: settings.liveBrbText,
+          placeholder: t('liveBrbDefault'),
+          oninput: (e: Event) => saveText('liveBrbText', (e.target as HTMLInputElement).value),
+          onchange: (e: Event) => saveText('liveBrbText', (e.target as HTMLInputElement).value.trim(), true),
+        })
+      ),
+      checkbox('liveBrbMuteMic', t('liveBrbMuteMic')),
+      hotkeyField('liveBrbHotkey', t('liveBrbHotkey'), t('liveBrbHotkeyHint'), { clearable: true })
+    ),
+
+    h(
+      'div',
+      { class: 'panel stack' },
+      h('h2', { style: 'margin:0' }, t('liveSecHow')),
+      h(
+        'div',
+        { class: 'row', style: 'gap:12px;align-items:flex-end' },
+        h(
+          'label',
+          { class: 'grow' },
+          t('liveDialogQuality'),
+          h(
+            'select',
+            { class: 'live-quality', disabled: locked, onchange: (e: Event) => update({ liveQuality: (e.target as HTMLSelectElement).value as LiveQuality }) },
+            ...LIVE_QUALITIES.map((q) => h('option', { value: q, selected: settings.liveQuality === q }, livePresetLabel(q)))
+          )
+        ),
+        h(
+          'label',
+          { class: 'grow' },
+          t('liveBitrateLabel'),
+          h(
+            'select',
+            { class: 'live-bitrate', disabled: locked, onchange: (e: Event) => update({ liveBitrateKbps: Number((e.target as HTMLSelectElement).value) }) },
+            h('option', { value: '0', selected: settings.liveBitrateKbps === 0 }, t('liveBitrateAuto')),
+            ...LIVE_BITRATES_KBPS.map((k) => h('option', { value: String(k), selected: settings.liveBitrateKbps === k }, `${k / 1000} Mb/s`))
+          )
+        )
+      ),
+      h('p', { class: 'hint', style: 'margin:0' }, t('liveDialogQualityHint') + ' ' + t('liveUploadNeed', { mbps: liveUploadMbps(kbps) })),
+      checkbox('liveOpenPage', t('liveOpenPage'))
+    ),
+
+    h('div', {}, h('button', { class: 'small quiet live-studio', onclick: () => void kine.openKine('/live') }, t('liveDialogStudio') + ' →'))
+  );
 }
 
 function renderSide() {
   const st = statusText();
   const tabs = visibleTabs();
-  const top = tabs.filter((x) => x === 'kine' || x === 'clips');
-  const rest = tabs.filter((x) => x !== 'kine' && x !== 'clips');
+  const top = tabs.filter((x) => x === 'kine' || x === 'clips' || x === 'live');
+  const rest = tabs.filter((x) => x !== 'kine' && x !== 'clips' && x !== 'live');
   const capturing = status.capture === 'on';
   const manual = settings.detection === 'manual';
   const account = status.account;
@@ -722,34 +1277,51 @@ function renderSide() {
       status.uploadsPending > 0
         ? h('div', { class: 'side-sub' }, status.uploadsPaused ? t('trayUploadsPaused', { count: status.uploadsPending }) : t('trayUploads', { count: status.uploadsPending }))
         : null,
-      ...status.hotkeyProblems.map((p) => h('div', { class: 'side-sub warn' }, '⚠ ' + p)),
+      // Na baterii se nahrává úsporně (720p30) - ať hráč ví, proč je klip menší.
+      status.batterySaverActive ? h('div', { class: 'side-sub', title: t('batterySaverHint') }, '🔋 ' + t('sideBatterySaver')) : null,
+      // Upozornění, která appka neukázala okénkem (zkratka nejde, mikrofon…) - klik vede tam, kde se to řeší.
+      ...status.notices.map((n) => noticeRow(n)),
       // Hra běží, ale zvuk hry je ticho - nejčastěji hraje do jiného zařízení, než Windows nahrává.
-      capturing && status.game && audioLevels && audioLevels.system !== null && audioLevels.systemSilentSeconds >= 10
+      capturing && status.game && audioLevels && audioLevels.system !== null && audioLevels.systemSilentSeconds >= 10 && !status.notices.some((n) => n.id === 'audio-silent')
         ? h('button', { class: 'side-sub warn side-audio-warn', onclick: () => { tab = 'settings'; render(); } }, '⚠ ' + t('sideAudioSilent'))
         : null,
       h(
         'div',
         { class: 'side-actions' },
-        h('button', { class: 'small primary side-clip', disabled: !capturing, title: hotkeyLabel(settings.clipHotkey), onclick: () => void kine.clipNow() }, '● ' + t('sideSaveClip')),
+        h(
+          'button',
+          { class: `small primary side-clip ${status.clipsSaving > 0 ? 'saving' : ''}`, disabled: !capturing, title: hotkeyLabel(settings.clipHotkey), onclick: () => void kine.clipNow() },
+          status.clipsSaving > 0 ? h('span', { class: 'spin' }) : '● ',
+          status.clipsSaving > 0 ? t('sideClipSaving') : t('sideSaveClip')
+        ),
         pauseBtn
       ),
-      // Nahrávání celého zápasu: start, nebo běžící čas + stop.
+      // Nahrávání celého zápasu: start, nebo běžící čas + stop; po stopu hned "Ukládám…" (a nejde zmáčknout znovu).
       h(
         'div',
         { class: 'side-actions' },
-        status.recordingSince
+        status.recordingSaving
           ? h(
               'button',
-              { class: 'small side-record recording', title: settings.recordHotkey ? hotkeyLabel(settings.recordHotkey) : '', onclick: () => void kine.toggleRecording() },
-              h('span', { class: 'rec-dot' }),
-              h('span', { class: 'rec-time' }, recordingTime()),
-              ' · ' + t('sideRecordStop')
+              { class: 'small side-record saving', disabled: true, title: t('sideRecordSavingHint') },
+              h('span', { class: 'spin' }),
+              status.recordingSaving.percent !== null && status.recordingSaving.percent > 0
+                ? t('sideRecordSavingPercent', { percent: status.recordingSaving.percent })
+                : t('sideRecordSaving')
             )
-          : h(
-              'button',
-              { class: 'small quiet side-record', disabled: !capturing, title: settings.recordHotkey ? hotkeyLabel(settings.recordHotkey) : '', onclick: () => void kine.toggleRecording() },
-              '⏺ ' + t('sideRecord')
-            ),
+          : status.recordingSince
+            ? h(
+                'button',
+                { class: 'small side-record recording', title: settings.recordHotkey ? hotkeyLabel(settings.recordHotkey) : '', onclick: (e: Event) => stopRecordingClick(e) },
+                h('span', { class: 'rec-dot' }),
+                h('span', { class: 'rec-time' }, recordingTime()),
+                ' · ' + t('sideRecordStop')
+              )
+            : h(
+                'button',
+                { class: 'small quiet side-record', disabled: !capturing, title: settings.recordHotkey ? hotkeyLabel(settings.recordHotkey) : '', onclick: () => void kine.toggleRecording() },
+                '⏺ ' + t('sideRecord')
+              ),
         // Snímek obrazovky jde vždycky (i bez hry a zásobníku).
         h(
           'button',
@@ -793,7 +1365,8 @@ function renderKineBar() {
     status.uploadsPending > 0
       ? h('span', { class: 'bar-item' }, status.uploadsPaused ? t('trayUploadsPaused', { count: status.uploadsPending }) : t('trayUploads', { count: status.uploadsPending }))
       : null,
-    ...status.hotkeyProblems.map((p) => h('span', { class: 'bar-item warn', title: p }, '⚠ ', p)),
+    ...status.notices.filter((n) => n.kind !== 'info').map((n) => h('span', { class: 'bar-item warn', title: n.text }, '⚠ ', n.text)),
+    status.recordingSaving ? h('span', { class: 'bar-item' }, h('span', { class: 'spin' }), t('sideRecordSaving')) : null,
     h('span', { class: 'grow' }),
     // Během vysílání: čas a Ukončit i nad webem (chat je na stránce vysílání v okně).
     status.live.state === 'live' || status.live.state === 'reconnecting'
@@ -825,6 +1398,8 @@ function renderTab() {
       return renderKineTab();
     case 'clips':
       return renderClips();
+    case 'live':
+      return renderLive();
     case 'settings':
       return renderSettings();
     case 'games':
@@ -1116,6 +1691,7 @@ function renderSettings() {
         { class: `hint encoder-status ${status.hwEncoder === false ? 'warn-text' : status.hwEncoder ? 'ok' : ''}`, style: 'margin:0' },
         status.hwEncoder === true ? '✓ ' + t('encoderHardware') : status.hwEncoder === false ? '⚠ ' + t('encoderSoftware') : t('encoderUnknown')
       ),
+      checkbox('batterySaver', '🔋 ' + t('batterySaver'), t('batterySaverHint')),
       h(
         'label',
         {},
@@ -1155,7 +1731,20 @@ function renderSettings() {
         h('button', { class: 'small', onclick: () => void kine.openClipsDir() }, t('clipsDirOpen'))
       ),
       storageRows(),
-      checkbox('toast', t('toastSetting'), t('toastSettingHint'))
+      // Strop místa: nejstarší klipy (kromě oblíbených a čerstvých) se smažou samy.
+      h(
+        'label',
+        { style: 'max-width:360px' },
+        t('storageLimit'),
+        h(
+          'select',
+          { class: 'storage-limit', onchange: (e: Event) => update({ storageLimitGb: Number((e.target as HTMLSelectElement).value) }) },
+          ...STORAGE_LIMITS_GB.map((gb) => h('option', { value: String(gb), selected: settings.storageLimitGb === gb }, gb === 0 ? t('storageLimitOff') : `${gb} GB`))
+        ),
+        h('span', { class: 'sub hint', style: 'margin-top:4px;display:block' }, t('storageLimitHint'))
+      ),
+      checkbox('toast', t('toastSetting'), t('toastSettingHint')),
+      checkbox('clipSound', t('clipSoundSetting'), t('clipSoundHint'))
     ),
     variantPanel(),
     h(
@@ -1163,7 +1752,21 @@ function renderSettings() {
       { class: 'panel stack' },
       h('h2', {}, t('generalTitle')),
       h('label', {}, t('language'), languageSelect()),
-      checkbox('startWithSystem', t('startWithSystem')),
+      checkbox('startWithSystem', t('startWithSystem'), t('startWithSystemHint')),
+      // Po spuštění appky: nahrávat hned / počkat na hru / nic, dokud to hráč nezapne.
+      h(
+        'label',
+        { style: 'max-width:460px' },
+        t('launchCapture'),
+        h(
+          'select',
+          { class: 'launch-capture', onchange: (e: Event) => update({ launchCapture: (e.target as HTMLSelectElement).value as Settings['launchCapture'] }) },
+          h('option', { value: 'auto', selected: settings.launchCapture === 'auto' }, t('launchCaptureAuto')),
+          h('option', { value: 'game', selected: settings.launchCapture === 'game' }, t('launchCaptureGame')),
+          h('option', { value: 'paused', selected: settings.launchCapture === 'paused' }, t('launchCapturePaused'))
+        ),
+        h('span', { class: 'sub hint', style: 'margin-top:4px;display:block' }, t('launchCaptureHint'))
+      ),
       h('p', { class: 'hint', style: 'margin:0' }, t('brandColorHint'))
     )
   );
@@ -1421,6 +2024,42 @@ function audioPanel(win: boolean) {
   );
 }
 
+// ---- kolik appka bere -----------------------------------------------------------------
+
+let usage: ResourceUsage | null = null;
+let usageTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Údaje o výkonu chodí jen když je vidět záložka Nastavení (každé 2 s), jinak se nic neměří. */
+function syncUsageWatch() {
+  const want = tab === 'settings' && wizardStep === null && document.visibilityState === 'visible';
+  if (want && !usageTimer) {
+    const tick = () =>
+      void kine.resourceUsage().then((u) => {
+        usage = u;
+        const el = app.querySelector('.usage-now');
+        if (el) el.replaceWith(usageRow());
+      });
+    tick();
+    usageTimer = setInterval(tick, 2000);
+  } else if (!want && usageTimer) {
+    clearInterval(usageTimer);
+    usageTimer = null;
+  }
+}
+document.addEventListener('visibilitychange', () => syncUsageWatch());
+
+function usageRow() {
+  if (!usage) return h('p', { class: 'faint usage-now', style: 'margin:0' }, t('loading'));
+  const num = (n: number) => n.toLocaleString(settings.lang, { maximumFractionDigits: 1 });
+  return h(
+    'div',
+    { class: 'usage-now stack', style: 'gap:2px' },
+    h('p', { style: 'margin:0' }, h('b', {}, t('usageNow', { cpu: num(usage.cpuPercentOfTotal), mb: usage.memoryMb }))),
+    h('p', { class: 'faint', style: 'margin:0;font-size:12px' }, usage.parts.map((part) => `${part.label}: ${part.memoryMb} MB${part.cpuPercent >= 0.1 ? `, ${num(part.cpuPercent)} %` : ''}`).join(' · ')),
+    h('p', { class: 'faint', style: 'margin:0;font-size:12px' }, status.capture === 'on' ? t('usageCapturing') : t('usageIdle'))
+  );
+}
+
 /**
  * Kolik výkonu smí appka brát (shared/performance.ts): jak často hlídá
  * hry, jak rychle čte ovladač a kombinace kláves, jak často se ptá LoL,
@@ -1433,6 +2072,8 @@ function performancePanel() {
     'div',
     { class: 'panel stack performance' },
     h('h2', { style: 'margin:0' }, '⚙ ' + t('performanceTitle')),
+    // Kolik appka právě bere - na rovinu, ať je vidět, že hru nebrzdí.
+    usageRow(),
     h('p', { class: 'hint', style: 'margin:0' }, t('performanceHint')),
     h(
       'div',

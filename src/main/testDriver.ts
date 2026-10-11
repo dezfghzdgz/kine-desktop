@@ -126,8 +126,27 @@ export async function runTestDriver(kine: {
       }
     }
     await kine.toast.show('Test toastu', 'ok');
+    // Okénko "Ukládám klip…" musí vyskočit HNED při stisku (dřív až s hotovým souborem, i za 10 s).
+    const toastAny = kine.toast as any;
+    const pendingOrig = toastAny.pending.bind(toastAny);
+    let pendingAt = 0;
+    let doneAt = 0;
+    toastAny.pending = (message: string) => {
+      pendingAt = Date.now();
+      const handle = pendingOrig(message);
+      return {
+        done: (...args: any[]) => {
+          doneAt = Date.now();
+          return handle.done(...args);
+        },
+      };
+    };
+    const pressedAt = Date.now();
     const clip1 = await kine.onClipHotkey();
+    toastAny.pending = pendingOrig;
     result.clip1 = clip1;
+    result.clipToast = { pendingMs: pendingAt ? pendingAt - pressedAt : null, doneMs: doneAt ? doneAt - pressedAt : null };
+    result.clipToastInstant = !!clip1 && pendingAt > 0 && pendingAt - pressedAt < 50 && doneAt >= pendingAt;
     if (process.env.KINE_TEST_FAKE_AUDIO && clip1) {
       const info = await probe(clip1.file);
       // Stopa nestačí - musí v ní být slyšet tón (ne ticho z uspaného Web Audio): střední hlasitost nad -50 dB.
@@ -459,7 +478,7 @@ export async function runTestDriver(kine: {
       // Postranní panel: položky s ikonami, hlavička "Nastavení", karta stavu
       // s tlačítky Uložit klip (aktivní, zásobník běží) a Pozastavit, účet.
       result.sidebar = await win.webContents.executeJavaScript(
-        `(() => { const tabs = [...document.querySelectorAll('.side .tab')]; return tabs.length === ${clipperApp ? 6 : 7} && tabs.every((b) => b.querySelector('svg.tab-icon') && b.querySelector('.tab-label').textContent.trim()) && !!document.querySelector('.side .side-section') && !!document.querySelector('.side-status .side-clip:not(:disabled)') && !!document.querySelector('.side-status .side-pause') && !!document.querySelector('.side-status .side-account') && document.querySelector('.side .tab.active [data-tab], .side .tab.active') !== null; })()`
+        `(() => { const tabs = [...document.querySelectorAll('.side .tab')]; return tabs.length === ${clipperApp ? 7 : 8} && tabs.every((b) => b.querySelector('svg.tab-icon') && b.querySelector('.tab-label').textContent.trim()) && !!document.querySelector('.side .side-section') && !!document.querySelector('.side-status .side-clip:not(:disabled)') && !!document.querySelector('.side-status .side-pause') && !!document.querySelector('.side-status .side-account') && document.querySelector('.side .tab.active [data-tab], .side .tab.active') !== null; })()`
       );
       await shot(win, 'settings-sidebar');
 
@@ -720,12 +739,23 @@ export async function runTestDriver(kine: {
       cpSync(bufDir, leftover, { recursive: true });
       const beforeStop = new Set(kine.library.list().map((c) => c.id));
       await recWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-record.recording'); if (b) b.click(); return !!b; })()`);
+      // Hned po kliku: tlačítko "Ukládám…" (nejde zmáčknout), stav ukládání, žádné "nahrávám". Druhý klik / zkratka
+      // během ukládání nesmí uložit nahrávku podruhé (dřív se uložila tolikrát, kolikrát hráč klikl).
+      const savingUi = await recWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-record'); return !!b && b.classList.contains('saving') && b.disabled && !document.querySelector('.side-record.recording'); })()`);
+      await sleep(150);
+      const savingStatus = !!(kine as any).status().recordingSaving && !(kine as any).capture.recordingInfo();
+      // Jen dokud se ukládá (kdyby uložení stihlo doběhnout, další stisk by správně začal novou nahrávku).
+      if ((kine as any).status().recordingSaving) await (kine as any).toggleRecording();
+      await recWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-record.saving'); if (b) b.click(); return true; })()`);
       let rec: any = null;
       for (let i = 0; i < 120 && !rec; i++) {
         await sleep(500);
         rec = kine.library.list().find((c) => !beforeStop.has(c.id) && c.kind === 'recording');
       }
-      await sleep(800);
+      await sleep(2500);
+      const recordingsAfterStop = kine.library.list().filter((c) => !beforeStop.has(c.id) && c.kind === 'recording').length;
+      result.recordingStopOnce = { savingUi, savingStatus, recordingsAfterStop, savingAfter: !!(kine as any).status().recordingSaving };
+      result.recordingStopOnceOk = savingUi && savingStatus && recordingsAfterStop === 1 && !(kine as any).status().recordingSaving;
       const badge = await recWin.webContents.executeJavaScript(`!!document.querySelector('.clip .thumb .kind-badge') && !document.querySelector('.side-record.recording')`);
       result.recordingClip = rec ? { durationSeconds: rec.durationSeconds, title: rec.title, file: rec.file } : null;
       // Ikona u hodin s červenou tečkou (pravý dolní roh) - zvětšená do souboru, ať se dá prohlédnout.
@@ -839,29 +869,80 @@ export async function runTestDriver(kine: {
         let liveState = '';
         let sideLive: string | null = null;
         let clipDuringLive = false;
+        let titleKept = false;
+        let brbOn = false;
+        let brbOff = false;
+        let micMuted = false;
+        let stoppingUi = false;
+        // Kamera (falešná kamera Chromia při KINE_TEST_FAKE_AUDIO) vpravo dole, velká, obdélník.
+        const withCamera = !!process.env.KINE_TEST_FAKE_AUDIO;
+        kine.settings.update({ liveCamera: withCamera, liveCameraPosition: 'bottom-right', liveCameraSize: 'large', liveCameraShape: 'rect', liveCameraMirror: false, liveBrbText: 'E2E BRB' });
+        await sleep(300);
         if (liveWin && !liveWin.isDestroyed()) {
-          opened = await liveWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-live'); if (b) b.click(); return !!document.querySelector('.live-dialog'); })()`);
-          await sleep(300);
-          await shot(liveWin, 'settings-live-dialog');
-          await liveWin.webContents.executeJavaScript(`(() => { const i = document.querySelector('input.live-title'); if (i) i.value = 'E2E live'; const b = document.querySelector('.live-start'); if (b) b.click(); return !!b; })()`);
+          // Tlačítko Vysílat v panelu otevře záložku Živě (žádný dialog).
+          opened = await liveWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-live'); if (b) b.click(); return true; })()`);
+          await sleep(500);
+          opened = opened && (await liveWin.webContents.executeJavaScript(`!!document.querySelector('.live-start') && !!document.querySelector('.live-scene-panel') && !!document.querySelector('.live-preview') && ${withCamera ? "!!document.querySelector('.corner-picker')" : 'true'}`));
+          await shot(liveWin, 'settings-live-tab');
+          // Psaní do názvu: stav z hlavního procesu (překreslení) nesmí sebrat kurzor ani rozepsaný text.
+          await liveWin.webContents.executeJavaScript(`(() => { const i = document.querySelector('input.live-title'); i.focus(); i.value = 'E2E li'; i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+          (kine as any).pushStatus();
+          await sleep(400);
+          titleKept = await liveWin.webContents.executeJavaScript(`(() => { const i = document.querySelector('input.live-title'); return !!i && document.activeElement === i && i.value === 'E2E li'; })()`);
+          await liveWin.webContents.executeJavaScript(`(() => { const i = document.querySelector('input.live-title'); i.value = 'E2E live'; i.dispatchEvent(new Event('input', { bubbles: true })); i.dispatchEvent(new Event('change', { bubbles: true })); const b = document.querySelector('.live-start'); if (b) b.click(); return !!b; })()`);
           for (let i = 0; i < 60 && liveState !== 'live'; i++) {
             await sleep(500);
             liveState = (kine as any).live.current().state;
           }
-          await sleep(5000);
+          await sleep(4000);
           sideLive = await liveWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-live.on .live-time'); return b ? b.textContent : null; })()`);
           await shot(liveWin, 'settings-live');
           clipDuringLive = !!(await (kine as any).onClipHotkey());
           await sleep(1500);
+          // "Hned jsem zpět": hra i kamera pryč, jen tmavá obrazovka s textem; pak zpět. Mikrofon ve vysílání ztlumit.
+          brbOn = (kine as any).toggleLiveBrb(true) === true && (kine as any).live.current().scene?.brb === true;
+          await sleep(4000);
+          await shot(liveWin, 'settings-live-brb');
+          brbOff = (kine as any).toggleLiveBrb(false) === false && (kine as any).live.current().scene?.brb === false;
+          micMuted = (kine as any).setLiveMicMuted(true) === true && (kine as any).live.current().scene?.micMuted === true;
+          await sleep(3000);
+          // Ukončit: tlačítko hned "Ukončuji…" a nejde zmáčknout znovu.
+          await liveWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-live.on'); if (b) b.click(); return !!b; })()`);
+          await sleep(100);
+          stoppingUi = await liveWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-live'); return !!b && b.disabled; })()`);
+          await (kine as any).stopLive();
+        } else {
+          await (kine as any).stopLive();
         }
-        await (kine as any).stopLive();
         await Promise.race([listenerClosed, sleep(8000)]);
         if (listener.exitCode === null) listener.kill();
         const info = existsSync(liveOut) ? await probe(liveOut).catch(() => null) : null;
-        result.live = { opened, liveState, sideLive, clipDuringLive, after: (kine as any).live.current().state, info, listenerLog: listenerLog.slice(-300) };
+        // Snímky z vysílání (2 za sekundu, zmenšené na 64x36): najít "Hned jsem zpět" (tmavé, uprostřed světlý text)
+        // a s kamerou snímek, kde je pravý dolní roh jiný než zbytek obrazu (kamera je tam vidět).
+        const frames = existsSync(liveOut) ? await rawFrames(liveOut, 64, 36, 2) : [];
+        const lum = (f: Buffer, x0: number, y0: number, x1: number, y1: number) => {
+          let sum = 0;
+          let n = 0;
+          for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+            const i = (y * 64 + x) * 3;
+            sum += 0.2126 * f[i] + 0.7152 * f[i + 1] + 0.0722 * f[i + 2];
+            n += 1;
+          }
+          return n ? sum / n : 0;
+        };
+        const brbFrames = frames.filter((f) => lum(f, 0, 0, 64, 10) < 30 && lum(f, 0, 26, 18, 36) < 30 && lum(f, 16, 13, 48, 19) > lum(f, 0, 0, 64, 10) + 12);
+        // Kamera "large" vpravo dole = asi 21x12 px v rohu 64x36; falešná kamera Chromia je pestrá (ne černá).
+        const camFrames = frames.filter((f) => !brbFrames.includes(f) && Math.abs(lum(f, 44, 23, 62, 34) - lum(f, 2, 2, 20, 13)) > 20);
+        result.live = {
+          opened, liveState, sideLive, clipDuringLive, titleKept, brbOn, brbOff, micMuted, stoppingUi, withCamera,
+          frames: frames.length, brbFrames: brbFrames.length, camFrames: camFrames.length, cameraError: (kine as any).live.current().cameraError,
+          after: (kine as any).live.current().state, info, listenerLog: listenerLog.slice(-300),
+        };
         result.liveOk =
-          opened && liveState === 'live' && !!sideLive && clipDuringLive && (kine as any).live.current().state === 'idle' &&
-          !!info && (info.durationSeconds ?? 0) >= 4 && (info.height ?? 0) > 0 && (info.height ?? 0) <= 720 && info.hasAudio;
+          opened && liveState === 'live' && !!sideLive && clipDuringLive && titleKept && brbOn && brbOff && micMuted && stoppingUi && (kine as any).live.current().state === 'idle' &&
+          !!info && (info.durationSeconds ?? 0) >= 8 && (info.height ?? 0) > 0 && (info.height ?? 0) <= 720 && info.hasAudio &&
+          brbFrames.length >= 2 && (!withCamera || camFrames.length >= 2);
+        kine.settings.update({ liveCamera: false });
       }
     }
 
@@ -1067,7 +1148,7 @@ export async function runTestDriver(kine: {
       'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks', 'reviewMerge', 'updateUi',
       'playerNav', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
       'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
-      'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'screenshotOk',
+      'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'screenshotOk', 'clipToastInstant', 'recordingStopOnceOk',
     ];
     if (process.env.KINE_TEST_LIVE_URL) common.push('liveOk');
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];
@@ -1080,4 +1161,21 @@ export async function runTestDriver(kine: {
   }
   process.stdout.write(`KINE_TEST_RESULT ${JSON.stringify(result)}\n`);
   setTimeout(() => app.exit(result.ok ? 0 : 1), 500);
+}
+
+/** Snímky videa jako surové RGB (zmenšené), `fps` za sekundu - pro kontrolu obsahu vysílání v testu. */
+async function rawFrames(file: string, width: number, height: number, fps: number): Promise<Buffer[]> {
+  return new Promise((resolve) => {
+    const child = spawnFfmpeg(['-loglevel', 'error', '-i', file, '-vf', `fps=${fps},scale=${width}:${height}`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']);
+    const chunks: Buffer[] = [];
+    child.stdout.on('data', (d: Buffer) => chunks.push(d));
+    child.on('close', () => {
+      const all = Buffer.concat(chunks);
+      const size = width * height * 3;
+      const frames: Buffer[] = [];
+      for (let i = 0; i + size <= all.length; i += size) frames.push(all.subarray(i, i + size));
+      resolve(frames);
+    });
+    child.on('error', () => resolve([]));
+  });
 }

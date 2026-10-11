@@ -118,10 +118,18 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   „3 / 24“, u nahraného klipu „Kopírovat odkaz“. Klávesy: mezerník,
   ← → (±1 s, se Shiftem 5 s), M ztlumí, F celá obrazovka, I/O v úpravách.
   Hlasitost si přehrávač pamatuje.
-- **Živé vysílání na Kine bez OBS** (tlačítko „Vysílat“ v panelu, položka
-  v liště): dialog s názvem a kvalitou (720p30 3 Mb/s / 1080p30 4,5 Mb/s /
-  1080p60 6 Mb/s), klíč si appka vezme z Kine (`/api/live/me`, stejný jako
-  pro OBS ve studiu). Snímací stránka pustí třetí recorder na stejném
+- **Živé vysílání na Kine bez OBS** (záložka „Živě“, tlačítko „Vysílat“
+  v panelu, položka v liště): název, kvalita (720p30 3 Mb/s / 1080p30
+  4,5 Mb/s / 1080p60 6 Mb/s), **kamera v rohu** (roh, velikost, kulatá /
+  zaoblená, zrcadlení), **„Hned jsem zpět“** (vlastní text, zkratka, při
+  ní se ztlumí mikrofon), ztlumení mikrofonu, živé údaje (kb/s, fps,
+  fronta v rouře) a **počet diváků** z Kine. Kamera i scény se přepínají
+  za běhu bez odpojení (příkaz `live-scene`); skládání obrazu dělá
+  `src/renderer/liveCompositor.ts` (MediaStreamTrackProcessor/Generator
+  + OffscreenCanvas) - bez kamery a „Hned jsem zpět“ jde obraz beze
+  změny (žádná práce navíc). Klíč si appka vezme z Kine (`/api/live/me`,
+  stejný jako pro OBS ve studiu) a každých 15 s hlásí, že vysílá - web
+  ukáže „živě“ hned, ne až když přenos najde Cloudflare. Snímací stránka pustí třetí recorder na stejném
   snímání - kopie obrazové stopy zmenšená na kvalitu vysílání, zvuk hry
   a mikrofonu smíchaný přes Web Audio (hlasitosti z nastavení, omezovač),
   vždy H.264, klíčový snímek každé 2 s - a jeho kousky jdou rourou do
@@ -368,6 +376,24 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   appka díky tomu nespouští každých pár sekund `tasklist` ani `reg`.
   Hlídání her jede jednou za 5 s. V nastavení kvality je tlačítko **Nízká
   zátěž (720p)** – 720p / 30 fps / 5 Mb/s jedním klikem.
+
+## Novinky 0.9.6
+
+- **Klip hned:** okénko „Ukládám klip…“ vyskočí v okamžiku stisku zkratky
+  (ne až po uložení) a pak se změní na „Klip uložen“.
+- **Konec nahrávky zápasu:** stav „Ukládám…“ s procenty hned po kliknutí;
+  další kliknutí nahrávku neuloží znovu (jedno ukládání, `finishRecording`).
+- **Žádná okénka po spuštění:** problémy (zkratka obsazená, mikrofon…) jsou
+  tichá upozornění v okně; okénkem jen jednou, když začne hra a klipovací
+  zkratka pořád nejde - nejdřív 45 s po spuštění appky.
+- **Po spuštění:** volba Snímat hned / až se hrou / pozastavené
+  (`launchCapture`).
+- **Méně zátěže:** pomocník (PowerShell) posílá jen změny, ffmpeg zásobníku
+  a ukládání nahrávek běží s nižší prioritou, na baterii 720p · 30 fps,
+  přehled spotřeby appky v Nastavení.
+- **Místo na klipy:** strop (20-500 GB); nejstarší klipy se smažou samy -
+  nikdy oblíbené, nahrávané na Kine ani čerstvé (hodinu od uložení).
+- **Vysílání:** záložka Živě (kamera, „Hned jsem zpět“, diváci, viz výš).
 
 ## Vývoj
 

@@ -1,6 +1,6 @@
-import { CATEGORY_KEYS, LANGS, VISIBILITIES, type Settings } from './types';
+import { CATEGORY_KEYS, LANGS, LAUNCH_CAPTURE, LIVE_CAMERA_POSITIONS, LIVE_CAMERA_SHAPES, LIVE_CAMERA_SIZES, STORAGE_LIMITS_GB, VISIBILITIES, type Settings } from './types';
 import { isHotkey } from './hotkeys';
-import { LIVE_QUALITIES } from './live';
+import { LIVE_QUALITIES, liveBitrate } from './live';
 
 /**
  * Výchozí nastavení a jeho očištění po načtení ze souboru.
@@ -21,6 +21,25 @@ export const DEFAULT_SETTINGS: Settings = {
   screenshotHotkey: 'Alt+F8',
   liveQuality: '720p30',
   liveTitle: '',
+  liveDescription: '',
+  liveCategory: 'catGaming',
+  liveBitrateKbps: 0,
+  liveGameAudio: true,
+  liveMic: true,
+  liveOpenPage: false,
+  liveCamera: false,
+  liveCameraDevice: '',
+  liveCameraPosition: 'bottom-right',
+  liveCameraSize: 'medium',
+  liveCameraShape: 'rounded',
+  liveCameraMirror: true,
+  liveBrbText: '',
+  liveBrbHotkey: '',
+  liveBrbMuteMic: true,
+  launchCapture: 'auto',
+  clipSound: true,
+  storageLimitGb: 0,
+  batterySaver: true,
   clipSeconds: 30,
   maxHeight: 1080,
   fps: 60,
@@ -129,6 +148,25 @@ export function sanitizeSettings(input: unknown): Settings {
     screenshotHotkey: raw.screenshotHotkey === '' ? '' : isHotkey(raw.screenshotHotkey) ? (raw.screenshotHotkey as string) : d.screenshotHotkey,
     liveQuality: oneOf(raw.liveQuality, LIVE_QUALITIES, d.liveQuality),
     liveTitle: text(raw.liveTitle, d.liveTitle, 100),
+    liveDescription: text(raw.liveDescription, d.liveDescription, 2000),
+    liveCategory: oneOf(raw.liveCategory, CATEGORY_KEYS, d.liveCategory),
+    liveBitrateKbps: liveBitrate(raw.liveBitrateKbps),
+    liveGameAudio: bool(raw.liveGameAudio, d.liveGameAudio),
+    liveMic: bool(raw.liveMic, d.liveMic),
+    liveOpenPage: bool(raw.liveOpenPage, d.liveOpenPage),
+    liveCamera: bool(raw.liveCamera, d.liveCamera),
+    liveCameraDevice: text(raw.liveCameraDevice, d.liveCameraDevice, 300),
+    liveCameraPosition: oneOf(raw.liveCameraPosition, LIVE_CAMERA_POSITIONS, d.liveCameraPosition),
+    liveCameraSize: oneOf(raw.liveCameraSize, LIVE_CAMERA_SIZES, d.liveCameraSize),
+    liveCameraShape: oneOf(raw.liveCameraShape, LIVE_CAMERA_SHAPES, d.liveCameraShape),
+    liveCameraMirror: bool(raw.liveCameraMirror, d.liveCameraMirror),
+    liveBrbText: text(raw.liveBrbText, d.liveBrbText, 80).replace(/[\r\n]+/g, ' '),
+    liveBrbHotkey: raw.liveBrbHotkey === '' ? '' : isHotkey(raw.liveBrbHotkey) ? (raw.liveBrbHotkey as string) : d.liveBrbHotkey,
+    liveBrbMuteMic: bool(raw.liveBrbMuteMic, d.liveBrbMuteMic),
+    launchCapture: oneOf(raw.launchCapture, LAUNCH_CAPTURE, d.launchCapture),
+    clipSound: bool(raw.clipSound, d.clipSound),
+    storageLimitGb: oneOf(Number(raw.storageLimitGb), STORAGE_LIMITS_GB, 0),
+    batterySaver: bool(raw.batterySaver, d.batterySaver),
     clipSeconds: Number.isFinite(clipSeconds)
       ? Math.min(CLIP_SECONDS_MAX, Math.max(CLIP_SECONDS_MIN, Math.round(clipSeconds)))
       : d.clipSeconds,

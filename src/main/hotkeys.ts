@@ -12,15 +12,16 @@ import { log } from './log';
  * Který motor se použije, řeší tahle třída; zbytek appky jen dostane
  * "zkratka X stisknuta".
  */
-export type HotkeyId = 'clip' | 'toggle' | 'record' | 'screenshot';
-const HOTKEY_IDS: HotkeyId[] = ['clip', 'toggle', 'record', 'screenshot'];
+/** brb = obrazovka "Hned jsem zpět" ve vysílání (jen když ji hráč nastaví). */
+export type HotkeyId = 'clip' | 'toggle' | 'record' | 'screenshot' | 'brb';
+const HOTKEY_IDS: HotkeyId[] = ['clip', 'toggle', 'record', 'screenshot', 'brb'];
 
 export type HotkeyProblem = { id: HotkeyId; hotkey: string; reason: HotkeyReason };
 export type HotkeyReason = 'in-use' | 'unsupported' | 'helper-down' | 'invalid';
 
 export class HotkeyManager {
   private chordIds: HotkeyId[] = [];
-  private wanted: Record<HotkeyId, string> = { clip: '', toggle: '', record: '', screenshot: '' };
+  private wanted: Record<HotkeyId, string> = { clip: '', toggle: '', record: '', screenshot: '', brb: '' };
   private problems: HotkeyProblem[] = [];
   private registered = new Set<string>();
 
@@ -52,7 +53,7 @@ export class HotkeyManager {
     return this.problems;
   }
 
-  /** Zaregistruje zkratky (klip, zásobník, nahrávání, snímek obrazovky); co nejde, skončí v problems (a hráč to uvidí). */
+  /** Zaregistruje zkratky (klip, zásobník, nahrávání, snímek obrazovky, "Hned jsem zpět"); co nejde, skončí v problems (a hráč to uvidí v okně). */
   apply(hotkeys: Record<HotkeyId, string>): HotkeyProblem[] {
     this.wanted = { ...hotkeys };
     globalShortcut.unregisterAll();

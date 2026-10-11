@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, statfsSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, statfsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { BrowserWindow, app } from 'electron';
@@ -6,7 +6,7 @@ import type { AudioLevels, CaptureCommand, CaptureEvent, CaptureState, Settings 
 import { clipFileBase } from '../shared/clipNaming';
 import { log } from './log';
 import { probe, runFfmpeg, spawnFfmpeg } from './ffmpeg';
-import { concatScript, expired, parseSegmentCsv, planClip, recoverySegments, sameResolutionTailStart, selectForClip, toSegment, totalSeconds, type SavedGeneration, type Segment } from './segments';
+import { concatScript, expired, parseSegmentCsv, planClip, recordingParts, recoverySegments, reportedSize, selectForClip, sizeRuns, toSegment, totalSeconds, type SavedGeneration, type Segment } from './segments';
 import { clipAudioTracks, clipMuxArgs, type AudioTrackKind } from './editPlan';
 
 /**
@@ -64,6 +64,10 @@ type Generation = {
   hasAudio: boolean;
   /** Zpoždění mikrofonu podle Chromia (ms) - při stavbě klipu se o tolik posune dopředu. */
   micLatencyMs: number;
+  /** Rozměry obrazu na začátku generace ("1920x1080"), podle snímací stránky; null = neví se. */
+  size: string | null;
+  /** Kdy (hodiny počítače) obrazovka během generace změnila rozměry (hra přepnula rozlišení). */
+  resizes: { at: number; size: string }[];
 };
 
 /** Zvukové vlastnosti generace, podle kterých se lepí klip (zvuk hry ano/ne, zpoždění mikrofonu). */
@@ -98,7 +102,16 @@ export class CaptureManager {
    * dlouhého souboru. Zkratka na klip mezitím funguje normálně.
    */
   private recording: { since: number; game: string | null } | null = null;
+  /**
+   * Zastavená nahrávka, která se právě slepuje do souboru (u dlouhé to
+   * chvíli trvá). Kousky se pořád nemažou, ale nahrávání už neběží -
+   * tlačítko ukazuje "Ukládám…" a další stisk nic nespustí (dřív se tak
+   * nahrávka uložila víckrát).
+   */
+  private finishing: { since: number; game: string | null; percent: number | null; dir: string } | null = null;
   private recordingStopHandler: ((reason: 'max' | 'disk') => void) | null = null;
+  /** Rozměry kousků, které už se zjišťovaly (kousek se po zapsání nemění) - další klip se na ně nemusí ptát znovu. */
+  private probeCache = new Map<string, string | null>();
   /** Kdy se naposledy měřilo volné místo při nahrávání (statfs jednou za 30 s stačí). */
   private lastDiskCheck = 0;
   /** Poslední hladiny zvuku ze snímací stránky (null = zásobník neběží / ještě nic nepřišlo). */
@@ -134,7 +147,9 @@ export class CaptureManager {
       /** Rozjetá nahrávka zápasu, kterou přerušil pád, je odložená k obnově - ať ji hlavní proces slepí (recoverLeftovers). */
       onRecoverable?: () => void;
       /** Události recorderu živého vysílání (live.ts). */
-      onLiveEvent?: (event: Extract<CaptureEvent, { type: 'live-started' | 'live-stopped' | 'live-error' }>) => void;
+      onLiveEvent?: (event: Extract<CaptureEvent, { type: 'live-started' | 'live-stopped' | 'live-error' | 'live-warning' }>) => void;
+      /** Průběh ukládání nahrávky zápasu (tlačítko "Ukládám… 40 %"). */
+      onSavingProgress?: () => void;
     }
   ) {
     this.bufferName = deps.bufferName ?? 'kine-buffer';
@@ -152,11 +167,13 @@ export class CaptureManager {
     const main = join(temp, this.bufferName);
     // Rozjetá nahrávka zápasu z minula (pád) se nemaže - odloží se k obnově.
     if (this.salvageLeftovers().moved > 0) this.deps.onRecoverable?.();
+    const busyDir = this.finishing?.dir ?? null;
     try {
       for (const name of readdirSync(temp)) {
-        if (name.startsWith(`${this.bufferName}-`) && name !== basename(this.bufferDir)) {
+        const dir = join(temp, name);
+        if (name.startsWith(`${this.bufferName}-`) && name !== basename(this.bufferDir) && dir !== busyDir) {
           try {
-            rmSync(join(temp, name), { recursive: true, force: true });
+            rmSync(dir, { recursive: true, force: true });
           } catch {
             // ještě běží jiná appka - nechat
           }
@@ -166,18 +183,22 @@ export class CaptureManager {
       // %TEMP% nejde přečíst - nevadí
     }
     try {
+      // Nahrávka se z téhle složky právě slepuje (snímání se mezitím rozjíždí znovu) - nesahat na ni.
+      if (busyDir === main) throw new Error('slepuje se z ní nahrávka zápasu');
       // Nahrávku, kterou nešlo odložit (soubory ještě drží spadlý ffmpeg), nemazat - zásobník půjde vedle.
       if (existsSync(join(main, 'recording.json'))) throw new Error('čeká tu nahrávka zápasu k obnově');
       rmSync(main, { recursive: true, force: true });
       mkdirSync(main, { recursive: true });
       this.bufferDir = main;
     } catch (e) {
-      const alt = join(temp, `${this.bufferName}-${process.pid}`);
+      let alt = join(temp, `${this.bufferName}-${process.pid}`);
+      if (alt === busyDir) alt = join(temp, `${this.bufferName}-${process.pid}-${Date.now().toString(36)}`);
       log(`složku zásobníku ${main} nejde vyčistit (${(e as Error).message.split('\n')[0]}) - beru ${alt}`);
       rmSync(alt, { recursive: true, force: true });
       mkdirSync(alt, { recursive: true });
       this.bufferDir = alt;
     }
+    this.csvOffsets.clear();
   }
 
   get state(): CaptureState {
@@ -212,6 +233,20 @@ export class CaptureManager {
 
   recordingInfo(): { since: number; game: string | null } | null {
     return this.recording ? { ...this.recording } : null;
+  }
+
+  /** Proces snímací stránky (pro přehled, kolik appka bere); null = snímání neběží. */
+  capturePid(): number | null {
+    try {
+      return this.window && !this.window.isDestroyed() ? this.window.webContents.getOSProcessId() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Nahrávka zápasu, která se po zastavení slepuje do souboru (null = žádná). */
+  savingInfo(): { since: number; percent: number | null } | null {
+    return this.finishing ? { since: this.finishing.since, percent: this.finishing.percent } : null;
   }
 
   /** Kdo dostane vědět, že se nahrávání zastavilo samo (délka, místo na disku). */
@@ -299,11 +334,15 @@ export class CaptureManager {
       // Když to nejde přejmenovat, kousky zůstanou, kde jsou - odloží se při dalším startu zásobníku.
       return;
     }
+    // Z kousků se právě slepuje nahrávka zápasu - smazat je by ji zničilo.
+    // Složku uklidí další start zásobníku (až slepení doběhne a značka zmizí).
+    if (this.finishing) return;
     try {
       rmSync(this.bufferDir, { recursive: true, force: true });
     } catch (e) {
       log(`úklid zásobníku: ${(e as Error).message.split('\n')[0]}`);
     }
+    this.probeCache.clear();
   }
 
   /** Změna nastavení, která vyžaduje nový start (rozlišení, kodek, zvuk...). */
@@ -325,6 +364,7 @@ export class CaptureManager {
         sandbox: true,
         // Skrytá stránka nesmí být brzděná jako okno na pozadí.
         backgroundThrottling: false,
+        spellcheck: false,
       },
     });
     this.window = win;
@@ -347,8 +387,11 @@ export class CaptureManager {
   }
 
   /** Povel pro recorder živého vysílání; false = snímací stránka neběží. */
-  sendLive(command: Extract<CaptureCommand, { type: 'live-start' | 'live-stop' }>): boolean {
-    if (!this.window || this.window.isDestroyed() || this._state !== 'on') return false;
+  sendLive(command: Extract<CaptureCommand, { type: 'live-start' | 'live-stop' | 'live-scene' }>): boolean {
+    if (!this.window || this.window.isDestroyed()) return false;
+    // Konec vysílání se doručí vždycky, i když snímání mezitím spadlo do chyby -
+    // jinak by snímací stránka dál kódovala a držela kameru.
+    if (this._state !== 'on' && command.type !== 'live-stop') return false;
     this.window.webContents.send('capture:command', command);
     return true;
   }
@@ -413,6 +456,8 @@ export class CaptureManager {
       hasMic: false,
       hasAudio: false,
       micLatencyMs: 0,
+      size: null,
+      resizes: [],
     };
     this.generations.push(gen);
     return gen;
@@ -421,6 +466,7 @@ export class CaptureManager {
   /** Segmenter: WebM proud z roury krájí bez překódování na 2 s kousky a píše CSV seznam. */
   private spawnSegmenter(gen: Generation, kind: 'av' | 'mic' = 'av'): void {
     const mic = kind === 'mic';
+    // Jen kopíruje a krájí - nižší priorita: hra dostane procesor první (roura mezitím počká).
     const child = spawnFfmpeg([
       '-loglevel', 'error',
       '-fflags', '+genpts',
@@ -434,7 +480,7 @@ export class CaptureManager {
       '-segment_list_type', 'csv',
       '-segment_list_flags', 'live',
       join(gen.dir, mic ? 'm%05d.mka' : '%05d.mkv'),
-    ]);
+    ], { low: true });
     let stderr = '';
     child.stderr.on('data', (d) => {
       stderr += d.toString();
@@ -481,11 +527,20 @@ export class CaptureManager {
 
   handleEvent(event: CaptureEvent): void {
     // Vysílání má vlastní číslování generací - do zásobníku nepatří.
-    if (event.type === 'live-started' || event.type === 'live-stopped' || event.type === 'live-error') {
+    if (event.type === 'live-started' || event.type === 'live-stopped' || event.type === 'live-error' || event.type === 'live-warning') {
       this.deps.onLiveEvent?.(event);
       return;
     }
     const gen = this.generations.find((g) => g.id === event.generation);
+    if (event.type === 'resized') {
+      // Hra přepnula rozlišení: klip přes tuhle chvíli se vezme jen od ní dál (viz consistentSegments).
+      const size = `${event.width}x${event.height}`;
+      if (gen && !gen.ended) {
+        gen.resizes.push({ at: event.at, size });
+        log(`snímání gen ${gen.id}: obrazovka změnila rozměry na ${size}`);
+      }
+      return;
+    }
     if (event.type === 'started') {
       if (!gen) return;
       gen.startWall = event.at;
@@ -493,6 +548,7 @@ export class CaptureManager {
       gen.hasMic = !!event.mic;
       gen.hasAudio = !!event.audio;
       gen.micLatencyMs = event.micLatencyMs ?? 0;
+      gen.size = event.width && event.height ? `${event.width}x${event.height}` : null;
       if (typeof event.hwEncoder === 'boolean') this.hwEncoder = event.hwEncoder;
       if (typeof event.fps === 'number') this.effectiveFps = event.fps;
       // Nová snímací stránka / generace neví, jestli se někdo dívá na měřáky.
@@ -549,22 +605,53 @@ export class CaptureManager {
 
   private startCsvPolling(): void {
     if (this.csvTimer) return;
+    // Jednou za sekundu stačí (kousek má 2 s); při klipu se seznam dočte hned (endGeneration).
     this.csvTimer = setInterval(() => {
       for (const g of this.generations) if (!g.ended) this.readCsv(g);
       if (this.building === 0) this.prune();
-    }, 500);
+    }, 1000);
+  }
+
+  /** Čtení seznamů kousků po přírůstcích: u nahrávky zápasu má seznam tisíce řádků a číst ho celý pořád dokola je zbytečné. */
+  private csvOffsets = new Map<string, { offset: number; partial: string }>();
+
+  private readNewCsvText(file: string): string {
+    const state = this.csvOffsets.get(file) ?? { offset: 0, partial: '' };
+    let fd: number | null = null;
+    try {
+      fd = openSync(file, 'r');
+      const size = fstatSync(fd).size;
+      if (size < state.offset) {
+        // Soubor je kratší (nový) - číst od začátku.
+        state.offset = 0;
+        state.partial = '';
+      }
+      if (size === state.offset) return '';
+      const buffer = Buffer.alloc(size - state.offset);
+      const read = readSync(fd, buffer, 0, buffer.length, state.offset);
+      state.offset += read;
+      const text = state.partial + buffer.subarray(0, read).toString('utf8');
+      // Poslední řádek bez konce se dočte příště (ffmpeg ho ještě píše).
+      const cut = text.lastIndexOf('\n');
+      state.partial = cut >= 0 ? text.slice(cut + 1) : text;
+      this.csvOffsets.set(file, state);
+      return cut >= 0 ? text.slice(0, cut + 1) : '';
+    } catch {
+      return '';
+    } finally {
+      if (fd !== null) {
+        try {
+          closeSync(fd);
+        } catch {
+          // nic
+        }
+      }
+    }
   }
 
   private readCsv(gen: Generation): void {
     if (gen.startWall === null) return;
-    const read = (file: string): string | null => {
-      try {
-        return readFileSync(file, 'utf8');
-      } catch {
-        return null;
-      }
-    };
-    const text = read(gen.csv);
+    const text = this.readNewCsvText(gen.csv);
     if (text) {
       for (const row of parseSegmentCsv(text)) {
         if (gen.seen.has(row.file)) continue;
@@ -573,7 +660,7 @@ export class CaptureManager {
       }
     }
     if (!gen.hasMic) return;
-    const micText = read(gen.micCsv);
+    const micText = this.readNewCsvText(gen.micCsv);
     if (!micText) return;
     for (const row of parseSegmentCsv(micText)) {
       if (gen.micSeen.has(row.file)) continue;
@@ -595,14 +682,16 @@ export class CaptureManager {
     const keep = this.deps.settings().clipSeconds + KEEP_MARGIN_SECONDS;
     const now = Date.now();
     let old = [...expired(this.allSegments(), now, keep), ...expired(this.allMicSegments(), now, keep)];
-    if (this.recording) {
-      // Co patří do nahrávaného zápasu, zůstává (s rezervou jednoho kousku před startem).
-      const since = this.recording.since - SEGMENT_SECONDS * 1000;
+    const protectedSince = this.recording?.since ?? this.finishing?.since ?? null;
+    if (protectedSince !== null) {
+      // Co patří do nahrávaného (nebo právě ukládaného) zápasu, zůstává (s rezervou jednoho kousku před startem).
+      const since = protectedSince - SEGMENT_SECONDS * 1000;
       old = old.filter((s) => s.endWall < since);
-      this.watchRecordingLimits();
+      if (this.recording) this.watchRecordingLimits();
     }
     if (old.length === 0) return;
     const dead = new Set(old.map((s) => s.file));
+    for (const file of dead) this.probeCache.delete(file);
     for (const g of this.generations) {
       g.segments = g.segments.filter((s) => !dead.has(s.file));
       g.micSegments = g.micSegments.filter((s) => !dead.has(s.file));
@@ -619,6 +708,8 @@ export class CaptureManager {
     this.generations = this.generations.filter((g) => {
       if (g === live || g.segments.length > 0 || g.micSegments.length > 0 || !g.ended) return true;
       rmSync(g.dir, { recursive: true, force: true });
+      this.csvOffsets.delete(g.csv);
+      this.csvOffsets.delete(g.micCsv);
       return false;
     });
   }
@@ -632,6 +723,8 @@ export class CaptureManager {
   async startRecording(game: string | null): Promise<void> {
     if (this._state !== 'on' || !this.live) throw new Error('not-capturing');
     if (this.recording) return;
+    // Předchozí nahrávka se ještě slepuje - nová by jí mohla sebrat kousky.
+    if (this.finishing) throw new Error('busy');
     const live = this.live;
     const next = this.newGeneration(live.mimeType);
     const stopped = this.waitFor(`stopped:${live.id}`, 8000);
@@ -671,9 +764,9 @@ export class CaptureManager {
    * klip, jen dlouhý). Vrací výsledek, nebo hodí 'too-early', když ještě
    * nic není. Zásobník jede dál.
    */
-  async stopRecording(outDir: string, thumbDir = outDir): Promise<ClipResult & { since: number }> {
+  async stopRecording(outDir: string, thumbDir = outDir): Promise<(ClipResult & { since: number })[]> {
     const rec = this.recording;
-    if (!rec) throw new Error('not-recording');
+    if (!rec) throw new Error(this.finishing ? 'busy' : 'not-recording');
     if (this._state !== 'on' || !this.live) {
       // Snímání spadlo pod nahrávkou (třeba s hrou, která spadla): nic se nezahazuje -
       // úklid kousky odloží a hlavní proces je slepí jako "obnoveno po pádu".
@@ -686,13 +779,39 @@ export class CaptureManager {
       throw new Error('not-capturing');
     }
     const seconds = (Date.now() - rec.since) / 1000;
+    // Nahrávání končí hned (tlačítko přestane ukazovat "nahrávám"); slepení
+    // běží jako "ukládá se" - kousky se do konce nemažou (prune, teardown)
+    // a značka pro obnovu po pádu zůstává, dokud soubor není hotový.
+    this.recording = null;
+    this.recordingStopHandler = null;
+    const finishing = { since: rec.since, game: rec.game, percent: null as number | null, dir: this.bufferDir };
+    this.finishing = finishing;
+    this.writeRecordingMarker();
+    this.deps.onSavingProgress?.();
     try {
-      const result = await this.makeClip(seconds, outDir, rec.game, thumbDir, { kind: 'recording' });
-      return { ...result, since: rec.since };
+      const results = await this.saveFromBuffer(seconds, outDir, rec.game, thumbDir, {
+        kind: 'recording',
+        onProgress: (percent) => {
+          if (this.finishing !== finishing || finishing.percent === percent) return;
+          finishing.percent = percent;
+          this.deps.onSavingProgress?.();
+        },
+      });
+      // Celá nahrávka v jednom = od startu nahrávání; po částech = každá od svého začátku.
+      return results.map((r) => ({ ...r, since: results.length === 1 ? rec.since : r.createdAt.getTime() }));
     } finally {
       // Ať se kousky zase mažou, i kdyby slepení selhalo.
-      this.recording = null;
-      this.writeRecordingMarker();
+      if (this.finishing === finishing) this.finishing = null;
+      // Značka patří složce, ze které se slepovalo (snímání mezitím mohlo jet jinde).
+      if (finishing.dir === this.bufferDir) this.writeRecordingMarker();
+      else {
+        try {
+          rmSync(join(finishing.dir, 'recording.json'), { force: true });
+        } catch {
+          // nevadí
+        }
+      }
+      this.deps.onSavingProgress?.();
     }
   }
 
@@ -711,7 +830,39 @@ export class CaptureManager {
    * generaci (přesný konec), rozjede novou a slepí segmenty. Náhled (první
    * snímek videa) jde do `thumbDir` - ve složce s klipy tak leží jen videa.
    */
-  async makeClip(seconds: number, outDir: string, game: string | null, thumbDir = outDir, options: { kind?: 'clip' | 'recording' } = {}): Promise<ClipResult> {
+  async makeClip(seconds: number, outDir: string, game: string | null, thumbDir = outDir): Promise<ClipResult> {
+    const results = await this.saveFromBuffer(seconds, outDir, game, thumbDir, { kind: 'clip' });
+    return results[results.length - 1];
+  }
+
+  /** Rozměry kousku ("1920x1080") - z paměti, nebo změřit (a zapamatovat; kousek se po zapsání nemění). */
+  private async sizeOf(file: string): Promise<string | null> {
+    if (this.probeCache.has(file)) return this.probeCache.get(file) ?? null;
+    const info = await probe(file).catch(() => null);
+    const size = info && info.width && info.height ? `${info.width}x${info.height}` : null;
+    this.probeCache.set(file, size);
+    return size;
+  }
+
+  /**
+   * Klip / nahrávka ze zásobníku. Vrací uložené soubory v pořadí - klip je
+   * vždycky jeden; nahrávka zápasu, během které hra měnila rozlišení
+   * (alt-tab z celé obrazovky 4:3), se uloží po částech se stejnými
+   * rozměry (dřív z ní zbyl jen konec po poslední změně).
+   *
+   * Rychlost: rozměry se neměří, když je snímací stránka hlásí stejné
+   * (skoro vždy) - kraje se pro jistotu změří souběžně se slepováním, a jen
+   * kdyby nesouhlasily, slepí se znovu. Náhled vzniká taky souběžně
+   * (z prvního kousku = první snímek klipu) a délka se bere z plánu, ne
+   * dalším spuštěním ffmpeg. Klip je tak hotový skoro hned po stisku.
+   */
+  private async saveFromBuffer(
+    seconds: number,
+    outDir: string,
+    game: string | null,
+    thumbDir: string,
+    options: { kind: 'clip' | 'recording'; onProgress?: (percent: number) => void }
+  ): Promise<ClipResult[]> {
     if (this._state !== 'on') throw new Error('not-capturing');
     const live = this.live;
     if (!live) throw new Error('not-capturing');
@@ -731,49 +882,108 @@ export class CaptureManager {
       this.send({ type: 'restart', generation: next.id });
       await stopped;
 
-      let chosen = selectForClip(this.allSegments(), endWall, seconds);
-      if (chosen.length === 0 || totalSeconds(chosen) < 1) throw new Error('too-early');
-      // Když hra mezitím přepnula rozlišení (celá obrazovka 4:3, načítání),
-      // kousky mají různé rozměry a slepený soubor prohlížeč nepřehraje -
-      // ukáže černo s 0:00. Vezme se jen souvislý konec se stejnými rozměry.
-      // U dlouhé nahrávky (stovky kousků) se kontrolují jen kraje - probe
-      // každého kousku by trvalo minuty.
-      chosen = await sameResolutionTail(chosen, recording ? 24 : Infinity);
+      // Stav zásobníku si ukládání vezme hned teď. Kdyby se během dlouhého
+      // ukládání nahrávky snímání rozjelo znovu (změna nastavení, zvukového
+      // zařízení), seznam generací se vynuluje - a další části nahrávky by
+      // se slepily bez zvuku.
+      const generations = [...this.generations];
+      const micSegments = this.allMicSegments();
+      const chosen = selectForClip(this.allSegments(), endWall, seconds);
       if (chosen.length === 0 || totalSeconds(chosen) < 1) throw new Error('too-early');
 
       mkdirSync(outDir, { recursive: true });
       const createdAt = new Date(endWall);
       const isH264 = /h264|avc1/i.test(live.mimeType);
       const base = recording ? `${clipFileBase(createdAt, game)} recording` : clipFileBase(createdAt, game);
-      const file = uniquePath(outDir, base, isH264 ? '.mp4' : '.webm');
       const settings = this.deps.settings();
-      const gens = new Set(chosen.map((s) => s.generation));
-      const result = await this.muxClip(
-        chosen,
-        settings.microphone ? this.allMicSegments() : [],
-        this.generations.filter((g) => gens.has(g.id)),
-        file,
-        isH264,
-        settings,
-        recording ? 30 * 60 * 1000 : 120000,
-        live.dir
-      );
-      const have = result.videoSeconds;
-      const thumb = await makeThumb(file, thumbDir, base);
+      const genSizes = generations.map((g) => ({ id: g.id, size: g.size, resizes: g.resizes }));
 
-      const info = await probe(file);
-      const clip: ClipResult = {
-        file,
-        durationSeconds: info.durationSeconds ?? have,
-        width: info.width,
-        height: info.height,
-        sizeBytes: statSync(file).size,
-        thumb,
-        createdAt,
-        audioTracks: result.audioTracks,
+      // Když hra přepnula rozlišení (celá obrazovka 4:3, načítání), kousky
+      // mají různé rozměry a slepený soubor prohlížeč nepřehraje (černo,
+      // 0:00). Klip = jen souvislý konec se stejnými rozměry, nahrávka = části.
+      const measure = async (): Promise<{ part: Segment[]; size: string | null }[]> => {
+        const reports = generations.flatMap((g) => [...(g.startWall !== null && g.size ? [{ at: g.startWall, size: g.size }] : []), ...g.resizes]);
+        const { runs, sizes } = await sizeRuns(chosen, reports, (f) => this.sizeOf(f), { maxProbes: recording ? 240 : 48 });
+        const sizeOfSeg = new Map(chosen.map((s, i) => [s.file, sizes[i]]));
+        const parts = recording ? recordingParts(runs) : runs.slice(-1);
+        if (runs.length > 1) log(`kousky s různými rozměry (${[...new Set(sizes.filter(Boolean))].join(' -> ')}): ${recording ? `${parts.length} částí` : 'bere se jen konec'}`);
+        return parts.filter((p) => p.length > 0 && totalSeconds(p) >= 1).map((part) => ({ part, size: sizeOfSeg.get(part[part.length - 1].file) ?? null }));
       };
-      log(`${recording ? 'nahrávka' : 'klip'}: ${file} (${clip.durationSeconds.toFixed(1)} s, ${chosen.length} segmentů, zvuk: ${result.audioTracks.join(' + ') || 'žádný'})`);
-      return clip;
+      const hinted = reportedSize(chosen, genSizes);
+      let plan = hinted ? [{ part: chosen, size: hinted }] : await measure();
+      if (plan.length === 0) throw new Error('too-early');
+      // Pojistka, kdyby snímací stránka změnu rozměrů nepoznala: kraje se změří souběžně se slepováním.
+      const edges = hinted && chosen.length > 1 ? Promise.all([this.sizeOf(chosen[0].file), this.sizeOf(chosen[chosen.length - 1].file)]) : null;
+
+      const save = async (list: { part: Segment[]; size: string | null }[]): Promise<ClipResult[]> => {
+        const out: ClipResult[] = [];
+        const total = list.reduce((sum, p) => sum + totalSeconds(p.part), 0) || 1;
+        let done = 0;
+        for (let i = 0; i < list.length; i++) {
+          const { part, size } = list[i];
+          const partBase = list.length > 1 ? `${base} ${i + 1}` : base;
+          const file = uniquePath(outDir, partBase, isH264 ? '.mp4' : '.webm');
+          // Náhled = první snímek = první snímek prvního kousku - souběžně se slepováním.
+          const thumbJob = makeThumb(part[0].file, thumbDir, partBase);
+          const gens = new Set(part.map((s) => s.generation));
+          const partSeconds = totalSeconds(part);
+          const result = await this.muxClip(
+            part,
+            settings.microphone ? micSegments : [],
+            generations.filter((g) => gens.has(g.id)),
+            file,
+            isH264,
+            settings,
+            recording ? 30 * 60 * 1000 : 120000,
+            live.dir,
+            {
+              // Dlouhá nahrávka s nižší prioritou - hra při ukládání netrhá. Klip (vteřina práce) hned.
+              low: recording,
+              progress: options.onProgress ? (percent) => options.onProgress!(Math.min(99, Math.round(((done + (partSeconds * percent) / 100) / total) * 100))) : undefined,
+            }
+          );
+          done += partSeconds;
+          const thumb = await thumbJob;
+          const [w, h] = (size ?? '').split('x').map(Number);
+          out.push({
+            file,
+            durationSeconds: result.videoSeconds,
+            width: w > 0 ? w : null,
+            height: h > 0 ? h : null,
+            sizeBytes: statSync(file).size,
+            thumb,
+            // Nahrávka (i každá její část): kdy začala; klip: chvíle stisku.
+            createdAt: recording ? new Date(part[0].startWall) : createdAt,
+            audioTracks: result.audioTracks,
+          });
+          log(`${recording ? 'nahrávka' : 'klip'}: ${file} (${result.videoSeconds.toFixed(1)} s, ${part.length} segmentů, ${size ?? '?'}, zvuk: ${result.audioTracks.join(' + ') || 'žádný'})`);
+        }
+        return out;
+      };
+
+      let results = await save(plan);
+      const [first, last] = edges ? await edges : [null, null];
+      if (first && last && first !== last) {
+        // Snímací stránka změnu nenahlásila - změřit a slepit znovu jen to, co k sobě patří.
+        log(`kraje mají různé rozměry (${first} -> ${last}), ačkoli snímání nic nehlásilo - slepuji znovu`);
+        for (const r of results) {
+          for (const f of [r.file, r.thumb]) {
+            if (!f) continue;
+            try {
+              unlinkSync(f);
+            } catch {
+              // nevadí
+            }
+          }
+        }
+        plan = await measure();
+        if (plan.length === 0) throw new Error('too-early');
+        results = await save(plan);
+      } else if (results.length === 1 && results[0].width === null && last) {
+        const [w, h] = last.split('x').map(Number);
+        results[0] = { ...results[0], width: w || null, height: h || null };
+      }
+      return results;
     } finally {
       this.building -= 1;
     }
@@ -793,7 +1003,8 @@ export class CaptureManager {
     isH264: boolean,
     settings: Settings,
     timeoutMs: number,
-    workDir: string
+    workDir: string,
+    run: { low?: boolean; progress?: (percent: number) => void } = {}
   ): Promise<{ videoSeconds: number; audioTracks: AudioTrackKind[] }> {
     const gens = new Set(video.map((s) => s.generation));
     // Zvuk hry jen když ho mají všechny generace (concat potřebuje ve všech souborech stejné stopy).
@@ -820,13 +1031,14 @@ export class CaptureManager {
       output: file,
       durationSeconds: plan.videoSeconds,
     };
+    const ffOptions = { low: run.low, totalSeconds: plan.videoSeconds, progress: run.progress };
     try {
-      await runFfmpeg(clipMuxArgs(input), timeoutMs);
+      await runFfmpeg(clipMuxArgs(input), timeoutMs, ffOptions);
     } catch (e) {
       // Mikrofon to pokazil (poškozený kousek apod.)? Klip se uloží aspoň bez něj - hlavně obraz a hra.
       if (!micList) throw e;
       log(`slepení s mikrofonem selhalo (${(e as Error).message}) - zkouším bez mikrofonu`);
-      await runFfmpeg(clipMuxArgs({ ...input, micList: null }), timeoutMs);
+      await runFfmpeg(clipMuxArgs({ ...input, micList: null }), timeoutMs, ffOptions);
       return { videoSeconds: plan.videoSeconds, audioTracks: clipAudioTracks(hasSystemAudio, false, false) };
     } finally {
       for (const f of [videoList, micList]) {
@@ -861,8 +1073,10 @@ export class CaptureManager {
   /** Značka "tady se nahrává zápas" (recording.json) ve složce zásobníku - po pádu podle ní appka ví, že má co zachraňovat. */
   private writeRecordingMarker(): void {
     const file = join(this.bufferDir, 'recording.json');
+    // Rozjetá nahrávka, nebo ta, která se z téhle složky právě slepuje (po pádu uprostřed slepování se obnoví).
+    const rec = this.recording ?? (this.finishing && this.finishing.dir === this.bufferDir ? this.finishing : null);
     try {
-      if (this.recording) writeFileSync(file, JSON.stringify({ since: this.recording.since, game: this.recording.game }));
+      if (rec) writeFileSync(file, JSON.stringify({ since: rec.since, game: rec.game }));
       else rmSync(file, { force: true });
     } catch {
       // Nevadí - jen by se po pádu nedalo obnovit.
@@ -905,8 +1119,9 @@ export class CaptureManager {
       }
       if (name !== this.bufferName && !name.startsWith(`${this.bufferName}-`)) continue;
       const dir = join(temp, name);
-      // Složka, do které se právě nahrává, patří běžícímu zásobníku.
+      // Složka, do které se právě nahrává, patří běžícímu zásobníku; ze které se slepuje nahrávka, té taky.
       if (dir === this.bufferDir && this.generations.length > 0) continue;
+      if (this.finishing && dir === this.finishing.dir) continue;
       if (!existsSync(join(dir, 'recording.json'))) continue;
       if (this.setAside(dir)) {
         moved += 1;
@@ -942,8 +1157,7 @@ export class CaptureManager {
     for (const name of names) {
       const dir = join(temp, name);
       try {
-        const recovered = await this.recoverDir(dir, outDir, thumbDir);
-        if (recovered) out.push(recovered);
+        out.push(...(await this.recoverDir(dir, outDir, thumbDir)));
       } catch (e) {
         log(`obnova nahrávky zápasu (${name}) selhala: ${(e as Error).message}`);
       }
@@ -958,9 +1172,9 @@ export class CaptureManager {
     return out;
   }
 
-  private async recoverDir(dir: string, outDir: string, thumbDir: string): Promise<RecoveredRecording | null> {
+  private async recoverDir(dir: string, outDir: string, thumbDir: string): Promise<RecoveredRecording[]> {
     const marker = readJson(join(dir, 'recording.json'));
-    if (!marker || typeof marker.since !== 'number') return null;
+    if (!marker || typeof marker.since !== 'number') return [];
     const since = marker.since;
     const game = typeof marker.game === 'string' ? marker.game : null;
     const saved: SavedGeneration[] = [];
@@ -968,7 +1182,7 @@ export class CaptureManager {
     try {
       entries = readdirSync(dir);
     } catch {
-      return null;
+      return [];
     }
     for (const name of entries) {
       const m = /^gen-(\d+)$/.exec(name);
@@ -1001,47 +1215,67 @@ export class CaptureManager {
       });
     }
     const pick = recoverySegments(saved, since);
-    let chosen = pick.video;
+    const chosen = pick.video;
     if (chosen.length === 0 || totalSeconds(chosen) < 1) {
       log(`obnova nahrávky zápasu: v ${basename(dir)} nic k slepení`);
-      return null;
+      return [];
     }
-    chosen = await sameResolutionTail(chosen, 24);
-    if (chosen.length === 0 || totalSeconds(chosen) < 1) return null;
+    // Rozměry se měří (hlášení snímací stránky po pádu nejsou) - po částech jako běžná nahrávka.
+    const { runs, sizes } = await sizeRuns(chosen, [], probeSize, { maxProbes: 240 });
+    const sizeOfSeg = new Map(chosen.map((s, i) => [s.file, sizes[i]]));
+    const parts = recordingParts(runs).filter((p) => totalSeconds(p) >= 1);
+    if (parts.length === 0) return [];
     const isH264 = /h264|avc1/i.test(pick.gens[pick.gens.length - 1].mimeType);
     mkdirSync(outDir, { recursive: true });
     const base = `${clipFileBase(new Date(since), game)} recording`;
-    const file = uniquePath(outDir, base, isH264 ? '.mp4' : '.webm');
-    const result = await this.muxClip(chosen, pick.mic, pick.gens, file, isH264, this.deps.settings(), 30 * 60 * 1000, dir);
-    const thumb = await makeThumb(file, thumbDir, base);
-    const info = await probe(file);
-    const recovered: RecoveredRecording = {
-      file,
-      durationSeconds: info.durationSeconds ?? result.videoSeconds,
-      width: info.width,
-      height: info.height,
-      sizeBytes: statSync(file).size,
-      thumb,
-      createdAt: new Date(chosen[chosen.length - 1].endWall),
-      audioTracks: result.audioTracks,
-      since,
-      game,
-    };
-    log(`nahrávka zápasu obnovena po pádu: ${file} (${recovered.durationSeconds.toFixed(1)} s, ${chosen.length} segmentů, zvuk: ${result.audioTracks.join(' + ') || 'žádný'})`);
-    return recovered;
+    const out: RecoveredRecording[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      const partBase = parts.length > 1 ? `${base} ${i + 1}` : base;
+      const file = uniquePath(outDir, partBase, isH264 ? '.mp4' : '.webm');
+      const gens = new Set(part.map((s) => s.generation));
+      const thumbJob = makeThumb(part[0].file, thumbDir, partBase);
+      const result = await this.muxClip(part, pick.mic, pick.gens.filter((g) => gens.has(g.id)), file, isH264, this.deps.settings(), 30 * 60 * 1000, dir, { low: true });
+      const thumb = await thumbJob;
+      const [w, h] = (sizeOfSeg.get(part[part.length - 1].file) ?? '').split('x').map(Number);
+      const recovered: RecoveredRecording = {
+        file,
+        durationSeconds: result.videoSeconds,
+        width: w > 0 ? w : null,
+        height: h > 0 ? h : null,
+        sizeBytes: statSync(file).size,
+        thumb,
+        createdAt: new Date(part[part.length - 1].endWall),
+        audioTracks: result.audioTracks,
+        since: parts.length === 1 ? since : part[0].startWall,
+        game,
+      };
+      log(`nahrávka zápasu obnovena po pádu: ${file} (${recovered.durationSeconds.toFixed(1)} s, ${part.length} segmentů, zvuk: ${result.audioTracks.join(' + ') || 'žádný'})`);
+      out.push(recovered);
+    }
+    return out;
   }
 }
 
-/** Náhled = první snímek videa (to samé, co ukáže přehrávač), mimo složku s klipy. */
+/**
+ * Náhled = první snímek videa (to samé, co ukáže přehrávač), mimo složku
+ * s klipy. Bere se z prvního kousku (souběžně se slepováním), s nižší prioritou.
+ */
 async function makeThumb(file: string, thumbDir: string, base: string): Promise<string | null> {
   try {
     mkdirSync(thumbDir, { recursive: true });
     const thumb = uniquePath(thumbDir, base, '.jpg');
-    await runFfmpeg(['-loglevel', 'error', '-i', file, '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '4', thumb], 30000);
+    await runFfmpeg(['-loglevel', 'error', '-i', file, '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '4', thumb], 30000, { low: true });
     return thumb;
   } catch {
     return null;
   }
+}
+
+/** Rozměry souboru ("1920x1080") změřené ffmpeg; null = nejde zjistit. */
+async function probeSize(file: string): Promise<string | null> {
+  const info = await probe(file).catch(() => null);
+  return info && info.width && info.height ? `${info.width}x${info.height}` : null;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1062,32 +1296,6 @@ function freeBytes(dir: string): number {
   } catch {
     return Number.POSITIVE_INFINITY;
   }
-}
-
-/**
- * Souvislý konec seznamu kousků se stejnými rozměry obrazu jako ten
- * poslední. Rozměry se čtou z hlavičky (probe), po několika naráz; když
- * se u některého nepovede zjistit, bere se, že sedí.
- */
-async function sameResolutionTail(segments: Segment[], maxProbes = Infinity): Promise<Segment[]> {
-  if (segments.length < 2) return segments;
-  const sizes: (string | null)[] = new Array(segments.length).fill(null);
-  // Když je kousků moc, ptá se jen na rovnoměrný vzorek (neznámé = "sedí").
-  const step = Number.isFinite(maxProbes) && segments.length > maxProbes ? Math.ceil(segments.length / maxProbes) : 1;
-  const indexes: number[] = [];
-  for (let i = 0; i < segments.length; i += step) indexes.push(i);
-  if (indexes[indexes.length - 1] !== segments.length - 1) indexes.push(segments.length - 1);
-  const limit = 6;
-  for (let i = 0; i < indexes.length; i += limit) {
-    const batch = indexes.slice(i, i + limit);
-    const results = await Promise.all(batch.map((idx) => probe(segments[idx].file).catch(() => ({ width: null, height: null, durationSeconds: null }))));
-    results.forEach((r, j) => {
-      sizes[batch[j]] = r.width && r.height ? `${r.width}x${r.height}` : null;
-    });
-  }
-  const start = sameResolutionTailStart(sizes);
-  if (start > 0) log(`kousky s jinými rozměry (${[...new Set(sizes.slice(0, start).filter(Boolean))].join(', ')} -> ${sizes[sizes.length - 1]}): ${start} vynecháno`);
-  return segments.slice(start);
 }
 
 function uniquePath(dir: string, base: string, ext: string): string {

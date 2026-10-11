@@ -110,3 +110,79 @@ test('obnova po pádu: kousky od startu nahrávání, jen formát poslední gene
   // Nic po startu nahrávání = nic k obnově.
   assert.deepEqual(recoverySegments([gens[0]], 104_000), { video: [], mic: [], gens: [] });
 });
+
+// ---- 0.9.6: rozměry podle hlášení snímací stránky, nahrávka po částech --------------------
+
+import { reportedSize, sizeRuns, recordingParts } from '../dist/esm/segments.js';
+
+const run = (n, gen = 1, start = 0) => Array.from({ length: n }, (_, i) => seg(`g${gen}-${i}.mkv`, gen, start + i * 2000, start + (i + 1) * 2000));
+
+test('rozměry: hlášení beze změny = žádné měření ffmpeg', () => {
+  const chosen = run(5, 1, 10_000);
+  assert.equal(reportedSize(chosen, [{ id: 1, size: '1920x1080', resizes: [] }]), '1920x1080');
+  // Změna dlouho před klipem platí pro celý klip.
+  assert.equal(reportedSize(chosen, [{ id: 1, size: '1920x1080', resizes: [{ at: 1000, size: '1280x960' }] }]), '1280x960');
+  // Změna během klipu (i s rezervou na zpoždění hlášení) = musí se měřit.
+  assert.equal(reportedSize(chosen, [{ id: 1, size: '1920x1080', resizes: [{ at: 15_000, size: '1280x960' }] }]), null);
+  assert.equal(reportedSize(chosen, [{ id: 1, size: '1920x1080', resizes: [{ at: 9_000, size: '1280x960' }] }]), null, 'těsně před klipem - hlášení se mohlo zpozdit');
+  // Neznámé rozměry generace, nebo dvě generace s různými rozměry = měřit.
+  assert.equal(reportedSize(chosen, [{ id: 1, size: null, resizes: [] }]), null);
+  const two = [...run(2, 1, 0), ...run(2, 2, 4100)];
+  assert.equal(reportedSize(two, [{ id: 1, size: '1920x1080', resizes: [] }, { id: 2, size: '1280x960', resizes: [] }]), null);
+  assert.equal(reportedSize(two, [{ id: 1, size: '1920x1080', resizes: [] }, { id: 2, size: '1920x1080', resizes: [] }]), '1920x1080');
+});
+
+test('rozměry: najde přesnou hranici půlením - změří jen pár kousků', async () => {
+  const segments = run(40);
+  const truth = (file) => (Number(/-(\d+)\.mkv$/.exec(file)[1]) < 27 ? '1920x1080' : '1280x960');
+  const probed = [];
+  const probe = async (file) => {
+    probed.push(file);
+    return truth(file);
+  };
+  const { runs } = await sizeRuns(segments, [], probe);
+  assert.equal(runs.length, 2);
+  assert.equal(runs[0].length, 27);
+  assert.equal(runs[1].length, 13);
+  assert.ok(probed.length <= 10, `změřeno ${probed.length} kousků ze 40`);
+});
+
+test('rozměry: hlášená změna se ověří kolem nahlášené chvíle, A -> B -> A se pozná', async () => {
+  const segments = run(30);
+  const truth = (i) => (i >= 10 && i < 20 ? '1280x960' : '1920x1080');
+  const probe = async (file) => truth(Number(/-(\d+)\.mkv$/.exec(file)[1]));
+  const reports = [{ at: 10 * 2000 + 500, size: '1280x960' }, { at: 20 * 2000 + 300, size: '1920x1080' }];
+  const { runs } = await sizeRuns(segments, reports, probe);
+  assert.deepEqual(runs.map((r) => r.length), [10, 10, 10]);
+  // Bez hlášení se A -> B -> A mezi kraji nepozná (oba kraje 1920x1080) - proto hlášení ze snímací stránky.
+  const blind = await sizeRuns(segments, [], probe);
+  assert.equal(blind.runs.length, 1);
+});
+
+test('rozměry: neznámé (probe selže) se berou jako "sedí", strop měření platí', async () => {
+  const segments = run(12);
+  const { runs } = await sizeRuns(segments, [], async (file) => (file.endsWith('-0.mkv') ? null : '1920x1080'));
+  assert.equal(runs.length, 1);
+  let count = 0;
+  await sizeRuns(run(200), [], async () => {
+    count += 1;
+    return count % 2 ? '1920x1080' : '1280x720';
+  }, { maxProbes: 20 });
+  assert.ok(count <= 20);
+});
+
+test('nahrávka po částech: hraniční kousek staré části pryč, krátké části pryč', () => {
+  const a = run(30, 1, 0);
+  const b = run(2, 1, 60_000);
+  const c = run(20, 1, 64_000);
+  const parts = recordingParts([a, b, c], 5);
+  assert.equal(parts.length, 2, 'dvousekundový úsek (alt-tab) zmizí');
+  assert.equal(parts[0].length, 29, 'poslední kousek před změnou se vynechá');
+  assert.equal(parts[1].length, 20, 'poslední část zůstává celá');
+  assert.deepEqual(recordingParts([run(3)], 5).length, 1);
+});
+
+test('nahrávka po částech: jediný úsek se nechá celý, i krátký; ze samých krátkých zůstane nejdelší', () => {
+  assert.deepEqual(recordingParts([run(2)], 5).map((r) => r.length), [2], 'krátká nahrávka beze změny rozlišení se neztratí');
+  assert.deepEqual(recordingParts([run(2, 1, 0), run(1, 1, 4000)], 5).map((r) => r.length), [1], 'samé krátké úseky - zůstane nejdelší');
+});

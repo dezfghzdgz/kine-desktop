@@ -99,6 +99,51 @@ export type Settings = {
   liveQuality: LiveQuality;
   /** Název posledního vysílání (předvyplní se příště). */
   liveTitle: string;
+  /** Popis vysílání (prázdný = zůstane popis ze studia na Kine). */
+  liveDescription: string;
+  /** Kategorie vysílání na Kine. */
+  liveCategory: string;
+  /** Datový tok obrazu ve vysílání v kb/s; 0 = podle zvolené kvality. */
+  liveBitrateKbps: number;
+  /** Do vysílání jde zvuk hry. */
+  liveGameAudio: boolean;
+  /** Do vysílání jde mikrofon. */
+  liveMic: boolean;
+  /** Po začátku vysílání otevřít stránku vysílání s chatem. */
+  liveOpenPage: boolean;
+  /** Kamera ve vysílání (obraz z webkamery v rohu). Klipy kameru nemají. */
+  liveCamera: boolean;
+  /** Id kamery ('' = první / výchozí). */
+  liveCameraDevice: string;
+  /** Roh, kde kamera ve vysílání je. */
+  liveCameraPosition: LiveCameraPosition;
+  /** Velikost kamery (podíl šířky obrazu). */
+  liveCameraSize: LiveCameraSize;
+  /** Tvar kamery: obdélník, zaoblený, kruh. */
+  liveCameraShape: LiveCameraShape;
+  /** Zrcadlit kameru (jako v zrcadle - jak se hráč vidí sám). */
+  liveCameraMirror: boolean;
+  /** Text obrazovky "Hned jsem zpět" (prázdný = výchozí v jazyce appky). */
+  liveBrbText: string;
+  /** Zkratka pro obrazovku "Hned jsem zpět" během vysílání (prázdná = jen tlačítkem). */
+  liveBrbHotkey: string;
+  /** Na obrazovce "Hned jsem zpět" ztlumit mikrofon (diváci neslyší, co se děje u stolu). */
+  liveBrbMuteMic: boolean;
+  /**
+   * Po spuštění appky: 'auto' = nahrávat podle režimu (pořád / s hrou),
+   * 'game' = i v režimu "pořád" počkat na první hru, 'paused' = nenahrávat,
+   * dokud to hráč sám nezapne (tlačítkem, zkratkou, v liště).
+   */
+  launchCapture: LaunchCapture;
+  /** Krátký zvuk při stisku klipu / snímku (slyšet je i ve hře přes celou obrazovku). */
+  clipSound: boolean;
+  /**
+   * Strop místa na klipy v GB (0 = bez stropu). Když ho klipy přerostou,
+   * nejstarší (kromě oblíbených, nahrávaných a rozpracovaných) se smažou samy.
+   */
+  storageLimitGb: number;
+  /** Na notebooku na baterii nahrávat úsporně (720p, 30 fps) - šetří baterii i výkon pro hru. */
+  batterySaver: boolean;
   /** Kolik sekund zpět klip sahá. */
   clipSeconds: number;
   /** Výška obrazu: 0 = jako obrazovka. */
@@ -175,6 +220,16 @@ export type Settings = {
 };
 
 export type PerformanceMode = 'low' | 'balanced' | 'high';
+export type LaunchCapture = 'auto' | 'game' | 'paused';
+export const LAUNCH_CAPTURE: readonly LaunchCapture[] = ['auto', 'game', 'paused'];
+export type LiveCameraPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
+export const LIVE_CAMERA_POSITIONS: readonly LiveCameraPosition[] = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
+export type LiveCameraSize = 'small' | 'medium' | 'large';
+export const LIVE_CAMERA_SIZES: readonly LiveCameraSize[] = ['small', 'medium', 'large'];
+export type LiveCameraShape = 'rect' | 'rounded' | 'circle';
+export const LIVE_CAMERA_SHAPES: readonly LiveCameraShape[] = ['rect', 'rounded', 'circle'];
+/** Nabídka stropu místa na klipy (GB); 0 = bez stropu. */
+export const STORAGE_LIMITS_GB = [0, 20, 50, 100, 200, 500] as const;
 export type ClipsSort = 'newest' | 'oldest' | 'longest' | 'largest';
 
 export type AutoClipMode = 'off' | 'multi' | 'every';
@@ -197,6 +252,11 @@ export type Clip = {
   /** Hra, při které klip vznikl (název), nebo null. Hráč ji může opravit. */
   game: string | null;
   createdAt: string;
+  /**
+   * Kdy se klip dostal do knihovny (ISO). U nahrávky zápasu je createdAt
+   * začátek nahrávání, tohle konec ukládání. Starší index ho nemá.
+   */
+  addedAt?: string;
   durationSeconds: number;
   sizeBytes: number;
   width: number | null;
@@ -281,6 +341,21 @@ export type Status = {
   autoClipsLive: 'cs2' | 'lol' | 'dota2' | 'minecraft' | null;
   /** Běží nahrávání celého zápasu? Od kdy (ms od epochy). */
   recordingSince: number | null;
+  /**
+   * Nahrávka zápasu se právě ukládá (po zastavení): od kdy nahrávala a kolik
+   * procent slepení je hotovo (null = ještě se neví). Tlačítko ukazuje
+   * "Ukládám…" a nejde zmáčknout znovu - dřív se nahrávka uložila víckrát.
+   */
+  recordingSaving: { since: number; percent: number | null } | null;
+  /** Kolik klipů se právě ukládá (stisk zkratky -> hotový soubor). */
+  clipsSaving: number;
+  /** Na baterii se nahrává úsporně (720p30), i když je nastavená vyšší kvalita. */
+  batterySaverActive: boolean;
+  /**
+   * Upozornění, která appka nehlásila okénkem (po startu, během hry) -
+   * ukážou se v okně (postranní panel), dokud trvají.
+   */
+  notices: AppNotice[];
   /** Hardwarový kodér H.264 dostupný (podle WebCodecs); null = zásobník ještě neběžel / nejde zjistit. */
   hwEncoder: boolean | null;
   /** Živé vysílání z appky. */
@@ -288,6 +363,21 @@ export type Status = {
 };
 
 export type GameSource = 'steam' | 'custom' | 'known' | 'fullscreen';
+
+/** Tiché upozornění v okně (místo okénka / systémového oznámení). */
+export type AppNotice = { id: string; text: string; kind: 'warn' | 'error' | 'info'; at: number; tab?: string };
+
+/** Kolik appka právě bere (všechny její procesy dohromady) - panel O aplikaci / Výkon. */
+export type ResourceUsage = {
+  /** Procesor v % jednoho jádra (součet procesů appky, jako Správce úloh / počet jader = cpuPercentOfTotal). */
+  cpuPercent: number;
+  /** Podíl celého procesoru (jako ve Správci úloh). */
+  cpuPercentOfTotal: number;
+  /** Paměť (pracovní sada) v MB. */
+  memoryMb: number;
+  /** Rozpis podle druhu procesu. */
+  parts: { label: string; cpuPercent: number; memoryMb: number }[];
+};
 
 export type DisplayInfo = { id: string; label: string; width: number; height: number; primary: boolean };
 
@@ -299,8 +389,10 @@ export type CaptureCommand =
   | { type: 'restart'; generation: number }
   | { type: 'stop' }
   /** Živé vysílání: druhý recorder (nižší datový tok, hra + mikrofon smíchané) na stejném snímání. */
-  | { type: 'live-start'; generation: number; preset: LivePreset }
+  | { type: 'live-start'; generation: number; preset: LivePreset; audio?: LiveAudio; scene?: LiveScene }
   | { type: 'live-stop' }
+  /** Změna za běhu vysílání bez nového spojení: obrazovka "Hned jsem zpět", ztlumený mikrofon, kamera. */
+  | { type: 'live-scene'; scene: LiveScene }
   /** Měřáky zvuku rychle (někdo se dívá do nastavení), nebo jednou za sekundu. */
   | { type: 'meters'; fast: boolean };
 
@@ -320,6 +412,9 @@ export type CaptureEvent =
       hwEncoder?: boolean | null;
       /** Snímky za sekundu, se kterými se opravdu nahrává (bez hardwarového kodéru nejvýš 30). */
       fps?: number;
+      /** Rozměry obrazu na začátku (podle stopy); změny pak chodí jako 'resized'. */
+      width?: number;
+      height?: number;
     }
   | { type: 'stopped'; generation: number; at: number }
   | { type: 'error'; generation: number; message: string }
@@ -333,15 +428,52 @@ export type CaptureEvent =
   | { type: 'live-started'; generation: number; mimeType: string; width: number; height: number; fps: number }
   /** Recorder živého vysílání skončil (povel, nebo nový start snímání) - poslední kousky už odešly. */
   | { type: 'live-stopped'; generation: number }
-  | { type: 'live-error'; generation: number; message: string };
+  | { type: 'live-error'; generation: number; message: string }
+  /** Vysílá se, ale něco z přání nešlo (kamera není / je obsazená) - vysílání jede bez toho. */
+  | { type: 'live-warning'; generation: number; kind: 'camera'; message: string }
+  /**
+   * Snímaná obrazovka změnila rozměry (hra přepnula rozlišení, celá
+   * obrazovka 4:3…) v čase `at`. Kousky před a po se nesmí slepit do
+   * jednoho klipu - podle toho se hledá, odkud klip vzít.
+   */
+  | { type: 'resized'; generation: number; at: number; width: number; height: number };
 
 /** Kvalita živého vysílání: rozlišení, snímky, datový tok. */
 export type LiveQuality = '720p30' | '1080p30' | '1080p60';
 export type LivePreset = { width: number; height: number; fps: number; videoKbps: number };
+/** Co jde do zvuku vysílání (hra a mikrofon se míchají do jedné stopy). */
+export type LiveAudio = { game: boolean; mic: boolean };
+
+/**
+ * Co je ve vysílání vidět a slyšet navíc k obrazovce: kamera (kde, jak
+ * velká, jaký tvar), obrazovka "Hned jsem zpět" (místo hry, s textem) a
+ * ztlumený mikrofon. Mění se i za běhu (live-scene) bez nového spojení.
+ */
+export type LiveScene = {
+  camera: { deviceId: string; position: LiveCameraPosition; size: LiveCameraSize; shape: LiveCameraShape; mirror: boolean } | null;
+  /** Obrazovka "Hned jsem zpět": hra a kamera schované, jen text. */
+  brb: boolean;
+  brbText: string;
+  /** Mikrofon ve vysílání ztlumený (klipy se tím nemění). */
+  micMuted: boolean;
+};
+
+/** Průběžné údaje o vysílání (z ffmpeg): kolik opravdu odchází. */
+export type LiveStats = {
+  /** Odchozí datový tok v kb/s (obraz + zvuk). */
+  kbps: number | null;
+  /** Snímků za sekundu, které odcházejí. */
+  fps: number | null;
+  /** Rychlost proti reálnému času (1 = stíhá, méně = upload nestíhá). */
+  speed: number | null;
+  /** Kolik MB čeká v rouře na odeslání (rostoucí = upload nestíhá). */
+  backlogMb: number;
+};
 
 /** Stav živého vysílání z appky (tlačítko Vysílat). */
 export type LiveStatus = {
-  state: 'idle' | 'starting' | 'live' | 'reconnecting';
+  /** 'stopping' = hráč vysílání ukončil a appka ho dokončuje (poslední kousky, Cloudflare) - tlačítko už nejde zmáčknout znovu. */
+  state: 'idle' | 'starting' | 'live' | 'reconnecting' | 'stopping';
   /** Od kdy je živě (ms od epochy); null = ještě ne. */
   since: number | null;
   title: string;
@@ -349,6 +481,16 @@ export type LiveStatus = {
   watchUrl: string | null;
   /** Proč vysílání nešlo začít / spadlo (text pro hráče). */
   error: string | null;
+  /** Vidí Kine proud u Cloudflare? null = ještě se nevědělo (nebo nevysílá se). */
+  confirmed: boolean | null;
+  /** Co je ve vysílání (kamera, "Hned jsem zpět", ztlumený mikrofon). */
+  scene: LiveScene | null;
+  /** Kolik odchází (ffmpeg); null = ještě nic. */
+  stats: LiveStats | null;
+  /** Kolik diváků se dívá (podle Kine); null = neví se. */
+  viewers: number | null;
+  /** Kamera chtěná, ale nejde (obsazená jiným programem, žádná) - vysílá se bez ní. */
+  cameraError: string | null;
 };
 
 /** Co právě teče do zvuku klipu. */

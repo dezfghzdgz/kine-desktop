@@ -115,6 +115,8 @@ export class ClipLibrary {
   }
 
   add(clip: Clip): void {
+    // Kdy klip přibyl - strop místa (shared/storage.ts) čerstvé klipy nemaže.
+    if (!clip.addedAt) clip.addedAt = new Date().toISOString();
     this.clips.push(clip);
     this.save();
   }

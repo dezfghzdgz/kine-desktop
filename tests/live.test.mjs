@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { LIVE_PRESETS, LIVE_QUALITIES, cleanLiveError, liveElapsed, liveErrorKind, liveErrorTextKey, livePresetLabel } from '../dist/esm/live.js';
+import { LIVE_PRESETS, LIVE_QUALITIES, cleanLiveError, liveBitrate, liveElapsed, liveErrorKind, liveErrorTextKey, livePresetFor, livePresetLabel, liveUploadMbps } from '../dist/esm/live.js';
 import { LIVE_MAX_ATTEMPTS, liveFfmpegArgs, liveProgressSeconds, liveRetryDelay, maskLiveUrl, rtmpUrl } from '../dist/esm/livePlan.js';
 import { LiveController } from '../dist/esm/liveController.js';
 import { sanitizeSettings, DEFAULT_SETTINGS } from '../dist/esm/settingsSchema.js';
@@ -198,4 +198,98 @@ test('vysílání: špatný klíč se neopakuje - rovnou konec s chybou', async 
   assert.match(live.current().error ?? '', /Unauthorized/);
   assert.ok(notices.includes('failed'));
   assert.equal(ended(), 1);
+});
+
+test('vysílání: vlastní datový tok přepíše kvalitu, nesmysl se zahodí', () => {
+  assert.equal(liveBitrate(0), 0);
+  assert.equal(liveBitrate('abc'), 0);
+  assert.equal(liveBitrate(50), 1000);
+  assert.equal(liveBitrate(99999), 12000);
+  assert.equal(liveBitrate(4520), 4500);
+  assert.deepEqual(livePresetFor('1080p60'), LIVE_PRESETS['1080p60']);
+  assert.deepEqual(livePresetFor('1080p60', 8000), { ...LIVE_PRESETS['1080p60'], videoKbps: 8000 });
+  assert.equal(liveUploadMbps(3000), 3.8);
+});
+
+test('vysílání: nová nastavení mají výchozí hodnoty a jsou očištěná', () => {
+  assert.equal(DEFAULT_SETTINGS.liveGameAudio, true);
+  assert.equal(DEFAULT_SETTINGS.liveMic, true);
+  assert.equal(DEFAULT_SETTINGS.liveOpenPage, false);
+  assert.equal(DEFAULT_SETTINGS.liveBitrateKbps, 0);
+  const s = sanitizeSettings({ liveBitrateKbps: 99999, liveCategory: 'nesmysl', liveDescription: 'x'.repeat(5000), liveMic: 'ano' });
+  assert.equal(s.liveBitrateKbps, 12000);
+  assert.equal(s.liveCategory, DEFAULT_SETTINGS.liveCategory);
+  assert.equal(s.liveDescription.length, 2000);
+  assert.equal(s.liveMic, true);
+});
+
+test('vysílání: recorder dostane kvalitu s vlastním tokem a co jde do zvuku', async () => {
+  const { live, commands } = makeController();
+  await live.start({ title: 'x', quality: '1080p30', bitrateKbps: 6000, game: true, mic: false });
+  assert.deepEqual(commands[0].preset, { ...LIVE_PRESETS['1080p30'], videoKbps: 6000 });
+  assert.deepEqual(commands[0].audio, { game: true, mic: false });
+  await live.stop('quit');
+});
+
+test('vysílání: kamera a "Hned jsem zpět" jdou do recorderu při startu i za běhu, bez nového spojení', async () => {
+  const { live, commands, children } = makeController();
+  const scene = { camera: { deviceId: '', position: 'bottom-right', size: 'medium', shape: 'rounded', mirror: true }, brb: false, brbText: 'BRB', micMuted: false };
+  await live.start({ title: 'x', quality: '720p30', scene });
+  assert.deepEqual(commands[0].scene, scene);
+  assert.deepEqual(live.current().scene, scene);
+  children[0].stdout.write('out_time_us=1500000\n');
+  await new Promise((r) => setTimeout(r, 10));
+  live.setScene({ ...scene, brb: true, micMuted: true });
+  const sceneCmd = commands[commands.length - 1];
+  assert.equal(sceneCmd.type, 'live-scene');
+  assert.equal(sceneCmd.scene.brb, true);
+  assert.equal(children.length, 1, 'žádné nové spojení');
+  assert.equal(live.current().scene.brb, true);
+  // Kamera nejde (obsazená) - vysílá se dál, hráč to uvidí.
+  live.handleEvent({ type: 'live-warning', generation: commands[0].generation, kind: 'camera', message: 'camera-busy' });
+  assert.equal(live.current().cameraError, 'camera-busy');
+  assert.equal(live.current().state, 'live');
+  await live.stop('quit');
+  assert.equal(live.current().scene, null);
+  assert.equal(live.current().cameraError, null);
+});
+
+test('vysílání: Ukončit je hned "ukončuje se" a druhé Ukončit nic nespustí znovu', async () => {
+  const { live, children, notices, ended } = makeController();
+  await live.start({ title: 'x', quality: '720p30' });
+  children[0].stdout.write('out_time_us=1500000\n');
+  await new Promise((r) => setTimeout(r, 10));
+  const first = live.stop('user');
+  assert.equal(live.current().state, 'stopping');
+  const second = live.stop('user');
+  await Promise.all([first, second]);
+  assert.equal(live.current().state, 'idle');
+  assert.equal(notices.filter((n) => n === 'ended').length, 1);
+  assert.equal(ended(), 1);
+});
+
+test('vysílání: co odchází - z rozdílu proti minulému bloku průběhu ffmpeg', async () => {
+  const { createProgressReader } = await import('../dist/esm/livePlan.js');
+  let now = 0;
+  const read = createProgressReader(() => now);
+  const block = (frame, size, us) => {
+    read(`frame=${frame}`);
+    read(`total_size=${size}`);
+    read(`out_time_us=${us}`);
+    read('bitrate=1234.5kbits/s');
+    return read('progress=continue');
+  };
+  now = 1000;
+  assert.deepEqual(block(30, 375000, 1_000_000), { kbps: null, fps: null, speed: null }, 'první blok: není s čím srovnat');
+  now = 3000;
+  const s = block(90, 375000 + 750000, 3_000_000);
+  assert.equal(s.kbps, 3000);
+  assert.equal(s.fps, 30);
+  assert.equal(s.speed, 1);
+  now = 5000;
+  const slow = block(120, 1125000 + 250000, 4_000_000);
+  assert.equal(slow.speed, 0.5);
+  assert.equal(slow.fps, 15);
+  assert.equal(read('frame=1'), null, 'uprostřed bloku nic');
+  assert.equal(read('nesmysl'), null);
 });

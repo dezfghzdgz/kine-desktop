@@ -53,6 +53,54 @@ export function liveProgressSeconds(line: string): number | null {
   return m ? Number(m[1]) / 1e6 : null;
 }
 
+/** Co právě odchází (z průběhu ffmpeg): kb/s, snímky za sekundu, rychlost proti reálnému času. */
+export type ProgressStats = { kbps: number | null; fps: number | null; speed: number | null };
+
+/**
+ * Sbírá řádky průběhu ffmpeg ("frame=…", "total_size=…", "out_time_us=…")
+ * a na konci každého bloku ("progress=…") vrátí, co odchází TEĎ - z rozdílu
+ * proti minulému bloku (ffmpeg sám hlásí jen průměr od začátku, který po
+ * výpadku nic neřekne). "N/A" = neví se. `now` jde podstrčit v testu.
+ */
+export function createProgressReader(now: () => number = Date.now): (line: string) => ProgressStats | null {
+  let frame: number | null = null;
+  let size: number | null = null;
+  let outUs: number | null = null;
+  let prev: { frame: number; size: number; outUs: number; at: number } | null = null;
+  const int = (value: string) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+  return (line: string) => {
+    const i = line.indexOf('=');
+    if (i <= 0) return null;
+    const key = line.slice(0, i).trim();
+    const value = line.slice(i + 1).trim();
+    if (key === 'frame') frame = int(value);
+    else if (key === 'total_size') size = int(value);
+    else if (key === 'out_time_us' || key === 'out_time_ms') outUs = int(value);
+    else if (key === 'progress') {
+      const at = now();
+      let stats: ProgressStats = { kbps: null, fps: null, speed: null };
+      if (frame !== null && size !== null && outUs !== null) {
+        if (prev && at > prev.at) {
+          const wall = (at - prev.at) / 1000;
+          const media = (outUs - prev.outUs) / 1e6;
+          stats = {
+            kbps: size >= prev.size ? Math.round(((size - prev.size) * 8) / wall / 1000) : null,
+            fps: frame >= prev.frame ? Math.round(((frame - prev.frame) / wall) * 10) / 10 : null,
+            speed: media >= 0 ? Math.round((media / wall) * 100) / 100 : null,
+          };
+        }
+        prev = { frame, size, outUs, at };
+      }
+      frame = size = outUs = null;
+      return stats;
+    }
+    return null;
+  };
+}
+
 /**
  * Po výpadku (síť, Cloudflare) se vysílání připojí znovu: 2, 3, 5, 8, 13,
  * 20 s... Cloudflare drží živý přenos minutu (timeoutSeconds 60), takže

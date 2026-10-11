@@ -1,6 +1,7 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { parseProbe, type ProbeResult } from './editPlan';
+import { constants as osConstants, setPriority } from 'node:os';
+import { parseProbe, progressPercent, type ProbeResult } from './editPlan';
 import { log } from './log';
 
 /**
@@ -16,20 +17,67 @@ export function ffmpegPath(): string {
   return p;
 }
 
-export function spawnFfmpeg(args: string[]): ChildProcessWithoutNullStreams {
+/**
+ * Nižší priorita procesu (Windows: "pod normálem"): hra dostane procesor
+ * první, ffmpeg dělá ve zbytku. Pro práci na pozadí, která nikoho nezdržuje
+ * (krájení zásobníku, náhledy, slepení dlouhé nahrávky) - hra pak při
+ * ukládání netrhá. Když to systém nedovolí, nic se neděje.
+ */
+export function lowerPriority(child: ChildProcess): void {
+  if (!child.pid) return;
+  try {
+    setPriority(child.pid, osConstants.priority.PRIORITY_BELOW_NORMAL);
+  } catch {
+    // nevadí - poběží s normální prioritou
+  }
+}
+
+/** `options.low` = nižší priorita (krájení zásobníku a jiná práce na pozadí). */
+export function spawnFfmpeg(args: string[], options: { low?: boolean } = {}): ChildProcessWithoutNullStreams {
   const child = spawn(ffmpegPath(), ['-hide_banner', '-nostdin', ...args], { windowsHide: true });
+  if (options.low) lowerPriority(child);
   return child;
 }
 
-/** Spustí ffmpeg a počká na konec. Při chybě hodí výjimku s koncem stderr. */
-export function runFfmpeg(args: string[], timeoutMs = 120000): Promise<string> {
+/**
+ * Spustí ffmpeg a počká na konec. Při chybě hodí výjimku s koncem stderr.
+ * `options.low` = nižší priorita (práce na pozadí), `options.progress` =
+ * průběh v % podle očekávané délky výstupu (`totalSeconds`).
+ */
+export function runFfmpeg(
+  args: string[],
+  timeoutMs = 120000,
+  options: { low?: boolean; totalSeconds?: number; progress?: (percent: number) => void } = {}
+): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(ffmpegPath(), ['-hide_banner', '-nostdin', '-y', ...args], { windowsHide: true });
+    const withProgress = !!options.progress && (options.totalSeconds ?? 0) > 0;
+    const child = spawn(ffmpegPath(), ['-hide_banner', '-nostdin', '-y', ...(withProgress ? ['-progress', 'pipe:1', '-nostats'] : []), ...args], { windowsHide: true });
+    if (options.low) lowerPriority(child);
     let stderr = '';
     child.stderr.on('data', (d) => {
       stderr += d.toString();
       if (stderr.length > 20000) stderr = stderr.slice(-10000);
     });
+    if (withProgress) {
+      let out = '';
+      let last = -1;
+      child.stdout.on('data', (d) => {
+        out += d.toString();
+        let idx: number;
+        while ((idx = out.indexOf('\n')) >= 0) {
+          const line = out.slice(0, idx);
+          out = out.slice(idx + 1);
+          const percent = progressPercent(line, options.totalSeconds!);
+          if (percent !== null && percent !== last) {
+            last = percent;
+            options.progress!(percent);
+          }
+        }
+      });
+    } else {
+      // Výstup nikdo nečte - ať se roura nezahltí.
+      child.stdout.resume();
+    }
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error('ffmpeg se zasekl'));
@@ -63,9 +111,15 @@ export function probe(file: string): Promise<ProbeResult> {
     child.stderr.on('data', (d) => {
       stderr += d.toString();
     });
-    const finish = () => resolve(parseProbe(stderr));
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(parseProbe(stderr));
+    };
     child.on('close', finish);
     child.on('error', finish);
-    setTimeout(() => child.kill(), 15000);
+    const timer = setTimeout(() => child.kill(), 15000);
   });
 }

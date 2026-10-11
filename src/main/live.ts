@@ -1,7 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
-import type { CaptureCommand, CaptureEvent, CaptureState, LiveQuality, LiveStatus, Settings } from '../shared/types';
-import { LIVE_PRESETS, liveElapsed, liveErrorKind } from '../shared/live';
-import { LIVE_MAX_BACKLOG_BYTES, liveFfmpegArgs, liveProgressSeconds, liveRetryDelay, maskLiveUrl, rtmpUrl } from './livePlan';
+import type { CaptureCommand, CaptureEvent, CaptureState, LiveAudio, LiveQuality, LiveScene, LiveStatus, Settings } from '../shared/types';
+import { LIVE_PRESETS, liveElapsed, liveErrorKind, livePresetFor } from '../shared/live';
+import { LIVE_MAX_BACKLOG_BYTES, createProgressReader, liveFfmpegArgs, liveProgressSeconds, liveRetryDelay, maskLiveUrl, rtmpUrl } from './livePlan';
 import type { KineApi } from './kineApi';
 
 /**
@@ -17,13 +17,13 @@ import type { KineApi } from './kineApi';
  * za 2, 3, 5... s; Cloudflare drží přenos minutu, takže diváci pokračují ve
  * stejném videu. Po posledním pokusu se vysílání vzdá a řekne proč.
  */
-type LiveEvent = Extract<CaptureEvent, { type: 'live-started' | 'live-stopped' | 'live-error' }>;
+type LiveEvent = Extract<CaptureEvent, { type: 'live-started' | 'live-stopped' | 'live-error' | 'live-warning' }>;
 
 export type LiveDeps = {
   capture: {
     readonly state: CaptureState;
     start: () => Promise<void>;
-    sendLive: (command: Extract<CaptureCommand, { type: 'live-start' | 'live-stop' }>) => boolean;
+    sendLive: (command: Extract<CaptureCommand, { type: 'live-start' | 'live-stop' | 'live-scene' }>) => boolean;
   };
   api: () => KineApi;
   settings: () => Settings;
@@ -39,11 +39,23 @@ export type LiveDeps = {
   testUrl?: string | null;
 };
 
+const IDLE: LiveStatus = { state: 'idle', since: null, title: '', watchUrl: null, error: null, confirmed: null, scene: null, stats: null, viewers: null, cameraError: null };
+
 export class LiveController {
-  private status: LiveStatus = { state: 'idle', since: null, title: '', watchUrl: null, error: null };
+  private status: LiveStatus = { ...IDLE };
   private wanted = false;
   private url: string | null = null;
   private quality: LiveQuality = '720p30';
+  private bitrateKbps = 0;
+  private audio: LiveAudio = { game: true, mic: true };
+  /** Kamera, "Hned jsem zpět", ztlumený mikrofon - jde do recorderu při každém (znovu)připojení. */
+  private scene: LiveScene | null = null;
+  /** Běžící ukončování (druhé "Ukončit" počká na totéž). */
+  private stopping: Promise<void> | null = null;
+  /** Kdy naposledy šly ven údaje o přenosu (ať se okno nepřekresluje při každém řádku ffmpeg). */
+  private statsAt = 0;
+  /** Jednou za pár sekund appka Kine řekne, že vysílá (a zjistí, jestli Kine proud vidí). */
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
   private nextGen = 1;
   /** Generace, která právě vysílá (0 = žádná). */
   private gen = 0;
@@ -76,14 +88,31 @@ export class LiveController {
   }
 
   /** Začne vysílat. Chyba (nepřihlášený, Kine vysílání nemá...) se vrátí a nic neběží. */
-  async start(opts: { title: string; quality: LiveQuality }): Promise<LiveStatus> {
+  async start(opts: {
+    title: string;
+    quality: LiveQuality;
+    /** Prázdný = zůstane popis ze studia na Kine. */
+    description?: string;
+    category?: string | null;
+    /** kb/s; 0 / chybí = podle kvality. */
+    bitrateKbps?: number;
+    game?: boolean;
+    mic?: boolean;
+    /** Kamera a spol. (null = jen obrazovka). */
+    scene?: LiveScene | null;
+  }): Promise<LiveStatus> {
     if (this.wanted) return this.current();
+    // Předchozí vysílání se ještě ukončuje - nové počká, ať si nepřebíjejí spojení.
+    if (this.stopping) await this.stopping;
     this.wanted = true;
     this.attempts = 0;
     this.slowWarned = false;
     this.quality = LIVE_PRESETS[opts.quality] ? opts.quality : '720p30';
+    this.bitrateKbps = opts.bitrateKbps ?? 0;
+    this.audio = { game: opts.game ?? true, mic: opts.mic ?? true };
+    this.scene = opts.scene ?? null;
     const title = opts.title.trim().slice(0, 100);
-    this.set({ state: 'starting', since: null, title, watchUrl: null, error: null });
+    this.set({ ...IDLE, state: 'starting', title, scene: this.scene });
     try {
       if (this.deps.testUrl) {
         this.url = this.deps.testUrl;
@@ -96,9 +125,11 @@ export class LiveController {
         if (!setup.input) throw new Error('live-not-configured');
         this.url = rtmpUrl(setup.input.rtmpsUrl, setup.input.streamKey);
         if (setup.stream?.ownerId) this.set({ watchUrl: `${this.deps.siteUrl()}/live/${setup.stream.ownerId}` });
-        // Název vidí diváci; popis a kategorie z webového studia zůstávají.
+        // Název, popis a kategorii vidí diváci. Co hráč nevyplnil v appce (popis), zůstává ze studia na Kine.
+        const description = opts.description?.trim() ? opts.description.trim() : setup.stream?.description ?? '';
+        const category = opts.category ?? setup.stream?.category ?? this.deps.settings().uploadCategory ?? null;
         await api
-          .liveDetails({ title, description: setup.stream?.description ?? '', category: setup.stream?.category ?? this.deps.settings().uploadCategory ?? null })
+          .liveDetails({ title, description, category })
           .catch((e) => this.deps.log(`vysílání: název se nepovedlo uložit: ${(e as Error).message}`));
       }
       if (!this.wanted) return this.current();
@@ -112,20 +143,35 @@ export class LiveController {
       this.deps.log(`vysílání nezačalo: ${message}`);
       this.wanted = false;
       this.killProcess();
-      this.set({ state: 'idle', since: null, error: message });
+      this.set({ ...IDLE, error: message });
       throw e;
     }
   }
 
-  /** Ukončí vysílání: recorder dopíše poslední kousky, ffmpeg dostane konec proudu, Cloudflare uzavře záznam. */
-  async stop(reason: 'user' | 'quit' = 'user'): Promise<void> {
-    if (!this.wanted && this.status.state === 'idle') return;
+  /**
+   * Ukončí vysílání: recorder dopíše poslední kousky, ffmpeg dostane konec
+   * proudu, Cloudflare uzavře záznam. Stav se HNED přepne na "ukončuje se"
+   * (tlačítko nejde zmáčknout znovu); další volání počká na totéž ukončení.
+   */
+  stop(reason: 'user' | 'quit' = 'user'): Promise<void> {
+    if (this.stopping) return this.stopping;
+    if (!this.wanted && this.status.state === 'idle') return Promise.resolve();
+    const run = this.doStop(reason).finally(() => {
+      if (this.stopping === run) this.stopping = null;
+    });
+    this.stopping = run;
+    return run;
+  }
+
+  private async doStop(reason: 'user' | 'quit'): Promise<void> {
     const wasLive = this.status.since !== null;
     const duration = liveElapsed(this.status.since);
     this.wanted = false;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
     this.stopWatchdog();
+    this.stopPing();
+    this.set({ state: 'stopping' });
     this.deps.capture.sendLive({ type: 'live-stop' });
     const child = this.ffmpeg;
     if (child) {
@@ -142,10 +188,25 @@ export class LiveController {
       if (child.exitCode === null) child.kill();
     }
     this.gen = 0;
+    this.scene = null;
+    this.stopPing(); // pro jistotu - kdyby ho mezitím něco znovu pustilo
     this.deps.log(`vysílání ukončeno${wasLive ? ` (${duration})` : ''}`);
-    this.set({ state: 'idle', since: null, error: null });
+    this.set({ ...IDLE });
+    // Kine ať přestane ukazovat "živě" hned (při ukončení appky nejvýš 1,5 s čekání).
+    if (wasLive) await Promise.race([this.signal('stopped'), new Promise((r) => setTimeout(r, reason === 'quit' ? 1500 : 4000))]);
     if (wasLive && reason === 'user') this.deps.notify('ended', { duration });
     this.deps.onEnded?.();
+  }
+
+  /**
+   * Za běhu vysílání: kamera (zapnout / posunout / zvětšit), "Hned jsem
+   * zpět", ztlumený mikrofon. Recorder to změní hned, bez nového spojení.
+   */
+  setScene(scene: LiveScene | null): void {
+    this.scene = scene;
+    if (!this.wanted) return;
+    this.set({ scene, cameraError: scene?.camera ? this.status.cameraError : null });
+    if (this.gen !== 0 && scene) this.deps.capture.sendLive({ type: 'live-scene', scene });
   }
 
   /** Kousek proudu ze snímací stránky. */
@@ -168,6 +229,13 @@ export class LiveController {
   handleEvent(event: LiveEvent): void {
     if (event.type === 'live-started') {
       if (event.generation === this.gen) this.deps.log(`vysílání gen ${event.generation}: ${event.mimeType}, ${event.width}x${event.height} @ ${event.fps} fps`);
+      return;
+    }
+    if (event.type === 'live-warning') {
+      // Kamera nejde (obsazená, odpojená) - vysílá se dál bez ní, hráč to uvidí v záložce Živě.
+      if (!this.wanted) return;
+      this.deps.log(`vysílání: ${event.kind}: ${event.message}`);
+      this.set({ cameraError: event.message.slice(0, 200) });
       return;
     }
     if (!this.wanted || event.generation !== this.gen) return;
@@ -197,14 +265,18 @@ export class LiveController {
     const child = this.deps.spawn(liveFfmpegArgs(this.url));
     this.ffmpeg = child;
     let out = '';
+    const readStats = createProgressReader();
     child.stdout.on('data', (d: Buffer) => {
       out += d.toString();
       let i: number;
       while ((i = out.indexOf('\n')) >= 0) {
         const line = out.slice(0, i);
         out = out.slice(i + 1);
+        if (gen !== this.gen) continue;
         const seconds = liveProgressSeconds(line);
-        if (seconds !== null && gen === this.gen) this.onProgress(seconds);
+        if (seconds !== null) this.onProgress(seconds);
+        const stats = readStats(line);
+        if (stats) this.onStats(stats, child);
       }
     });
     child.stderr.on('data', (d: Buffer) => {
@@ -227,20 +299,39 @@ export class LiveController {
       this.stderr += `\n${e.message}`;
       exit(-1);
     });
-    if (!this.deps.capture.sendLive({ type: 'live-start', generation: gen, preset: LIVE_PRESETS[this.quality] })) {
+    const command = { type: 'live-start' as const, generation: gen, preset: livePresetFor(this.quality, this.bitrateKbps), audio: { ...this.audio }, ...(this.scene ? { scene: this.scene } : {}) };
+    if (!this.deps.capture.sendLive(command)) {
       this.onFailure(gen, 'capture-off');
     }
   }
 
+  /** Co odchází (jednou za ~2 s do okna): datový tok, snímky, rychlost a fronta v rouře. */
+  private onStats(stats: { kbps: number | null; fps: number | null; speed: number | null }, child: ChildProcessWithoutNullStreams): void {
+    if (!this.wanted) return; // dobíhání po Ukončit - stav už je "stopping"/idle
+    const now = Date.now();
+    if (now - this.statsAt < 2000) return;
+    this.statsAt = now;
+    const backlogMb = Math.round((child.stdin.writableLength / 1024 / 1024) * 10) / 10;
+    this.set({ stats: { ...stats, backlogMb } });
+  }
+
   private onProgress(seconds: number): void {
+    // Během ukončování (1,2 s dobíhání) ffmpeg dál hlásí průběh - stav se nesmí vrátit na "živě".
+    if (!this.wanted) return;
     this.lastProgressAt = Date.now();
     if (seconds < 0.5) return;
     if (this.connectedAt === null) this.connectedAt = Date.now();
     if (this.status.state !== 'live') {
       const first = this.status.since === null;
       this.set({ state: 'live', since: this.status.since ?? Date.now(), error: null });
-      if (first) this.deps.notify('live', {});
-      else this.deps.log('vysílání: znovu připojeno');
+      if (first) {
+        this.deps.notify('live', {});
+        void this.signal('started');
+      } else {
+        this.deps.log('vysílání: znovu připojeno');
+        void this.signal('ping');
+      }
+      this.startPing();
     }
     // Minuta bez výpadku = další výpadek začíná počítat pokusy od nuly.
     if (this.connectedAt && Date.now() - this.connectedAt > 60_000) this.attempts = 0;
@@ -259,9 +350,13 @@ export class LiveController {
     if (delay === null) {
       this.deps.log(`vysílání se vzdává (${this.attempts} pokusů): ${reason}`);
       const duration = liveElapsed(this.status.since);
+      const wasLive = this.status.since !== null;
       this.wanted = false;
       this.stopWatchdog();
-      this.set({ state: 'idle', since: null, error: reason });
+      this.stopPing();
+      this.scene = null;
+      this.set({ ...IDLE, error: reason });
+      if (wasLive) void this.signal('stopped');
       this.deps.notify('failed', { error: reason, duration });
       this.deps.onEnded?.();
       return;
@@ -309,6 +404,35 @@ export class LiveController {
   private stopWatchdog(): void {
     if (this.watchdog) clearInterval(this.watchdog);
     this.watchdog = null;
+  }
+
+  // ---- hlášení Kine ------------------------------------------------------------------
+
+  /** Řekne Kine, že se vysílá (started / ping) nebo že už ne. Chyba se jen zapíše - vysílání to nesmí shodit. */
+  private async signal(action: 'started' | 'ping' | 'stopped'): Promise<void> {
+    if (this.deps.testUrl) return;
+    try {
+      const result = await this.deps.api().liveSignal(action);
+      if (action !== 'stopped' && this.wanted && this.status.state === 'live') {
+        const viewers = typeof result.viewers === 'number' ? result.viewers : null;
+        if (this.status.confirmed !== result.confirmed || this.status.viewers !== viewers) this.set({ confirmed: result.confirmed, viewers });
+      }
+    } catch (e) {
+      this.deps.log(`vysílání: Kine se nepodařilo říct stav (${action}): ${(e as Error).message}`);
+    }
+  }
+
+  private startPing(): void {
+    if (this.pingTimer || this.deps.testUrl) return;
+    this.pingTimer = setInterval(() => {
+      if (this.wanted && this.status.state === 'live') void this.signal('ping');
+    }, 15_000);
+    this.pingTimer.unref?.();
+  }
+
+  private stopPing(): void {
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = null;
   }
 
   private killProcess(): void {

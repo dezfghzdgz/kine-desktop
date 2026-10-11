@@ -259,7 +259,7 @@ kbd {
 .side-record.recording { color: var(--danger); box-shadow: inset 0 0 0 1px rgba(255, 107, 107, 0.55); background-color: rgba(255, 107, 107, 0.12); background-image: none; font-weight: 600; font-variant-numeric: tabular-nums; }
 .rec-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); margin-right: 6px; box-shadow: 0 0 8px rgba(255, 107, 107, 0.8); animation: rec-blink 1.2s ease-in-out infinite; }
 @keyframes rec-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-.hotkey.empty { color: var(--text-faint); font-weight: 500; }
+.hotkey.empty { color: var(--text-faint); font-weight: 500; padding: 6px 14px; }
 /* Úložiště: dvě úzké sloupce popisek / hodnota. */
 .storage-grid { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; align-items: center; font-size: var(--fs-sm); }
 .storage-grid b { font-weight: 600; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
@@ -536,6 +536,12 @@ button.side-audio-warn:hover { text-decoration: underline; background: none; }
 .toast .msg { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .toast .logo { width: 22px; height: 22px; border-radius: var(--radius-xs); background: #0a0a0b; display: grid; place-items: center; flex: none; }
 .toast .logo::after { content: ''; border-left: 9px solid var(--brand); border-top: 5.5px solid transparent; border-bottom: 5.5px solid transparent; margin-left: 2px; }
+/* "Ukládám klip…" hned po stisku: místo trojúhelníku točící se kroužek, proužek tepe. */
+.toast.pending .logo::after { width: 12px; height: 12px; margin: 0; border: 2px solid rgba(var(--brand-rgb), 0.3); border-top-color: var(--brand); border-radius: 50%; animation: toast-spin 0.8s linear infinite; }
+.toast.pending .bar { animation: toast-pulse 1s ease-in-out infinite; }
+@keyframes toast-spin { to { transform: rotate(360deg); } }
+@keyframes toast-pulse { 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .toast.pending .logo::after, .toast.pending .bar { animation: none; } }
 
 /* Úpravy: text přes video (náhled), rychlost, momenty nahrávky */
 .player-stage .text-preview { position: absolute; pointer-events: none; z-index: 2; }
@@ -565,3 +571,56 @@ button.side-sub.side-live-open:hover { color: var(--text); text-decoration: unde
 .live-actions .live-start { min-width: 160px; }
 .kine-bar .bar-live { margin: 0 6px 0 0; }
 .kine-bar .bar-live button.small { flex: none; }
+
+/* Záložka Live */
+.live-panel .live-time { font-variant-numeric: tabular-nums; color: var(--text-dim); }
+textarea.live-description { width: 100%; resize: vertical; min-height: 64px; }
+.live-category, .live-quality, .live-bitrate { width: 100%; }
+
+/* Točící se kolečko "pracuje se" (ukládání klipu / nahrávky, ukončování vysílání). */
+.spin { display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px; border-radius: 50%; border: 2px solid rgba(var(--brand-rgb), 0.25); border-top-color: var(--brand); animation: toast-spin 0.8s linear infinite; flex: none; }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+.side-actions button.side-record.saving, .side-actions button.side-clip.saving { color: var(--text); opacity: 1; font-variant-numeric: tabular-nums; }
+.kine-bar .bar-item .spin { margin-right: 4px; }
+
+/* Tichá upozornění v panelu (místo okének po startu) */
+.side-notice { display: flex; align-items: flex-start; gap: 4px; }
+.side-notice .notice-text { flex: 1; min-width: 0; background: none; border: none; box-shadow: none; padding: 0; min-height: 0; text-align: left; color: var(--warn); font: inherit; cursor: pointer; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.side-notice.info .notice-text { color: var(--text-dim); }
+.side-notice .notice-text:hover { text-decoration: underline; }
+.side-notice .notice-x { flex: none; background: none; border: none; box-shadow: none; padding: 0 2px; min-height: 0; color: var(--text-faint); font-size: 11px; cursor: pointer; line-height: 1.4; }
+.side-notice .notice-x:hover { color: var(--text); }
+
+/* Záložka Živě: stav, ovládání během vysílání, náhled s kamerou */
+.live-panel.on-air { box-shadow: inset 0 0 0 1px rgba(255, 107, 107, 0.35), var(--hairline); }
+.live-state { align-items: center; gap: 8px; }
+.live-viewers { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.live-controls { gap: 8px; flex-wrap: wrap; }
+.live-controls button.active { color: var(--warn); box-shadow: inset 0 0 0 1px rgba(255, 200, 87, 0.55); background-color: rgba(255, 200, 87, 0.12); background-image: none; }
+.live-stats { font-variant-numeric: tabular-nums; }
+.side-actions button.side-live.on.brb { color: var(--warn); box-shadow: inset 0 0 0 1px rgba(255, 200, 87, 0.55); background-color: rgba(255, 200, 87, 0.1); }
+.live-scene-grid { display: grid; grid-template-columns: minmax(220px, 1.15fr) minmax(220px, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 820px) { .live-scene-grid { grid-template-columns: 1fr; } }
+.live-preview { position: relative; aspect-ratio: 16 / 9; border-radius: var(--radius-md); overflow: hidden; background: linear-gradient(135deg, #1b2330, #11151c 55%, #0b0d12); box-shadow: inset 0 0 0 1px var(--border); }
+.live-preview-game { position: absolute; inset: 0; display: grid; place-items: center; color: var(--text-faint); font-size: var(--fs-xs); letter-spacing: 0.02em; }
+.live-preview-game span { padding: 4px 10px; border-radius: var(--radius-pill); background: rgba(0, 0, 0, 0.35); }
+.live-preview-cam { position: absolute; overflow: hidden; background: #000; box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.85), 0 6px 18px rgba(0, 0, 0, 0.5); display: grid; place-items: center; }
+.live-preview-cam video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.live-preview-cam video.mirror { transform: scaleX(-1); }
+.live-preview.brb { background: linear-gradient(135deg, #08080b, #16161d); }
+.live-preview-brb { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+.live-preview-brb b { font-size: clamp(14px, 3.4vw, 26px); color: var(--text); text-align: center; padding: 0 8px; }
+.live-preview-brb .bar { width: 8%; height: 3px; border-radius: 2px; background: var(--brand); }
+.corner-picker { position: relative; width: 112px; aspect-ratio: 16 / 9; border-radius: var(--radius-sm); background: rgba(255, 255, 255, 0.04); box-shadow: inset 0 0 0 1px var(--border); }
+.corner-picker .corner { position: absolute; width: 34%; height: 34%; min-height: 0; padding: 0; border-radius: 5px; background: rgba(255, 255, 255, 0.08); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14); cursor: pointer; }
+.corner-picker .corner:hover { background: rgba(255, 255, 255, 0.16); }
+.corner-picker .corner.active { background: var(--brand); box-shadow: 0 0 10px rgba(var(--brand-rgb), 0.6); }
+.corner-picker .corner.top-left { left: 6%; top: 8%; }
+.corner-picker .corner.top-right { right: 6%; top: 8%; }
+.corner-picker .corner.bottom-left { left: 6%; bottom: 8%; }
+.corner-picker .corner.bottom-right { right: 6%; bottom: 8%; }
+.live-camera-settings select { width: 100%; }
+.live-brb-text, .live-title { width: 100%; }
+
+/* Kolik appka bere (Nastavení -> Výkon) */
+.usage-now b { font-variant-numeric: tabular-nums; }

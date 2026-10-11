@@ -99,6 +99,140 @@ export function sameResolutionTailStart(sizes: (string | null)[]): number {
   return start;
 }
 
+// ---- rozměry obrazu: kde se měnily ------------------------------------------------------
+
+/** Hlášení snímací stránky: od `at` (hodiny počítače) má obraz rozměry `size` ("1920x1080"). */
+export type SizeReport = { at: number; size: string };
+
+/** Generace z pohledu rozměrů: rozměry na začátku a hlášené změny. */
+export type GenerationSizes = { id: number; size: string | null; resizes: SizeReport[] };
+
+/** O kolik se může hlášení změny opozdit (snímací stránka se ptá jednou za sekundu) + rezerva. */
+const REPORT_SLACK_MS = 2000;
+
+/**
+ * Rozměry kousků podle hlášení snímací stránky, bez jediného spuštění
+ * ffmpeg: když všechny generace v klipu hlásily stejné rozměry a během
+ * klipu (s rezervou na zpoždění hlášení) žádná změna nebyla, vrátí ty
+ * rozměry. Jinak null - pak se musí změřit (sizeRuns).
+ */
+export function reportedSize(chosen: Segment[], gens: GenerationSizes[]): string | null {
+  if (chosen.length === 0) return null;
+  const from = chosen[0].startWall - REPORT_SLACK_MS;
+  const to = chosen[chosen.length - 1].endWall + REPORT_SLACK_MS;
+  const byId = new Map(gens.map((g) => [g.id, g]));
+  let size: string | null = null;
+  for (const id of new Set(chosen.map((s) => s.generation))) {
+    const g = byId.get(id);
+    if (!g || !g.size) return null;
+    if (g.resizes.some((r) => r.at > from && r.at < to)) return null;
+    // Rozměry v klipu = poslední změna před ním, jinak rozměry na začátku generace.
+    const before = g.resizes.filter((r) => r.at <= from);
+    const s = before.length > 0 ? before[before.length - 1].size : g.size;
+    if (size !== null && s !== size) return null;
+    size = s;
+  }
+  return size;
+}
+
+/**
+ * Rozdělí kousky (seřazené podle času) na souvislé úseky se stejnými
+ * rozměry obrazu. Měří se jen to nutné: kraje, kousky kolem hlášených
+ * změn (začátky generací a 'resized') a pak půlením mezi dvěma změřenými
+ * kousky s různými rozměry, dokud se nenajde přesná hranice. Neměřené
+ * kousky dostanou rozměry nejbližšího změřeného před sebou (neznámé =
+ * "sedí"). `maxProbes` = strop - u dlouhé nahrávky se neměří tisíce kousků.
+ */
+export async function sizeRuns(
+  segments: Segment[],
+  reports: SizeReport[],
+  probeSize: (file: string) => Promise<string | null>,
+  options: { maxProbes?: number; concurrency?: number } = {}
+): Promise<{ runs: Segment[][]; sizes: (string | null)[] }> {
+  const n = segments.length;
+  if (n === 0) return { runs: [], sizes: [] };
+  const maxProbes = options.maxProbes ?? 48;
+  const concurrency = Math.max(1, options.concurrency ?? 6);
+  const sizes: (string | null | undefined)[] = new Array(n).fill(undefined);
+  let probes = 0;
+
+  const measure = async (indexes: number[]) => {
+    const todo = [...new Set(indexes)].filter((i) => i >= 0 && i < n && sizes[i] === undefined);
+    const allowed = todo.slice(0, Math.max(0, maxProbes - probes));
+    probes += allowed.length;
+    for (let k = 0; k < allowed.length; k += concurrency) {
+      const batch = allowed.slice(k, k + concurrency);
+      const results = await Promise.all(batch.map((i) => probeSize(segments[i].file).catch(() => null)));
+      batch.forEach((i, j) => (sizes[i] = results[j]));
+    }
+  };
+
+  // 1) kraje + kousky kolem hlášených změn (jeden před, ten s hlášením a jeden po).
+  const initial = [0, n - 1];
+  for (const r of reports) {
+    for (let i = 0; i < n; i++) {
+      const s = segments[i];
+      if (s.endWall > r.at - REPORT_SLACK_MS && s.startWall < r.at + REPORT_SLACK_MS) initial.push(i - 1, i, i + 1);
+    }
+  }
+  await measure(initial);
+
+  // 2) půlení: mezi dvěma změřenými s různými rozměry se hledá přesná hranice.
+  for (let guard = 0; guard < 200 && probes < maxProbes; guard++) {
+    const known: number[] = [];
+    sizes.forEach((s, i) => {
+      if (s) known.push(i);
+    });
+    const wanted: number[] = [];
+    for (let k = 1; k < known.length; k++) {
+      const a = known[k - 1];
+      const b = known[k];
+      if (sizes[a] === sizes[b]) continue;
+      const open: number[] = [];
+      for (let i = a + 1; i < b; i++) if (sizes[i] === undefined) open.push(i);
+      if (open.length > 0) wanted.push(open[open.length >> 1]);
+    }
+    if (wanted.length === 0) break;
+    await measure(wanted);
+  }
+
+  // 3) neměřené (a neznámé) převezmou rozměry nejbližšího změřeného před sebou (na začátku toho prvního).
+  let carry: string | null = (sizes.find((s) => !!s) as string | undefined) ?? null;
+  const filled: (string | null)[] = [];
+  for (let i = 0; i < n; i++) {
+    if (sizes[i]) carry = sizes[i] as string;
+    filled.push(carry);
+  }
+  const runs: Segment[][] = [];
+  let current: Segment[] = [];
+  for (let i = 0; i < n; i++) {
+    if (i > 0 && filled[i] !== filled[i - 1]) {
+      runs.push(current);
+      current = [];
+    }
+    current.push(segments[i]);
+  }
+  runs.push(current);
+  return { runs, sizes: filled };
+}
+
+/**
+ * Úseky nahrávky zápasu k uložení: po každé změně rozměrů se poslední
+ * kousek starého úseku vynechá (změna může být uprostřed něj - a soubor,
+ * kde se v půlce změní velikost obrazu, prohlížeč nepřehraje). Úseky
+ * kratší než `minSeconds` se zahodí (načítací obrazovka, alt-tab na chvilku).
+ */
+export function recordingParts(runs: Segment[][], minSeconds = 5): Segment[][] {
+  const nonEmpty = runs.filter((run) => run.length > 0);
+  // Jeden úsek (rozlišení se neměnilo) = celá nahrávka, i kdyby byla krátká.
+  if (nonEmpty.length <= 1) return nonEmpty;
+  const trimmed = nonEmpty.map((run, i) => (i < nonEmpty.length - 1 && run.length > 1 ? run.slice(0, -1) : run));
+  const kept = trimmed.filter((run) => totalSeconds(run) >= minSeconds);
+  if (kept.length > 0) return kept;
+  // Všechno krátké - aspoň ten nejdelší úsek, ať se nahrávka neztratí.
+  return [trimmed.reduce((best, run) => (totalSeconds(run) > totalSeconds(best) ? run : best))];
+}
+
 // ---- plán klipu: obraz + zvlášť nahraný mikrofon --------------------------------------
 
 /** Položka pro concat demuxer: soubor, jak dlouho v klipu trvá, případně kde ho uříznout. */

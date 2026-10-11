@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AudioLevels, CaptureCommand, CaptureEvent, Clip, DisplayInfo, GameSource, LiveQuality, LiveStatus, ProcessInfo, Settings, Status, UploadRequest } from '../shared/types';
+import type { AudioLevels, CaptureCommand, CaptureEvent, Clip, DisplayInfo, GameSource, LiveQuality, LiveStatus, ProcessInfo, ResourceUsage, Settings, Status, UploadRequest } from '../shared/types';
 
 /**
  * Most mezi stránkami a hlavním procesem. Stránky nemají Node ani
@@ -85,6 +85,14 @@ const kine = {
   stopLive: (): Promise<void> => ipcRenderer.invoke('live:stop'),
   /** Stránka vysílání na Kine (diváci, chat). */
   openLivePage: (): Promise<void> => ipcRenderer.invoke('live:openPage'),
+  /** Obrazovka "Hned jsem zpět" ve vysílání (bez argumentu = přepnout). Vrací, jestli je zapnutá. */
+  liveBrb: (on?: boolean): Promise<boolean> => ipcRenderer.invoke('live:brb', on),
+  /** Mikrofon jen ve vysílání ztlumit / zapnout. */
+  liveMuteMic: (muted: boolean): Promise<boolean> => ipcRenderer.invoke('live:muteMic', muted),
+  /** Kolik appka právě bere (procesor, paměť). */
+  resourceUsage: (): Promise<ResourceUsage> => ipcRenderer.invoke('app:usage'),
+  /** Schovat upozornění v panelu. */
+  dismissNotice: (id: string): Promise<void> => ipcRenderer.invoke('notice:dismiss', id),
 
   loginBrowser: (): Promise<void> => ipcRenderer.invoke('auth:loginBrowser'),
   cancelBrowserLogin: (): Promise<void> => ipcRenderer.invoke('auth:cancelBrowser'),
@@ -126,7 +134,9 @@ const kine = {
   log: (message: string): Promise<void> => ipcRenderer.invoke('app:log', message),
   quit: (): Promise<void> => ipcRenderer.invoke('app:quit'),
 
-  onToast: (cb: (t: { message: string; kind: string }) => void) => on<{ message: string; kind: string }>('toast:show', cb),
+  /** Okénko v rohu: text, druh (ok / warn / error / pending), jestli pípnout a jestli okénko vůbec ukázat (jen zvuk). */
+  onToast: (cb: (t: { message: string; kind: string; sound?: boolean; show?: boolean }) => void) =>
+    on<{ message: string; kind: string; sound?: boolean; show?: boolean }>('toast:show', cb),
   /** Hladiny zvuku hry a mikrofonu ze snímání (zhruba každou sekundu, jen když zásobník běží). */
   onAudioLevels: (cb: (levels: AudioLevels) => void) => on<AudioLevels>('audio:levels', cb),
   /** Poslední známé hladiny (null = zásobník neběží). */

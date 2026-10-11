@@ -17,6 +17,30 @@ export const LIVE_PRESETS: Record<LiveQuality, LivePreset> = {
   '1080p60': { width: 1920, height: 1080, fps: 60, videoKbps: 6000 },
 };
 
+/** Nabídka datového toku obrazu (kb/s) ve výběru; 0 = podle kvality. */
+export const LIVE_BITRATES_KBPS = [1500, 2500, 3500, 4500, 6000, 8000] as const;
+export const LIVE_BITRATE_MIN = 1000;
+export const LIVE_BITRATE_MAX = 12000;
+
+/** Datový tok z nastavení: 0 (podle kvality) nebo číslo v rozumném rozsahu, jinak 0. */
+export function liveBitrate(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(LIVE_BITRATE_MAX, Math.max(LIVE_BITRATE_MIN, Math.round(n / 100) * 100));
+}
+
+/** Předvolba kvality, u které se datový tok případně přepsal vlastním. */
+export function livePresetFor(quality: LiveQuality, bitrateKbps = 0): LivePreset {
+  const base = LIVE_PRESETS[quality] ?? LIVE_PRESETS['720p30'];
+  const kbps = liveBitrate(bitrateKbps);
+  return kbps > 0 ? { ...base, videoKbps: kbps } : { ...base };
+}
+
+/** Kolik Mb/s uploadu vysílání potřebuje (obraz + zvuk + rezerva 20 %). */
+export function liveUploadMbps(kbps: number): number {
+  return Math.round(((kbps + 160) * 1.2) / 100) / 10;
+}
+
 /** "720p · 30 fps · 3 Mb/s" - popisek do výběru kvality. */
 export function livePresetLabel(quality: LiveQuality): string {
   const p = LIVE_PRESETS[quality];

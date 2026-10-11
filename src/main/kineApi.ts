@@ -65,6 +65,12 @@ export type KineApi = {
   liveCreate(): Promise<LiveSetup>;
   /** Název, popis a kategorie přenosu (vidí je diváci na Kine). */
   liveDetails(details: { title: string; description: string; category: string | null }): Promise<void>;
+  /**
+   * Appka řekne Kine, že vysílá (started / ping po ~15 s / stopped). Kine podle
+   * toho ukáže vysílání jako živé hned, ne až když ho najde u Cloudflare.
+   * `confirmed`: Cloudflare proud opravdu přijímá.
+   */
+  liveSignal(action: 'started' | 'ping' | 'stopped'): Promise<{ confirmed: boolean; viewers: number | null }>;
 };
 
 function liveSetupFrom(data: any): LiveSetup {
@@ -155,6 +161,12 @@ export function createKineApi(deps: {
     },
     async liveCreate() {
       return liveSetupFrom({ configured: true, migrated: true, ...(await post('/api/live/me', { action: 'create' })) });
+    },
+    async liveSignal(action) {
+      const data: any = await post('/api/live/me', { action });
+      // Počet diváků posílá novější Kine (Cloudflare); starší nic - pak null.
+      const viewers = Number.isInteger(data?.viewers) && data.viewers >= 0 ? Number(data.viewers) : null;
+      return { confirmed: data?.confirmed === true, viewers };
     },
     async liveDetails(details) {
       await post('/api/live/me', { action: 'details', title: details.title.slice(0, 100), description: details.description.slice(0, 2000), category: details.category });

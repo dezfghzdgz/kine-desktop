@@ -5,6 +5,9 @@ import { applyBrandColor } from '../shared/plan';
  * Okénko v rohu: text + barevný proužek + krátké pípnutí. Zvuk je
  * syntetizovaný (dva tóny), žádný soubor - a hráč ho slyší i ve hře
  * v režimu celé obrazovky, kde okénko vidět není.
+ *
+ * 'pending' = "Ukládám klip…" hned po stisku (s točícím se kolečkem);
+ * výsledek pak přepíše text ve stejném okénku, bez dalšího pípnutí.
  */
 declare const window: Window & { kine: KineBridge };
 
@@ -15,9 +18,10 @@ let audio: AudioContext | null = null;
 
 function blip(kind: string) {
   try {
-    audio ??= new AudioContext();
+    audio ??= new AudioContext({ latencyHint: 'interactive' });
+    if (audio.state !== 'running') void audio.resume().catch(() => undefined);
     const now = audio.currentTime;
-    const notes = kind === 'ok' ? [660, 990] : kind === 'warn' ? [440, 440] : [330, 220];
+    const notes = kind === 'ok' || kind === 'pending' ? [660, 990] : kind === 'warn' ? [440, 440] : [330, 220];
     notes.forEach((freq, i) => {
       const osc = audio!.createOscillator();
       const gain = audio!.createGain();
@@ -39,11 +43,13 @@ function blip(kind: string) {
 void window.kine.getSettings().then((s) => applyBrandColor(document.documentElement, s.brandColor || null));
 window.kine.onSettings((s) => applyBrandColor(document.documentElement, s.brandColor || null));
 
-window.kine.onToast(({ message, kind }) => {
+window.kine.onToast(({ message, kind, sound, show }) => {
+  if (sound) blip(kind);
+  if (show === false) return;
   msg.textContent = message;
   toast.className = `toast ${kind}`;
   requestAnimationFrame(() => toast.classList.add('show'));
-  blip(kind);
   if (hideTimer) clearTimeout(hideTimer);
-  hideTimer = setTimeout(() => toast.classList.remove('show'), 2300);
+  // "Ukládám…" visí, dokud nepřijde výsledek (nejdéle minutu).
+  hideTimer = setTimeout(() => toast.classList.remove('show'), kind === 'pending' ? 59000 : 2300);
 });

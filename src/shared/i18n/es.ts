@@ -752,4 +752,9 @@ export const es: Record<Key, string> = {
   lookWindowGlassHint: 'El escritorio y las ventanas detrás de la app se ven difuminados (Windows 11). Cuando la ventana no está activa, Windows la muestra sólida.',
   lookWindowGlassUnsupported: 'La ventana transparente (con el escritorio detrás) necesita Windows 11; aquí se queda el fondo de color.',
   uploadErrorLogin: 'Inicia sesión para subir a Kine (Cuenta).',
+  lookFollow: 'Colores según la imagen',
+  lookFollowHint: 'Los colores del clip brillan alrededor del reproductor. Con Cristal, el fondo también cambia según el clip que miras (incluso al pasar el ratón).',
+  lookMotion: 'Colores en movimiento',
+  lookMotionHint: 'Los colores del fondo se mueven despacio. Si las animaciones de Windows están desactivadas, se quedan quietos.',
+  liveChatTtsHint: '💛 Los apoyos de los espectadores aparecen destacados en el chat. Con el icono 🔊 de la ventana del chat se leen en voz alta (o todos los mensajes nuevos).',
 };

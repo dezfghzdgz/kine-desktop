@@ -752,4 +752,9 @@ export const fr: Record<Key, string> = {
   lookWindowGlassHint: 'Le bureau et les fenêtres derrière l\'appli transparaissent, floutés (Windows 11). Quand la fenêtre n\'est pas active, Windows l\'affiche pleine.',
   lookWindowGlassUnsupported: 'Une fenêtre transparente (le bureau visible derrière) nécessite Windows 11 - ici, le fond coloré reste.',
   uploadErrorLogin: 'Connecte-toi pour publier sur Kine (Compte).',
+  lookFollow: 'Couleurs selon l\'image',
+  lookFollowHint: 'Les couleurs du clip brillent autour du lecteur. Avec Verre, le fond change aussi selon le clip que tu regardes (même au survol).',
+  lookMotion: 'Couleurs animées',
+  lookMotionHint: 'Les couleurs du fond bougent lentement. Si les animations sont désactivées dans Windows, elles restent fixes.',
+  liveChatTtsHint: '💛 Les soutiens des spectateurs apparaissent en surbrillance dans le chat. Avec l\'icône 🔊 de la fenêtre du chat, ils sont lus à voix haute (ou chaque nouveau message).',
 };

@@ -536,3 +536,23 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   skutečném ovladači zatím vyzkoušená není (tady žádný není). Ovladač
   připojený přes Bluetooth bez XInputu (starší DualShock bez Steamu)
   appka nevidí.
+
+## Novinky 0.9.8
+
+- **Barvy podle obrazu (Nastavení -> Vzhled):** kolem přehrávače klipů
+  svítí barvy videa (jako ambientní režim na YouTube) a se sklem se pozadí
+  appky mění podle klipu, na který se díváš - i podle karty pod myší.
+  Levně: obraz se kreslí do malinkého plátna (desítky pixelů) už rozmazaný
+  a jen se roztáhne, žádný filtr přes celé okno ani čtení pixelů
+  (`src/renderer/ambient.ts`). Funguje i v klasickém vzhledu (jen světlo
+  kolem přehrávače).
+- **Pohyblivé barvy:** se sklem se barvy pozadí pomalu přelévají (jen
+  posun vrstev; s vypnutými animacemi ve Windows stojí).
+- **Kine na vlastní doméně:** appka si novou adresu webu vezme sama
+  (`src/main/siteMove.ts`) - po startu a jednou denně se zeptá webu na
+  hlavní adresu (`/api/desktop/config`) a přejde na ni, jen když tam běží
+  stejné Kine (stejná databáze) a nová adresa to potvrdí. Nikdy zpátky na
+  `*.vercel.app` a nikdy z localhostu. Přihlášení zůstává.
+- **Podpory ve vysílání:** v záložce Živě je nápověda - podpory od diváků
+  (💛) se v okně chatu ukážou zvýrazněné a ikonkou 🔊 si je streamer nechá
+  číst nahlas (nebo všechny nové zprávy).

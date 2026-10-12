@@ -1211,6 +1211,46 @@ export async function runTestDriver(kine: {
       kine.openSettings('clips');
       await sleep(700);
       await shot(kine.settingsWindow, 'settings-clips-glass');
+      // Barvy podle obrazu + pohyblivé barvy: pozadí podle nejnovějšího klipu, pak podle karty
+      // pod myší; kolem přehrávače světlo z videa; po vypnutí atributy pryč.
+      kine.settings.update({ lookFollow: true, lookMotion: true });
+      await sleep(1200);
+      const fw = kine.settingsWindow!;
+      const followBase = await fw.webContents.executeJavaScript(
+        `(() => { const r = document.documentElement; const bd = document.querySelector('.app-backdrop'); return { follow: r.getAttribute('data-follow'), motion: r.getAttribute('data-motion'), anim: bd ? getComputedStyle(bd, '::before').animationName : null, first: !!document.querySelector('.app-backdrop-image.in'), src: bd ? bd.dataset.src || null : null }; })()`
+      );
+      const hovered = await fw.webContents.executeJavaScript(
+        `(() => { const cur = document.querySelector('.app-backdrop')?.dataset.src || ''; const t = [...document.querySelectorAll('.clip .thumb')].find((x) => { const i = x.querySelector('img'); return i && i.getAttribute('src') !== cur; }); if (!t) return null; t.dispatchEvent(new MouseEvent('mouseenter')); return t.querySelector('img').getAttribute('src'); })()`
+      );
+      await sleep(1400);
+      const followHover = await fw.webContents.executeJavaScript(
+        `(() => { const bd = document.querySelector('.app-backdrop'); return { src: bd ? bd.dataset.src || null : null, layers: document.querySelectorAll('.app-backdrop-image').length, shown: !!document.querySelector('.app-backdrop-image.in') }; })()`
+      );
+      await shot(fw, 'settings-clips-glass-follow');
+      await fw.webContents.executeJavaScript(`(() => { const t = document.querySelector('.clip .thumb'); if (t) t.click(); return !!t; })()`);
+      let frames = 0;
+      for (let i = 0; i < 24 && frames < 1; i++) {
+        await sleep(250);
+        frames = await fw.webContents.executeJavaScript(`Number(document.querySelector('.player-ambient')?.dataset.frames || 0)`);
+      }
+      await sleep(500);
+      const ambientBox = await fw.webContents.executeJavaScript(
+        `(() => { const a = document.querySelector('.player-ambient'); const s = document.querySelector('.player-stage'); if (!a || !s) return null; const ar = a.getBoundingClientRect(); const sr = s.getBoundingClientRect(); return { wider: ar.width > sr.width * 1.4, around: ar.left < sr.left && ar.right > sr.right && ar.top < sr.top, z: getComputedStyle(a).zIndex, shown: a.classList.contains('in') }; })()`
+      );
+      await shot(fw, 'settings-clips-player-ambient');
+      await fw.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await sleep(500);
+      const ambientGone = await fw.webContents.executeJavaScript(`!document.querySelector('.player-ambient') && !document.querySelector('.overlay')`);
+      kine.settings.update({ lookFollow: false, lookMotion: false });
+      await sleep(500);
+      const followOff = await fw.webContents.executeJavaScript(
+        `!document.documentElement.hasAttribute('data-follow') && !document.documentElement.hasAttribute('data-motion') && getComputedStyle(document.querySelector('.app-backdrop'), '::before').animationName === 'none'`
+      );
+      result.lookFollow = { followBase, hovered, followHover, frames, ambientBox, ambientGone, followOff };
+      result.lookFollowOk =
+        followBase.follow === '1' && followBase.motion === '1' && followBase.anim === 'app-backdrop-drift' && followBase.first && !!followBase.src &&
+        !!hovered && followHover.src === hovered && followHover.shown &&
+        frames >= 1 && !!ambientBox && ambientBox.wider && ambientBox.around && ambientBox.shown && ambientGone && followOff;
       kine.settings.update({ look: 'classic' });
       await sleep(500);
       const back = await kine.settingsWindow!.webContents.executeJavaScript(`!document.documentElement.hasAttribute('data-look') && getComputedStyle(document.querySelector('.app-backdrop')).display === 'none'`);
@@ -1235,7 +1275,7 @@ export async function runTestDriver(kine: {
       'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks', 'reviewMerge', 'updateUi',
       'playerNav', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
       'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
-      'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'screenshotOk', 'clipToastInstant', 'recordingStopOnceOk', 'updateProgressOk', 'playerFullscreenOk', 'lookOk',
+      'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'screenshotOk', 'clipToastInstant', 'recordingStopOnceOk', 'updateProgressOk', 'playerFullscreenOk', 'lookOk', 'lookFollowOk',
     ];
     if (process.env.KINE_TEST_LIVE_URL) common.push('liveOk');
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];

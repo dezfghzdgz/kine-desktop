@@ -8,6 +8,7 @@ import { applyBrandColor, clipOptionsFor, maxClipSecondsFor } from '../shared/pl
 import { performanceProfile } from '../shared/performance';
 import { clear, clipMeta, errorText, fileUrl, formatBytes, formatDate, formatDuration, h, isPortrait, thumbImages } from './ui';
 import { closePlayer, openPlayer, openPlayerId, type Neighbors, type PlayerHandle } from './player';
+import { attachBackdrop, followImage, hasFollowImage } from './ambient';
 import { VIDEO_LANGS, openUploadDialog } from './uploadDialog';
 import { LIVE_BITRATES_KBPS, LIVE_QUALITIES, cleanLiveError, liveElapsed, liveErrorTextKey, livePresetFor, livePresetLabel, liveUploadMbps } from '../shared/live';
 import { cameraRect } from '../shared/liveLayout';
@@ -523,9 +524,20 @@ function applyLook() {
   // Průhledné okno: hlavní proces ho zapne jen na Windows 11 (Acrylic) - jinak zůstane barevné pozadí.
   if (glass && status?.windowGlass) root.setAttribute('data-window-glass', '1');
   else root.removeAttribute('data-window-glass');
+  // Barvy podle obrazu (světlo kolem přehrávače, pozadí skla podle klipu) a pohyblivé barvy.
+  if (settings.lookFollow) root.setAttribute('data-follow', '1');
+  else root.removeAttribute('data-follow');
+  if (glass && settings.lookMotion) root.setAttribute('data-motion', '1');
+  else root.removeAttribute('data-motion');
   if (!backdropEl) {
     backdropEl = h('div', { class: 'app-backdrop', 'aria-hidden': 'true' });
     document.body.prepend(backdropEl);
+    attachBackdrop(backdropEl);
+  }
+  // Než najedeš myší na nějaký klip, pozadí má barvy nejnovějšího.
+  if (glass && settings.lookFollow && !hasFollowImage()) {
+    const newest = clips.find((c) => c.thumb && !c.deletedAt);
+    if (newest?.thumb) followImage(fileUrl(newest.thumb));
   }
 }
 
@@ -1107,6 +1119,8 @@ function liveChatRecordingPanel() {
       h('button', { class: 'small live-chat-window', disabled: !status.account, onclick: () => void kine.openLiveChat() }, '🗨 ' + t('liveChatWindow')),
       checkbox('liveChatOnTop', t('liveChatOnTop'))
     ),
+    // Podpory od diváků (💛) a jejich čtení nahlas - ikonka 🔊 přímo v okně chatu (web Kine).
+    h('p', { class: 'hint live-chat-tts-hint', style: 'margin:0' }, t('liveChatTtsHint')),
     h(
       'label',
       { style: 'max-width:460px' },
@@ -2066,11 +2080,14 @@ function appearancePanel() {
               h('span', { class: 'faint' }, t('lookStrengthHigh'))
             )
           ),
+          checkbox('lookMotion', t('lookMotion'), t('lookMotionHint')),
           status.windowGlassSupported
             ? checkbox('glassWindow', t('lookWindowGlass'), t('lookWindowGlassHint'))
             : h('p', { class: 'hint', style: 'margin:0' }, t('lookWindowGlassUnsupported'))
         )
       : null,
+    // Světlo kolem přehrávače funguje i v klasickém vzhledu; se sklem se podle klipu mění i pozadí.
+    checkbox('lookFollow', t('lookFollow'), t('lookFollowHint')),
     h(
       'div',
       {},
@@ -3377,7 +3394,11 @@ function renderClips() {
         : null,
       h('span', { class: 'dur' }, formatDuration(clip.durationSeconds))
     );
-    thumb.addEventListener('mouseenter', () => startPreview(thumb, clip));
+    thumb.addEventListener('mouseenter', () => {
+      startPreview(thumb, clip);
+      // Vzhled -> Barvy podle obrazu: pozadí skla podle karty pod myší (až se myš zastaví).
+      if (clip.thumb) followImage(fileUrl(clip.thumb), 260);
+    });
     thumb.addEventListener('mouseleave', () => {
       if (preview?.host === thumb) stopPreview();
     });

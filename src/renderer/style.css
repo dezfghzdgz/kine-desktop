@@ -745,6 +745,39 @@ html[data-look="glass"][data-window-glass="1"] .app-backdrop { background: trans
 html[data-look="glass"][data-window-glass="1"] .app-backdrop::before { opacity: calc(0.16 + var(--glass-k) * 0.24); }
 html[data-look="glass"][data-window-glass="1"] .app-backdrop::after { background: rgba(5, 5, 8, calc(0.42 - var(--glass-k) * 0.3)); }
 
+/* Barvy podle obrazu: náhled klipu, na který se díváš, v malém plátně (už rozmazaný,
+   renderer/ambient.ts) roztažený přes okno - mezi barvami pozadí a ztmavením. */
+.app-backdrop-image {
+  position: absolute; left: -6%; top: -6%; width: 112%; height: 112%; object-fit: cover;
+  opacity: 0; transition: opacity 900ms var(--ease);
+}
+.app-backdrop-image.in { opacity: calc(0.5 + var(--glass-k) * 0.42); }
+html:not([data-follow="1"]) .app-backdrop-image { display: none; }
+html[data-look="glass"][data-window-glass="1"] .app-backdrop-image.in { opacity: calc(0.14 + var(--glass-k) * 0.22); }
+
+/* Pohyblivé barvy: pozadí se pomalu přelévá (jen posun vrstev - žádné překreslování). */
+@keyframes app-backdrop-drift {
+  0% { transform: translate3d(-3%, -2%, 0) scale(1.04) rotate(0deg); }
+  50% { transform: translate3d(3%, 2.5%, 0) scale(1.1) rotate(4deg); }
+  100% { transform: translate3d(-2%, 3%, 0) scale(1.06) rotate(-3deg); }
+}
+@keyframes app-backdrop-breathe {
+  from { transform: scale(1) translate3d(0, 0, 0); }
+  to { transform: scale(1.08) translate3d(1.5%, -1.2%, 0); }
+}
+html[data-look="glass"][data-motion="1"] .app-backdrop::before { animation: app-backdrop-drift 40s ease-in-out infinite alternate; }
+html[data-look="glass"][data-motion="1"] .app-backdrop-image.in { animation: app-backdrop-breathe 24s ease-in-out infinite alternate; }
+@media (prefers-reduced-motion: reduce) {
+  html[data-motion="1"] .app-backdrop::before, html[data-motion="1"] .app-backdrop-image.in { animation: none; }
+}
+
+/* Světlo kolem přehrávače (Barvy podle obrazu): malé plátno za scénou, kreslí se z videa. */
+.player-ambient {
+  position: absolute; z-index: -1; pointer-events: none;
+  opacity: 0; transition: opacity 600ms var(--ease);
+}
+.player-ambient.in { opacity: 1; }
+
 html[data-look="glass"] {
   --panel: rgba(16, 16, 22, calc(0.84 - var(--glass-k) * 0.46));
   --panel-raised: rgba(30, 30, 38, calc(0.86 - var(--glass-k) * 0.42));

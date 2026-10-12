@@ -767,6 +767,11 @@ export const en = {
   lookWindowGlassHint: 'Your desktop and the windows behind the app show through, blurred (Windows 11). When the window isn\'t active, Windows shows it solid.',
   lookWindowGlassUnsupported: 'A see-through window (the desktop showing through) needs Windows 11 - here the colorful background stays.',
   uploadErrorLogin: 'Sign in to upload to Kine (Account).',
+  lookFollow: 'Colors follow the picture',
+  lookFollowHint: 'The clip\'s colors glow around the player. With Glass, the background also changes with the clip you\'re looking at (even on hover).',
+  lookMotion: 'Moving colors',
+  lookMotionHint: 'The background colors slowly drift. If animations are turned off in Windows, they stay still.',
+  liveChatTtsHint: '💛 Tips from viewers show up highlighted in the chat. Use the 🔊 icon in the chat window to have them read aloud (or every new message).',
 } as const;
 
 export type Key = keyof typeof en;

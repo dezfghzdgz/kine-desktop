@@ -2,6 +2,7 @@ import type { Clip } from '../shared/types';
 import type { Key } from '../shared/i18n';
 import { chapterTime, MARKER_LEAD_SECONDS } from '../shared/upload';
 import { clear, errorText, fileUrl, formatBytes, h } from './ui';
+import { followImage, playerAmbient, type PlayerAmbient } from './ambient';
 
 /**
  * Přehrávač klipu jako vrstva přes celé okno (lightbox): mřížka klipů pod
@@ -254,6 +255,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   let broken = false;
   let raf = 0;
   let closed = false;
+  /** Světlo kolem přehrávače (Vzhled -> Barvy podle obrazu); null = vypnuté. */
+  let ambient: PlayerAmbient | null = null;
 
   // ---- prvky ----------------------------------------------------------------------
   // Celou obrazovku nedělá samotné video (to by ukázalo jen obraz), ale celá scéna - se šipkami na další klip.
@@ -385,6 +388,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     renderMarkers();
     layout();
     refreshNav();
+    // Pozadí skla podle klipu (Vzhled -> Barvy podle obrazu).
+    if (clip.thumb) followImage(fileUrl(clip.thumb));
   }
   // Hlasitost jako minule; každá změna se uloží.
   const remembered = loadVolume();
@@ -553,6 +558,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     );
     if (editing) toggleEdit(false);
     editBtn.disabled = true;
+    ambient?.draw();
   };
   let guard: ReturnType<typeof setTimeout> | null = null;
   const loadVideo = (bust: boolean) => {
@@ -1073,6 +1079,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     if (guard) clearTimeout(guard);
     if (confirmTimer) clearTimeout(confirmTimer);
     if (noteTimer) clearTimeout(noteTimer);
+    ambient?.stop();
+    ambient = null;
     try {
       video.pause();
       video.removeAttribute('src');
@@ -1116,5 +1124,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   if (options.startEditing && edit) toggleEdit(true);
   layout();
   refreshNav();
+  ambient = playerAmbient(video, stage, overlay);
+  if (clip.thumb) followImage(fileUrl(clip.thumb));
   return handle;
 }

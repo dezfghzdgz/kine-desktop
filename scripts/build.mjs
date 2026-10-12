@@ -74,6 +74,7 @@ await build({
     liveController: 'src/main/live.ts',
     liveLayout: 'src/shared/liveLayout.ts',
     storage: 'src/shared/storage.ts',
+    siteMove: 'src/main/siteMove.ts',
   },
   outdir: 'dist/esm',
   platform: 'node',

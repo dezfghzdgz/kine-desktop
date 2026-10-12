@@ -752,4 +752,9 @@ export const pl: Record<Key, string> = {
   lookWindowGlassHint: 'Pulpit i okna za aplikacją prześwitują rozmyte (Windows 11). Gdy okno nie jest aktywne, Windows pokazuje je pełne.',
   lookWindowGlassUnsupported: 'Przezroczyste okno (prześwitujący pulpit) wymaga Windows 11 - tutaj zostaje kolorowe tło.',
   uploadErrorLogin: 'Zaloguj się, aby przesłać na Kine (Konto).',
+  lookFollow: 'Kolory według obrazu',
+  lookFollowHint: 'Wokół odtwarzacza świecą kolory klipu. Ze szkłem tło też zmienia się według klipu, który oglądasz (także pod kursorem).',
+  lookMotion: 'Ruchome kolory',
+  lookMotionHint: 'Kolory tła powoli się przelewają. Gdy animacje w Windows są wyłączone, stoją w miejscu.',
+  liveChatTtsHint: '💛 Wsparcia od widzów pojawiają się na czacie wyróżnione. Ikoną 🔊 w oknie czatu włączysz czytanie ich na głos (albo wszystkich nowych wiadomości).',
 };

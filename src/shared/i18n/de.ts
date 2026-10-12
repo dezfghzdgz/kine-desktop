@@ -752,4 +752,9 @@ export const de: Record<Key, string> = {
   lookWindowGlassHint: 'Desktop und Fenster hinter der App scheinen verschwommen durch (Windows 11). Ist das Fenster nicht aktiv, zeigt Windows es deckend.',
   lookWindowGlassUnsupported: 'Ein durchsichtiges Fenster (Desktop scheint durch) braucht Windows 11 - hier bleibt der farbige Hintergrund.',
   uploadErrorLogin: 'Melde dich an, um auf Kine hochzuladen (Konto).',
+  lookFollow: 'Farben folgen dem Bild',
+  lookFollowHint: 'Die Farben des Clips leuchten um den Player. Mit Glas ändert sich auch der Hintergrund mit dem Clip, den du ansiehst (auch beim Darüberfahren).',
+  lookMotion: 'Bewegte Farben',
+  lookMotionHint: 'Die Hintergrundfarben fließen langsam. Sind Animationen in Windows aus, bleiben sie stehen.',
+  liveChatTtsHint: '💛 Unterstützungen von Zuschauern erscheinen hervorgehoben im Chat. Mit dem Symbol 🔊 im Chatfenster lässt du sie vorlesen (oder jede neue Nachricht).',
 };

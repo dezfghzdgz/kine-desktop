@@ -121,6 +121,10 @@ export type Settings = {
   glassStrength: number;
   /** Průhledné okno: na Windows 11 prosvítá rozmazaně plocha a okna za appkou (Acrylic). */
   glassWindow: boolean;
+  /** Barvy podle obrazu: kolem přehrávače svítí barvy klipu, se sklem se podle klipu mění i pozadí. */
+  lookFollow: boolean;
+  /** Pohyblivé barvy: barvy pozadí skla se pomalu přelévají. */
+  lookMotion: boolean;
   /** Kamera ve vysílání (obraz z webkamery v rohu). Klipy kameru nemají. */
   liveCamera: boolean;
   /** Id kamery ('' = první / výchozí). */

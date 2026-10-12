@@ -752,4 +752,9 @@ export const sk: Record<Key, string> = {
   lookWindowGlassHint: 'Za appkou rozmazane presvitá plocha a okná pod ňou (Windows 11). Keď okno nie je aktívne, Windows ho ukáže plné.',
   lookWindowGlassUnsupported: 'Priehľadné okno (presvitajúca plocha) vie Windows 11 - tu zostane farebné pozadie.',
   uploadErrorLogin: 'Na nahratie na Kine sa prihlás (Účet).',
+  lookFollow: 'Farby podľa obrazu',
+  lookFollowHint: 'Okolo prehrávača svietia farby klipu. So sklom sa podľa klipu, na ktorý sa pozeráš (aj pod myšou), mení aj pozadie.',
+  lookMotion: 'Pohyblivé farby',
+  lookMotionHint: 'Farby pozadia sa pomaly prelievajú. Keď má Windows vypnuté animácie, zostanú stáť.',
+  liveChatTtsHint: '💛 Podpory od divákov sa v chate ukážu zvýraznené. Ikonkou 🔊 v okne chatu si ich necháš čítať nahlas (alebo všetky nové správy).',
 };

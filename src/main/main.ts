@@ -58,6 +58,7 @@ import { GameWatcher, type DetectedGame } from './games';
 import { GameEvents } from './gameEvents';
 import { KNOWN_GAMES } from './gamesParse';
 import { Auth } from './auth';
+import { checkSiteMove } from './siteMove';
 import { createKineApi, type KineApi } from './kineApi';
 import { UPLOAD_ERROR_LOGIN, Uploader } from './uploader';
 import { Toast, type ToastHandle, type ToastOptions } from './toast';
@@ -475,6 +476,9 @@ class KineApp {
 
     this.settings.onChange((s, prev) => this.onSettingsChanged(s, prev));
     this.announceVersion();
+    // Kine na nové adrese (vlastní doména)? Appka přejde sama - po startu a pak jednou denně.
+    setTimeout(() => void this.followSiteMove(), 15_000);
+    setInterval(() => void this.followSiteMove(), 24 * 60 * 60 * 1000);
 
     await this.auth.init();
     this.games.start();
@@ -1100,6 +1104,21 @@ class KineApp {
     void this.toast.show(this.t(this.liveMicMuted ? 'toastLiveMicMuted' : 'toastLiveMicOn'), 'ok', { sound: true });
     this.pushStatus();
     return this.liveMicMuted;
+  }
+
+  /**
+   * Kine se přestěhovalo na vlastní doménu: web hlásí novou hlavní adresu
+   * (/api/desktop/config) a appka na ni přejde, když tam běží stejné Kine
+   * (src/main/siteMove.ts). Přihlášení zůstává; okno Kine se načte znovu.
+   */
+  private async followSiteMove(): Promise<void> {
+    // Testy (e2e) mluví s napodobeným webem - adresa se jim nemění.
+    if (process.env.KINE_TEST) return;
+    const current = this.settings.get().siteUrl;
+    const next = await checkSiteMove(current).catch(() => null);
+    if (!next || next === this.settings.get().siteUrl) return;
+    log(`Kine má novou adresu: ${current} -> ${next}`);
+    this.settings.update({ siteUrl: next });
   }
 
   /** Stránka vysílání na Kine (diváci, chat) - v Kine do PC v okně, v Klipovači v prohlížeči. */

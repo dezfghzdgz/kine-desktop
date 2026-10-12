@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { app } from 'electron';
-import type { Variant } from '../shared/types';
+import type { UpdateProgress, Variant } from '../shared/types';
 import { isNewerVersion, parseUpdateYml, type FeedConfig } from './updaterParse';
 import { log } from './log';
 
@@ -57,6 +57,36 @@ let pendingVersion: string | null = null;
 let downloading = false;
 let lastCheck: UpdateCheck | null = null;
 
+let progress: UpdateProgress = { phase: 'idle', version: null, percent: null, bytesPerSecond: null, transferred: null, total: null, error: null };
+const listeners = new Set<(p: UpdateProgress) => void>();
+
+function setProgress(patch: Partial<UpdateProgress>): void {
+  progress = { ...progress, ...patch };
+  for (const fn of listeners) {
+    try {
+      fn(progress);
+    } catch {
+      // posluchač nesmí shodit aktualizace
+    }
+  }
+}
+
+export function updateProgress(): UpdateProgress {
+  return progress;
+}
+
+/** Jen samočinná zkouška (KINE_TEST): průběh aktualizace pro kontrolu okna (při vývoji se nic nestahuje). */
+export function simulateUpdateProgress(patch: Partial<UpdateProgress>): void {
+  if (!process.env.KINE_TEST) return;
+  setProgress(patch);
+}
+
+/** Při každé změně průběhu (okno se překreslí). */
+export function onUpdateProgress(fn: (p: UpdateProgress) => void): () => void {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+
 /** Poskytovatel z app-update.yml (zapisuje electron-builder), nebo null. */
 export function primaryFeed(): FeedConfig | null {
   try {
@@ -88,13 +118,22 @@ export function initUpdater(d: Deps): void {
     // Stahování řídíme sami (ne během hry), instalace až po ukončení appky.
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.on('download-progress', (p) => {
+      // Do okna jen po celých procentech (okno se nepřekresluje při každém kousku).
+      const percent = Math.max(0, Math.min(100, Math.floor(p.percent ?? 0)));
+      if (progress.phase === 'downloading' && progress.percent === percent) return;
+      setProgress({ phase: 'downloading', percent, bytesPerSecond: p.bytesPerSecond ?? null, transferred: p.transferred ?? null, total: p.total ?? null, error: null });
+    });
     autoUpdater.on('update-downloaded', (info) => {
       downloading = false;
-      log(`aktualizace ${info.version} stažená - nainstaluje se po ukončení appky`);
+      log(`aktualizace ${info.version} stažená - nainstaluje se po ukončení appky (nebo hned tlačítkem Aktualizovat)`);
+      setProgress({ phase: 'ready', version: info.version, percent: 100, error: null });
     });
     autoUpdater.on('error', (e) => {
       downloading = false;
       log(`aktualizace: ${e.message}`);
+      // Chyby kontroly (jeden zdroj nejde, zkusí se další) hlásí výsledek kontroly; sem jen chyba stahování.
+      if (progress.phase === 'downloading') setProgress({ phase: 'error', error: shortError(e) });
     });
     updater = autoUpdater;
     // Kontrola po startu a pak každých N hodin (N podle nastavení výkonu, základ 6).
@@ -121,15 +160,52 @@ export function onGameEnded(): void {
 }
 
 async function startDownload(): Promise<void> {
-  if (!updater || downloading) return;
+  if (!updater || downloading || progress.phase === 'ready') return;
   downloading = true;
+  setProgress({ phase: 'downloading', version: pendingVersion ?? progress.version, percent: 0, transferred: 0, error: null });
   try {
     await updater.downloadUpdate();
     pendingVersion = null;
   } catch (e) {
     downloading = false;
     log(`stažení aktualizace: ${(e as Error).message}`);
+    setProgress({ phase: 'error', error: shortError(e) });
   }
+}
+
+/** "Stáhnout teď" i během hry (hráč si o to řekl sám). */
+export function downloadUpdateNow(): void {
+  if (pendingVersion && updater && !downloading) void startDownload();
+}
+
+/**
+ * "Aktualizovat": stažená verze se nainstaluje hned a appka se sama znovu
+ * spustí. `prepare` = co appka musí dodělat před koncem (uložit nahrávku,
+ * ukončit vysílání a snímání).
+ */
+export async function installUpdateNow(prepare: () => Promise<void>): Promise<'started' | 'failed' | 'not-ready'> {
+  if (!updater || progress.phase !== 'ready') return 'not-ready';
+  log(`aktualizace ${progress.version}: instaluje se hned (restart)`);
+  await prepare().catch(() => undefined);
+  // Instalátor chybí / nejde spustit: electron-updater to ohlásí hned (událost error) a appku nezavře.
+  let failed: string | null = null;
+  const onError = (e: Error) => {
+    failed = shortError(e);
+  };
+  updater.once('error', onError);
+  try {
+    // Tiše (bez průvodce instalátoru) a po instalaci appku zase spustit.
+    updater.quitAndInstall(true, true);
+  } catch (e) {
+    failed = shortError(e);
+  }
+  updater.removeListener('error', onError);
+  if (failed) {
+    log(`instalace aktualizace: ${failed}`);
+    setProgress({ phase: 'error', error: failed });
+    return 'failed';
+  }
+  return 'started';
 }
 
 export function lastUpdateCheck(): UpdateCheck | null {
@@ -138,6 +214,9 @@ export function lastUpdateCheck(): UpdateCheck | null {
 
 export async function checkForUpdates(): Promise<UpdateCheck> {
   if (!updater || !deps) return { status: 'disabled' };
+  // Už stažená verze: nic znovu nehledat, jen ji nabídnout.
+  if (progress.phase === 'ready') return finish({ status: 'available', version: progress.version ?? undefined });
+  if (progress.phase !== 'downloading') setProgress({ phase: 'checking', error: null });
   const current = app.getVersion();
   const primary = primaryFeed();
   const feeds: { label: string; feed: FeedConfig | null }[] = [{ label: describeFeed(primary), feed: null }];
@@ -153,8 +232,10 @@ export async function checkForUpdates(): Promise<UpdateCheck> {
         pendingVersion = version;
         if (deps.gameRunning()) {
           log(`aktualizace ${version} je venku - stáhne se po hře`);
+          setProgress({ phase: 'waiting-game', version });
           return finish({ status: 'available', version, source: label, waitingForGame: true });
         }
+        setProgress({ version });
         void startDownload();
         return finish({ status: 'available', version, source: label });
       }
@@ -192,6 +273,8 @@ export async function checkForUpdates(): Promise<UpdateCheck> {
 
 function finish(result: UpdateCheck): UpdateCheck {
   lastCheck = result;
+  // Kontrola doběhla (nejnovější verze / ruční stažení / chyba) - "hledám" pryč; stahování a připravenou verzi to nemění.
+  if (progress.phase === 'checking') setProgress({ phase: 'idle' });
   return result;
 }
 

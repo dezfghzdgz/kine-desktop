@@ -6,6 +6,9 @@ import type { ClipLibrary } from './clips';
 import { KineApiError, type KineApi } from './kineApi';
 import { TusAborted, tusUpload } from './tus';
 
+/** Chyba nahrání "nejsi přihlášený" (server 401) - okno ji ukáže přeloženou. */
+export const UPLOAD_ERROR_LOGIN = 'login-required';
+
 /**
  * Fronta nahrávání klipů na Kine.
  *
@@ -248,7 +251,9 @@ export class Uploader {
         this.deps.library.setUpload(clip.id, { state: 'paused', percent, reason: this.deps.blocked() ?? 'offline', ...carry });
         this.queue.unshift(request);
       } else {
-        const message = e instanceof Error ? e.message : String(e);
+        // Nepřihlášený / prošlé přihlášení: místo české hlášky serveru kód, okno a okénko ho přeloží.
+        const status = (e as { status?: unknown })?.status;
+        const message = status === 401 ? UPLOAD_ERROR_LOGIN : e instanceof Error ? e.message : String(e);
         this.release(clip);
         this.deps.log(`nahrání selhalo: ${clip.file}: ${message}`);
         this.deps.library.setUpload(clip.id, { state: 'error', message });

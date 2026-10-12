@@ -396,6 +396,41 @@ kbd {
   .player-nav.next { right: 8px; }
 }
 
+/* Celá obrazovka (F, dvojklik, ⛶): celá scéna - video, šipky na předchozí / další klip,
+   nahoře název a pozice. Ovládání se po chvíli bez pohybu myši schová. */
+.player-stage .stage-nav, .player-stage .stage-top { display: none; }
+.player-stage .stage-fullscreen {
+  position: absolute; top: 10px; right: 10px; z-index: 4; width: 36px; height: 36px; min-height: 0; padding: 0;
+  display: grid; place-items: center; border-radius: var(--radius-md); font-size: 17px; color: #fff;
+  background: rgba(0, 0, 0, 0.5); background-image: none; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+  opacity: 0; transition: opacity var(--dur-2) var(--ease);
+}
+.player-stage:hover .stage-fullscreen, .player-stage .stage-fullscreen:focus-visible { opacity: 1; }
+.player-stage.fullscreen { width: 100vw; height: 100vh; background: #000; }
+.player-stage.fullscreen .player-video { width: 100%; height: 100%; max-height: none; object-fit: contain; }
+.player-stage.fullscreen .stage-fullscreen { opacity: 1; top: 16px; right: 16px; }
+.player-stage.fullscreen .stage-nav {
+  display: grid; place-items: center; position: absolute; top: 50%; z-index: 4; width: 64px; height: 64px; min-height: 0;
+  margin-top: -32px; padding: 0 0 5px; border-radius: 50%; font-size: 44px; line-height: 1; color: #fff;
+  background: rgba(10, 10, 14, 0.55); background-image: none; backdrop-filter: blur(10px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), inset 0 0 0 1px rgba(255, 255, 255, 0.16), 0 10px 30px rgba(0, 0, 0, 0.5);
+  transition: opacity var(--dur-2) var(--ease), background-color var(--dur-2) var(--ease), color var(--dur-2) var(--ease);
+}
+.player-stage.fullscreen .stage-nav:hover:not(:disabled) { color: var(--brand); background-color: rgba(10, 10, 14, 0.75); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.6), 0 10px 30px rgba(0, 0, 0, 0.5); }
+.player-stage.fullscreen .stage-nav:disabled { opacity: 0.2; }
+.player-stage.fullscreen .stage-nav.prev { left: 28px; }
+.player-stage.fullscreen .stage-nav.next { right: 28px; }
+.player-stage.fullscreen .stage-top {
+  display: flex; align-items: baseline; gap: 14px; position: absolute; top: 0; left: 0; right: 0; z-index: 3;
+  padding: 18px 76px 40px 24px; color: #fff; font-size: var(--fs-lg); font-weight: 600; pointer-events: none;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.65), rgba(0, 0, 0, 0));
+  transition: opacity var(--dur-2) var(--ease);
+}
+.player-stage.fullscreen .stage-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.player-stage.fullscreen .stage-pos { flex: none; font-size: var(--fs-sm); font-weight: 500; color: rgba(255, 255, 255, 0.7); font-variant-numeric: tabular-nums; }
+.player-stage.fullscreen.idle { cursor: none; }
+.player-stage.fullscreen.idle .stage-nav, .player-stage.fullscreen.idle .stage-top, .player-stage.fullscreen.idle .stage-fullscreen { opacity: 0; pointer-events: none; }
+
 /* Úpravy: časová osa s úchyty (jako v Medalu), hodnoty, akce. */
 .trim { padding: 12px 16px 14px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
 .tl { position: relative; height: 44px; user-select: none; touch-action: none; cursor: pointer; }
@@ -624,3 +659,137 @@ textarea.live-description { width: 100%; resize: vertical; min-height: 64px; }
 
 /* Kolik appka bere (Nastavení -> Výkon) */
 .usage-now b { font-variant-numeric: tabular-nums; }
+
+/* Zvuk hry nejde otevřít: rada a "Zkusit znovu". */
+.audio-fix {
+  border: 1px solid var(--warn, #e0a03a);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: rgba(224, 160, 58, 0.06);
+}
+
+.audio-fix-steps {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-dim, #b5b5bd);
+}
+
+.audio-fix-steps li + li {
+  margin-top: 4px;
+}
+
+/* Aktualizace: průběh stahování a "Aktualizovat teď" (O appce), odkaz v postranním panelu. */
+.update-progress { padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: rgba(var(--brand-rgb), 0.06); }
+.update-progress.ready { border-color: rgba(var(--brand-rgb), 0.55); }
+.update-progress .update-bar { height: 8px; border-radius: 4px; }
+.update-progress .update-bar > span { border-radius: 4px; }
+.update-progress .update-now { min-width: 190px; }
+.side-update { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 0; color: var(--brand); cursor: pointer; font: inherit; }
+.side-update:hover { text-decoration: underline; }
+.side-update.ready { font-weight: 600; }
+
+/* Skončené vysílání: záznam na Kine (záložka Živě). */
+.live-ended { border-color: rgba(var(--brand-rgb), 0.45); background: linear-gradient(180deg, rgba(var(--brand-rgb), 0.08), transparent 70%); }
+.live-ended.published { border-color: rgba(var(--brand-rgb), 0.3); }
+.live-ended .live-ended-close { padding: 2px 8px; }
+.live-ended .live-ended-publish { min-width: 220px; }
+
+/* =====================================================================
+   VZHLED: SKLO (Nastavení -> Vzhled)
+   =====================================================================
+   Průhledné plochy nad barevným rozmazaným pozadím (jako upravený
+   Spotify). Pozadí je jedna vrstva .app-backdrop za celým oknem; plochy
+   nad ní jsou jen průsvitné - nic se nerozmazává za běhu, appka nebrzdí
+   hru. --glass-k = síla skla (0-1). Průhledné okno (Windows 11): okno má
+   Acrylic od Windows a pozadí stránky jen lehký barevný nádech.
+   ===================================================================== */
+
+:root {
+  --glass-k: 0.55;
+  --kine-backdrop:
+    radial-gradient(70% 60% at 12% 8%, rgba(var(--brand-rgb), 0.55), transparent 72%),
+    radial-gradient(60% 55% at 88% 22%, rgba(var(--brand-rgb), 0.3), transparent 70%),
+    radial-gradient(85% 70% at 50% 108%, rgba(88, 52, 190, 0.4), transparent 72%);
+}
+html[data-backdrop="night"] {
+  --kine-backdrop: radial-gradient(70% 60% at 15% 10%, rgba(37, 99, 235, 0.78), transparent 72%), radial-gradient(60% 55% at 86% 18%, rgba(124, 58, 237, 0.62), transparent 70%), radial-gradient(85% 70% at 50% 108%, rgba(14, 165, 233, 0.5), transparent 72%);
+}
+html[data-backdrop="sunset"] {
+  --kine-backdrop: radial-gradient(70% 60% at 14% 12%, rgba(239, 68, 68, 0.78), transparent 72%), radial-gradient(60% 55% at 86% 16%, rgba(162, 28, 175, 0.6), transparent 70%), radial-gradient(85% 70% at 55% 108%, rgba(249, 115, 22, 0.6), transparent 72%);
+}
+html[data-backdrop="forest"] {
+  --kine-backdrop: radial-gradient(70% 60% at 14% 10%, rgba(22, 163, 74, 0.7), transparent 72%), radial-gradient(60% 55% at 86% 20%, rgba(13, 148, 136, 0.6), transparent 70%), radial-gradient(85% 70% at 50% 108%, rgba(132, 204, 22, 0.42), transparent 72%);
+}
+html[data-backdrop="ocean"] {
+  --kine-backdrop: radial-gradient(70% 60% at 14% 10%, rgba(6, 182, 212, 0.72), transparent 72%), radial-gradient(60% 55% at 86% 18%, rgba(37, 99, 235, 0.62), transparent 70%), radial-gradient(85% 70% at 50% 108%, rgba(20, 184, 166, 0.5), transparent 72%);
+}
+html[data-backdrop="neon"] {
+  --kine-backdrop: radial-gradient(70% 60% at 14% 10%, rgba(236, 72, 153, 0.75), transparent 72%), radial-gradient(60% 55% at 86% 18%, rgba(34, 211, 238, 0.6), transparent 70%), radial-gradient(85% 70% at 50% 108%, rgba(168, 85, 247, 0.6), transparent 72%);
+}
+
+.app-backdrop { display: none; }
+html[data-look="glass"] .app-backdrop {
+  display: block; position: fixed; inset: 0; z-index: -1; pointer-events: none; overflow: hidden; background: var(--bg);
+}
+html[data-look="glass"] .app-backdrop::before {
+  content: ''; position: absolute; inset: -12%; background: var(--kine-backdrop); opacity: calc(0.6 + var(--glass-k) * 0.4);
+}
+html[data-look="glass"] .app-backdrop::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(5, 5, 8, calc(0.4 - var(--glass-k) * 0.22)) 0%, rgba(5, 5, 8, calc(0.62 - var(--glass-k) * 0.24)) 100%);
+}
+/* Průhledné okno: plocha za oknem prosvítá (Acrylic od Windows), barvy jen jako lehký nádech. */
+html[data-look="glass"][data-window-glass="1"] .app-backdrop { background: transparent; }
+html[data-look="glass"][data-window-glass="1"] .app-backdrop::before { opacity: calc(0.16 + var(--glass-k) * 0.24); }
+html[data-look="glass"][data-window-glass="1"] .app-backdrop::after { background: rgba(5, 5, 8, calc(0.42 - var(--glass-k) * 0.3)); }
+
+html[data-look="glass"] {
+  --panel: rgba(16, 16, 22, calc(0.84 - var(--glass-k) * 0.46));
+  --panel-raised: rgba(30, 30, 38, calc(0.86 - var(--glass-k) * 0.42));
+  --border: rgba(255, 255, 255, calc(0.07 + var(--glass-k) * 0.05));
+}
+html[data-look="glass"] body { background: transparent; }
+html[data-look="glass"] .side { background-color: var(--panel); box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.04); }
+html[data-look="glass"] .panel { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 10px 30px rgba(0, 0, 0, 0.18); }
+html[data-look="glass"] .kine-host { background: transparent; }
+html[data-look="glass"] ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- Panel Vzhled ---------- */
+.look-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.look-option {
+  display: flex; flex-direction: column; align-items: stretch; gap: 6px; padding: 10px; text-align: left; min-height: 0;
+  border-radius: var(--radius-md); background: var(--panel-raised); background-image: none; box-shadow: inset 0 0 0 1px var(--border); font-size: var(--fs-sm);
+}
+.look-option.active { box-shadow: inset 0 0 0 2px var(--brand), 0 0 0 3px var(--brand-soft); }
+.look-option b { font-weight: 600; }
+.look-preview { position: relative; height: 62px; border-radius: var(--radius-sm); overflow: hidden; background: #0b0b0e; display: block; }
+.look-preview.glass {
+  background: radial-gradient(80% 90% at 15% 15%, rgba(var(--brand-rgb), 0.85), transparent 70%), radial-gradient(70% 80% at 90% 30%, rgba(124, 58, 237, 0.7), transparent 70%), radial-gradient(90% 80% at 50% 110%, rgba(14, 165, 233, 0.7), transparent 72%), #0b0b0e;
+}
+.look-preview i { position: absolute; border-radius: 6px; background: #17171c; border: 1px solid rgba(255, 255, 255, 0.06); }
+.look-preview.glass i { background: rgba(16, 16, 22, 0.42); border-color: rgba(255, 255, 255, 0.14); }
+.look-preview i:nth-child(1) { left: 6px; top: 6px; bottom: 6px; width: 22%; }
+.look-preview i:nth-child(2) { left: calc(22% + 12px); right: 6px; top: 6px; height: 38%; }
+.look-preview i:nth-child(3) { left: calc(22% + 12px); right: 6px; bottom: 6px; height: 34%; }
+.look-backdrops { display: flex; flex-wrap: wrap; gap: 8px; }
+.look-chip {
+  display: inline-flex; align-items: center; gap: 8px; min-height: 0; padding: 5px 12px 5px 5px; border-radius: var(--radius-pill);
+  background: var(--panel-raised); background-image: none; box-shadow: inset 0 0 0 1px var(--border); font-size: var(--fs-sm);
+}
+.look-chip.active { box-shadow: inset 0 0 0 2px var(--brand); }
+.look-swatch { width: 22px; height: 22px; border-radius: 50%; flex: none; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2); }
+.look-swatch.brand { background: radial-gradient(circle at 30% 30%, rgba(var(--brand-rgb), 1), rgba(var(--brand-rgb), 0.35)); }
+.look-swatch.night { background: linear-gradient(135deg, #2563eb, #7c3aed 55%, #0ea5e9); }
+.look-swatch.sunset { background: linear-gradient(135deg, #ef4444, #a21caf 55%, #f97316); }
+.look-swatch.forest { background: linear-gradient(135deg, #16a34a, #0d9488 55%, #84cc16); }
+.look-swatch.ocean { background: linear-gradient(135deg, #06b6d4, #2563eb 55%, #14b8a6); }
+.look-swatch.neon { background: linear-gradient(135deg, #ec4899, #22d3ee 55%, #a855f7); }
+.look-range { display: flex; flex-direction: column; gap: 6px; }
+.look-range input[type="range"] { accent-color: var(--brand); padding: 0; box-shadow: none; background: transparent; min-height: 0; }
+.color-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.color-row .swatch { width: 26px; height: 26px; min-height: 0; padding: 0; border-radius: 50%; background-image: none; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18); }
+.color-row .swatch.active { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--text); }
+.color-row .swatch.custom { display: grid; place-items: center; position: relative; overflow: hidden; cursor: pointer; background: transparent; border: 1px dashed var(--border); color: var(--text-faint); font-size: 14px; }
+.color-row .swatch.custom .color-input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; min-height: 0; padding: 0; }

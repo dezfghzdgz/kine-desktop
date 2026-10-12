@@ -256,13 +256,22 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   let closed = false;
 
   // ---- prvky ----------------------------------------------------------------------
-  const video = h('video', { class: 'player-video', controls: true, autoplay: true, preload: 'auto' }) as HTMLVideoElement;
+  // Celou obrazovku nedělá samotné video (to by ukázalo jen obraz), ale celá scéna - se šipkami na další klip.
+  const video = h('video', { class: 'player-video', controls: true, autoplay: true, preload: 'auto', controlslist: 'nofullscreen' }) as HTMLVideoElement;
   // Stínování mimo výřez 9:16 (jen v úpravách s formátem na výšku).
   const shadeLeft = h('div', { class: 'crop-shade hidden' });
   const shadeRight = h('div', { class: 'crop-shade hidden' });
   // Náhled textu (v úpravách) - přesně ten obrázek, který se pak položí do videa.
   const textLayer = h('div', { class: 'text-preview hidden' });
-  const stage = h('div', { class: 'player-stage' }, video, shadeLeft, shadeRight, textLayer);
+  // Přes celou obrazovku: šipky po stranách (předchozí / další klip), nahoře název, pozice a zavření.
+  const stagePrev = h('button', { class: 'stage-nav prev', title: `${t('playerPrev')} (↑)`, 'aria-label': t('playerPrev'), onclick: () => go(-1) }, '‹');
+  const stageNext = h('button', { class: 'stage-nav next', title: `${t('playerNext')} (↓)`, 'aria-label': t('playerNext'), onclick: () => go(1) }, '›');
+  const stageTitle = h('span', { class: 'stage-title' });
+  const stagePos = h('span', { class: 'stage-pos' });
+  const fullscreenBtn = h('button', { class: 'stage-fullscreen', title: `${t('playerFullscreen')} (F)`, 'aria-label': t('playerFullscreen'), onclick: () => toggleFullscreen() }, '⛶');
+  const stageTop = h('div', { class: 'stage-top' }, stageTitle, stagePos);
+  const stageChrome = [stagePrev, stageNext, stageTop, fullscreenBtn];
+  const stage = h('div', { class: 'player-stage' }, video, shadeLeft, shadeRight, textLayer, ...stageChrome);
   /** Momenty nahrávky (uložené klipy během hraní) - skok kousek před ně. */
   const markersRow = h('div', { class: 'player-markers hidden' });
   const titleEl = h('div', { class: 'title' });
@@ -306,11 +315,53 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     prevBtn.classList.toggle('hidden', !show);
     nextBtn.classList.toggle('hidden', !show);
     positionEl.classList.toggle('hidden', !show);
+    stagePrev.classList.toggle('hidden', !show);
+    stageNext.classList.toggle('hidden', !show);
+    stageTitle.textContent = clip.title;
+    stagePos.textContent = show && n ? `${n.index + 1} / ${n.total}` : '';
     if (!n || !show) return;
     prevBtn.disabled = !n.prev;
     nextBtn.disabled = !n.next;
+    stagePrev.disabled = !n.prev;
+    stageNext.disabled = !n.next;
     positionEl.textContent = `${n.index + 1} / ${n.total}`;
   }
+
+  // ---- celá obrazovka -------------------------------------------------------------------
+  /** Celá obrazovka = scéna (video + šipky), ne holé video - ať jde i tam přeskakovat mezi klipy. */
+  function toggleFullscreen() {
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
+    else void stage.requestFullscreen().catch(() => undefined);
+  }
+  // Ovládání v celé obrazovce se po chvíli bez pohybu myši schová (jako v přehrávačích).
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  const wake = () => {
+    stage.classList.remove('idle');
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      if (document.fullscreenElement === stage) stage.classList.add('idle');
+    }, 2500);
+  };
+  stage.addEventListener('mousemove', wake);
+  const onFullscreenChange = () => {
+    // Kdyby se přece jen dostalo přes celou obrazovku holé video (dvojklik ve starším
+    // Chromiu), vymění se za scénu - jinak by tam šipky nebyly.
+    if (document.fullscreenElement === video) {
+      void document.exitFullscreen().then(() => stage.requestFullscreen()).catch(() => undefined);
+      return;
+    }
+    const full = document.fullscreenElement === stage;
+    stage.classList.toggle('fullscreen', full);
+    fullscreenBtn.title = `${full ? t('playerExitFullscreen') : t('playerFullscreen')} (F)`;
+    if (full) wake();
+    else stage.classList.remove('idle');
+    onResize();
+  };
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+  video.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    toggleFullscreen();
+  });
   function go(direction: -1 | 1) {
     const n = options.neighbors?.(clip.id);
     const target = direction < 0 ? n?.prev : n?.next;
@@ -496,7 +547,9 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
         { class: 'player-error' },
         h('p', {}, t('playerError', { message: why })),
         h('button', { class: 'small', onclick: () => options.onOpenExternal(clip) }, t('playerOpenExternal'))
-      )
+      ),
+      // I u rozbitého klipu jde přejít na další (i přes celou obrazovku).
+      ...stageChrome
     );
     if (editing) toggleEdit(false);
     editBtn.disabled = true;
@@ -506,7 +559,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     broken = false;
     editBtn.disabled = false;
     clear(stage);
-    stage.append(video, shadeLeft, shadeRight, textLayer);
+    stage.append(video, shadeLeft, shadeRight, textLayer, ...stageChrome);
     if (guard) clearTimeout(guard);
     video.src = fileUrl(clip.file) + (bust ? `?v=${Date.now()}` : '');
     video.load();
@@ -996,8 +1049,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       video.muted = !video.muted;
     } else if (e.key === 'f' || e.key === 'F') {
       e.preventDefault();
-      if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
-      else void video.requestFullscreen().catch(() => undefined);
+      toggleFullscreen();
     } else if (editing && (e.key === 'i' || e.key === 'I')) {
       e.preventDefault();
       setStart(video.currentTime);
@@ -1013,6 +1065,9 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     if (closed) return;
     closed = true;
     document.removeEventListener('keydown', onKey, true);
+    document.removeEventListener('fullscreenchange', onFullscreenChange);
+    if (idleTimer) clearTimeout(idleTimer);
+    if (document.fullscreenElement === stage) void document.exitFullscreen().catch(() => undefined);
     window.removeEventListener('resize', onResize);
     if (raf) cancelAnimationFrame(raf);
     if (guard) clearTimeout(guard);

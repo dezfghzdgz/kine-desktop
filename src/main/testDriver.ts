@@ -6,6 +6,7 @@ import { BrowserWindow, app, clipboard, nativeImage } from 'electron';
 import { log } from './log';
 import { trayIcon } from './icon';
 import { probe, runFfmpeg, spawnFfmpeg } from './ffmpeg';
+import { simulateUpdateProgress } from './updater';
 
 /**
  * Samočinná zkouška celé appky bez člověka (KINE_TEST=1).
@@ -498,6 +499,27 @@ export async function runTestDriver(kine: {
         const secondClip = kine.library.list().find((c) => c.id === shown[1]);
         result.playerNav = first.next && first.prevDisabled && first.pos === `1 / ${shown.length}` && second.pos === `2 / ${shown.length}` && second.overlay === 1 && !!secondClip && second.title === secondClip.title && back === `1 / ${shown.length}`;
         result.playerNavDebug = { first, second, back };
+        // Celá obrazovka (⛶ / F / dvojklik): celá scéna se šipkami na další klip, ne holé video.
+        await win.webContents.executeJavaScript(`(() => { const b = document.querySelector('.player-stage .stage-fullscreen'); if (b) b.click(); return !!b; })()`, true);
+        let fsOn = false;
+        for (let i = 0; i < 20 && !fsOn; i++) {
+          await sleep(150);
+          fsOn = await win.webContents.executeJavaScript(`!!document.fullscreenElement && document.fullscreenElement.classList.contains('player-stage') && document.fullscreenElement.classList.contains('fullscreen')`);
+        }
+        const fsFirst = await win.webContents.executeJavaScript(
+          `(() => { const st = document.querySelector('.player-stage.fullscreen'); const n = st && st.querySelector('.stage-nav.next'); const r = n ? n.getBoundingClientRect() : null; return { next: !!n && !n.disabled && getComputedStyle(n).display !== 'none' && !!r && r.right > window.innerWidth - 120, pos: st ? st.querySelector('.stage-pos')?.textContent : null, title: st ? st.querySelector('.stage-title')?.textContent : null }; })()`
+        );
+        await shot(win, 'settings-clips-player-fullscreen');
+        await win.webContents.executeJavaScript(`(() => { const n = document.querySelector('.player-stage.fullscreen .stage-nav.next'); if (n) n.click(); return !!n; })()`, true);
+        await sleep(600);
+        const fsSecond = await win.webContents.executeJavaScript(
+          `({ still: !!document.fullscreenElement, pos: document.querySelector('.player-stage.fullscreen .stage-pos')?.textContent, video: !!document.querySelector('.player-stage.fullscreen video') })`
+        );
+        await win.webContents.executeJavaScript(`document.exitFullscreen ? document.exitFullscreen().then(() => true).catch(() => false) : false`, true);
+        await sleep(500);
+        const fsOff = await win.webContents.executeJavaScript(`!document.fullscreenElement && !document.querySelector('.player-stage.fullscreen')`);
+        result.playerFullscreen = { fsOn, fsFirst, fsSecond, fsOff };
+        result.playerFullscreenOk = fsOn && fsFirst.next && fsFirst.pos === `1 / ${shown.length}` && fsSecond.still && fsSecond.pos === `2 / ${shown.length}` && fsSecond.video && fsOff;
         await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
         await sleep(300);
       }
@@ -874,6 +896,9 @@ export async function runTestDriver(kine: {
         let brbOff = false;
         let micMuted = false;
         let stoppingUi = false;
+        let endedCard = false;
+        let endedPublished = false;
+        let endedClosed = false;
         // Kamera (falešná kamera Chromia při KINE_TEST_FAKE_AUDIO) vpravo dole, velká, obdélník.
         const withCamera = !!process.env.KINE_TEST_FAKE_AUDIO;
         kine.settings.update({ liveCamera: withCamera, liveCameraPosition: 'bottom-right', liveCameraSize: 'large', liveCameraShape: 'rect', liveCameraMirror: false, liveBrbText: 'E2E BRB' });
@@ -911,6 +936,21 @@ export async function runTestDriver(kine: {
           await sleep(100);
           stoppingUi = await liveWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-live'); return !!b && b.disabled; })()`);
           await (kine as any).stopLive();
+          // Po konci: karta záznamu v záložce Živě (zveřejnit na Kine); bez přihlášení tlačítko nejde.
+          kine.openSettings('live');
+          await sleep(700);
+          const card = (kine as any).live.current().ended;
+          endedCard = !!card && card.title === 'E2E live' && /^\d+:\d\d$/.test(card.duration) &&
+            (await liveWin.webContents.executeJavaScript(`(() => { const c = document.querySelector('.live-ended'); const b = c && c.querySelector('.live-ended-publish'); const t = c && c.querySelector('input.live-ended-title'); return !!c && !!b && b.disabled === true && !!t && t.value === 'E2E live' && !!document.querySelector('.live-chat-panel .live-after-stream'); })()`));
+          await shot(liveWin, 'settings-live-ended');
+          // Zveřejněný záznam: odkaz "Otevřít záznam" místo tlačítka.
+          (kine as any).live.set({ ended: { ...card, video: { id: 'e2e', url: 'https://kine.test/watch/e2e', status: 'processing', auto: true } } });
+          await sleep(500);
+          endedPublished = await liveWin.webContents.executeJavaScript(`!!document.querySelector('.live-ended.published .live-ended-open') && !document.querySelector('.live-ended-publish')`);
+          await shot(liveWin, 'settings-live-ended-published');
+          (kine as any).live.dismissEnded();
+          await sleep(400);
+          endedClosed = (kine as any).live.current().ended === null && (await liveWin.webContents.executeJavaScript(`!document.querySelector('.live-ended')`));
         } else {
           await (kine as any).stopLive();
         }
@@ -934,12 +974,13 @@ export async function runTestDriver(kine: {
         // Kamera "large" vpravo dole = asi 21x12 px v rohu 64x36; falešná kamera Chromia je pestrá (ne černá).
         const camFrames = frames.filter((f) => !brbFrames.includes(f) && Math.abs(lum(f, 44, 23, 62, 34) - lum(f, 2, 2, 20, 13)) > 20);
         result.live = {
-          opened, liveState, sideLive, clipDuringLive, titleKept, brbOn, brbOff, micMuted, stoppingUi, withCamera,
+          opened, liveState, sideLive, clipDuringLive, titleKept, brbOn, brbOff, micMuted, stoppingUi, withCamera, endedCard, endedPublished, endedClosed,
           frames: frames.length, brbFrames: brbFrames.length, camFrames: camFrames.length, cameraError: (kine as any).live.current().cameraError,
           after: (kine as any).live.current().state, info, listenerLog: listenerLog.slice(-300),
         };
         result.liveOk =
           opened && liveState === 'live' && !!sideLive && clipDuringLive && titleKept && brbOn && brbOff && micMuted && stoppingUi && (kine as any).live.current().state === 'idle' &&
+          endedCard && endedPublished && endedClosed &&
           !!info && (info.durationSeconds ?? 0) >= 8 && (info.height ?? 0) > 0 && (info.height ?? 0) <= 720 && info.hasAudio &&
           brbFrames.length >= 2 && (!withCamera || camFrames.length >= 2);
         kine.settings.update({ liveCamera: false });
@@ -1131,6 +1172,52 @@ export async function runTestDriver(kine: {
         shown = await aboutWin.webContents.executeJavaScript(`!!document.querySelector('.update-status')`);
       }
       result.updateUi = shown;
+      // Stahování aktualizace: průběh (procenta, MB, rychlost), pak "Aktualizovat teď"; v postranním panelu odkaz.
+      simulateUpdateProgress({ phase: 'downloading', version: '9.9.9', percent: 42, transferred: 35 * 1048576, total: 84 * 1048576, bytesPerSecond: 4.2 * 1048576, error: null });
+      await sleep(700);
+      const downloading = await aboutWin.webContents.executeJavaScript(
+        `(() => { const b = document.querySelector('.update-progress.downloading'); const bar = b && b.querySelector('.update-bar > span'); return !!b && !!bar && bar.style.width === '42%' && /42/.test(b.textContent) && /84/.test(b.textContent) && !!document.querySelector('.side-update'); })()`
+      );
+      await shot(aboutWin, 'settings-about-update-downloading');
+      simulateUpdateProgress({ phase: 'ready', version: '9.9.9', percent: 100 });
+      await sleep(700);
+      const ready = await aboutWin.webContents.executeJavaScript(
+        `(() => { const b = document.querySelector('.update-progress.ready .update-now'); return !!b && !b.disabled && !!document.querySelector('.side-update.ready') && /9\\.9\\.9/.test(document.querySelector('.update-progress').textContent); })()`
+      );
+      const title = await aboutWin.webContents.executeJavaScript(`(document.querySelector('h1') || {}).textContent || ''`);
+      await shot(aboutWin, 'settings-about-update-ready');
+      simulateUpdateProgress({ phase: 'idle', version: null, percent: null, transferred: null, total: null, bytesPerSecond: null });
+      await sleep(400);
+      const gone = await aboutWin.webContents.executeJavaScript(`!document.querySelector('.update-progress') && !document.querySelector('.side-update')`);
+      result.updateProgress = { downloading, ready, gone, title };
+      result.updateProgressOk = downloading && ready && gone && (clipperApp ? title === 'Kine Clipper' : title !== 'Kine Clipper' && title.length > 0);
+    }
+
+    // Vzhled: sklo (barvy Západ slunce, silné) -> <html> dostane atributy a pozadí; pak zpět klasický.
+    kine.openSettings('settings');
+    await sleep(700);
+    const lookWin = kine.settingsWindow;
+    if (lookWin && !lookWin.isDestroyed()) {
+      await lookWin.webContents.executeJavaScript(`(() => { const p = document.querySelector('.appearance-panel'); if (p) p.scrollIntoView({ block: 'center' }); const b = [...document.querySelectorAll('.look-option')][1]; if (b) b.click(); return !!b; })()`);
+      await sleep(500);
+      await lookWin.webContents.executeJavaScript(`(() => { const c = [...document.querySelectorAll('.look-chip')].find((x) => x.querySelector('.look-swatch.sunset')); if (c) c.click(); return !!c; })()`);
+      await sleep(500);
+      kine.settings.update({ glassStrength: 80 });
+      await sleep(500);
+      const look = await lookWin.webContents.executeJavaScript(
+        `(() => { const r = document.documentElement; const bd = document.querySelector('.app-backdrop'); const side = document.querySelector('.side'); return { look: r.getAttribute('data-look'), backdrop: r.getAttribute('data-backdrop'), k: r.style.getPropertyValue('--glass-k'), backdropShown: !!bd && getComputedStyle(bd).display === 'block', sideBg: side ? getComputedStyle(side).backgroundColor : null, chips: document.querySelectorAll('.look-chip').length, panel: !!document.querySelector('.appearance-panel') }; })()`
+      );
+      await shot(lookWin, 'settings-look-glass');
+      kine.openSettings('clips');
+      await sleep(700);
+      await shot(kine.settingsWindow, 'settings-clips-glass');
+      kine.settings.update({ look: 'classic' });
+      await sleep(500);
+      const back = await kine.settingsWindow!.webContents.executeJavaScript(`!document.documentElement.hasAttribute('data-look') && getComputedStyle(document.querySelector('.app-backdrop')).display === 'none'`);
+      result.look = { ...look, back };
+      // Průsvitný postranní panel = alfa < 1 v barvě pozadí.
+      const alpha = /rgba\([^)]*,\s*([0-9.]+)\)/.exec(look.sideBg ?? '');
+      result.lookOk = look.look === 'glass' && look.backdrop === 'sunset' && look.k === '0.8' && look.backdropShown && look.chips === 6 && look.panel && !!alpha && Number(alpha[1]) < 0.7 && back;
     }
 
     // Průvodce: výběr jazyka a režimu.
@@ -1148,7 +1235,7 @@ export async function runTestDriver(kine: {
       'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks', 'reviewMerge', 'updateUi',
       'playerNav', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
       'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
-      'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'screenshotOk', 'clipToastInstant', 'recordingStopOnceOk',
+      'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'screenshotOk', 'clipToastInstant', 'recordingStopOnceOk', 'updateProgressOk', 'playerFullscreenOk', 'lookOk',
     ];
     if (process.env.KINE_TEST_LIVE_URL) common.push('liveOk');
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];

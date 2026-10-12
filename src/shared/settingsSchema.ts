@@ -1,4 +1,4 @@
-import { CATEGORY_KEYS, LANGS, LAUNCH_CAPTURE, LIVE_CAMERA_POSITIONS, LIVE_CAMERA_SHAPES, LIVE_CAMERA_SIZES, STORAGE_LIMITS_GB, VISIBILITIES, type Settings } from './types';
+import { CATEGORY_KEYS, GLASS_BACKDROPS, LANGS, LAUNCH_CAPTURE, LIVE_CAMERA_POSITIONS, LIVE_CAMERA_SHAPES, LIVE_CAMERA_SIZES, LOOKS, STORAGE_LIMITS_GB, VISIBILITIES, type Settings } from './types';
 import { isHotkey } from './hotkeys';
 import { LIVE_QUALITIES, liveBitrate } from './live';
 
@@ -27,6 +27,11 @@ export const DEFAULT_SETTINGS: Settings = {
   liveGameAudio: true,
   liveMic: true,
   liveOpenPage: false,
+  liveChatOnTop: false,
+  look: 'classic',
+  glassBackdrop: 'brand',
+  glassStrength: 55,
+  glassWindow: false,
   liveCamera: false,
   liveCameraDevice: '',
   liveCameraPosition: 'bottom-right',
@@ -154,6 +159,11 @@ export function sanitizeSettings(input: unknown): Settings {
     liveGameAudio: bool(raw.liveGameAudio, d.liveGameAudio),
     liveMic: bool(raw.liveMic, d.liveMic),
     liveOpenPage: bool(raw.liveOpenPage, d.liveOpenPage),
+    liveChatOnTop: bool(raw.liveChatOnTop, d.liveChatOnTop),
+    look: oneOf(raw.look, LOOKS, d.look),
+    glassBackdrop: oneOf(raw.glassBackdrop, GLASS_BACKDROPS, d.glassBackdrop),
+    glassStrength: Number.isFinite(Number(raw.glassStrength)) && raw.glassStrength !== null && raw.glassStrength !== '' ? Math.round(Math.max(0, Math.min(100, Number(raw.glassStrength)))) : d.glassStrength,
+    glassWindow: bool(raw.glassWindow, d.glassWindow),
     liveCamera: bool(raw.liveCamera, d.liveCamera),
     liveCameraDevice: text(raw.liveCameraDevice, d.liveCameraDevice, 300),
     liveCameraPosition: oneOf(raw.liveCameraPosition, LIVE_CAMERA_POSITIONS, d.liveCameraPosition),

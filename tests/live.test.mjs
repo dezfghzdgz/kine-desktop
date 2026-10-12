@@ -78,7 +78,7 @@ function fakeChild() {
   return child;
 }
 
-function makeController() {
+function makeController(apiImpl = null) {
   const commands = [];
   const children = [];
   const notices = [];
@@ -95,6 +95,7 @@ function makeController() {
   const live = new LiveController({
     capture,
     api: () => {
+      if (apiImpl) return apiImpl;
       throw new Error('api se v testu nevolá');
     },
     settings: () => DEFAULT_SETTINGS,
@@ -292,4 +293,84 @@ test('vysílání: co odchází - z rozdílu proti minulému bloku průběhu ffm
   assert.equal(slow.fps, 15);
   assert.equal(read('frame=1'), null, 'uprostřed bloku nic');
   assert.equal(read('nesmysl'), null);
+});
+
+/** Vysílá (průběh ffmpeg = živě) a ukončí - pak je karta záznamu. */
+async function streamAndStop(ctx, title = 'Ranked') {
+  await ctx.live.start({ title, quality: '720p30' });
+  ctx.children[ctx.children.length - 1].stdout.write('out_time_us=1500000\n');
+  await new Promise((r) => setTimeout(r, 10));
+  await ctx.live.stop('user');
+}
+
+test('vysílání: po konci karta záznamu (délka, název), bez vysílání žádná', async () => {
+  const ctx = makeController();
+  await streamAndStop(ctx, 'Ranked s klukama');
+  const ended = ctx.live.current().ended;
+  assert.ok(ended, 'karta po skončení');
+  assert.equal(ended.title, 'Ranked s klukama');
+  assert.match(ended.duration, /^\d+:\d\d$/);
+  assert.equal(ended.video, null);
+  assert.equal(ended.publishing, false);
+  assert.equal(ended.autoPending, false);
+  // Ukončení ještě před začátkem vysílání (připojování) kartu nedělá.
+  const other = makeController();
+  await other.live.start({ title: 'x', quality: '720p30' });
+  await other.live.stop('user');
+  assert.equal(other.live.current().ended, null);
+});
+
+test('vysílání: zveřejnění záznamu z karty -> video na Kine, nový start kartu zavře', async () => {
+  const calls = [];
+  const api = {
+    livePublishRecording: async (opts) => {
+      calls.push(opts);
+      return { videoId: 'vid-1', status: 'processing', alreadyPublished: false };
+    },
+  };
+  const ctx = makeController(api);
+  await streamAndStop(ctx, 'Večerní stream');
+  const pending = ctx.live.publishRecording({ visibility: 'subscribers', language: 'cs' });
+  assert.equal(ctx.live.current().ended.publishing, true);
+  await pending;
+  assert.deepEqual(calls, [{ title: 'Večerní stream', visibility: 'subscribers', language: 'cs' }]);
+  const ended = ctx.live.current().ended;
+  assert.equal(ended.publishing, false);
+  assert.deepEqual(ended.video, { id: 'vid-1', url: 'https://kine.test/watch/vid-1', status: 'processing', auto: false });
+  // Druhé kliknutí nic nedělá (záznam už je venku).
+  await ctx.live.publishRecording({ visibility: 'public' });
+  assert.equal(calls.length, 1);
+  // Nové vysílání: karta minulého záznamu zmizí.
+  await ctx.live.start({ title: 'další', quality: '720p30' });
+  assert.equal(ctx.live.current().ended, null);
+  await ctx.live.stop('quit');
+});
+
+test('vysílání: záznam ještě není (404) -> chyba v kartě a jde to zkusit znovu; zavření karty', async () => {
+  let attempt = 0;
+  const api = {
+    livePublishRecording: async () => {
+      attempt += 1;
+      if (attempt === 1) {
+        const e = new Error('Záznam vysílání zatím není');
+        e.status = 404;
+        throw e;
+      }
+      return { videoId: 'vid-2', status: 'ready', alreadyPublished: false };
+    },
+  };
+  const ctx = makeController(api);
+  await streamAndStop(ctx);
+  await ctx.live.publishRecording({ title: '  Můj název  ', visibility: 'public' });
+  let ended = ctx.live.current().ended;
+  assert.equal(ended.error.status, 404);
+  assert.equal(ended.publishing, false);
+  assert.equal(ended.video, null);
+  await ctx.live.publishRecording({ title: '  Můj název  ', visibility: 'public' });
+  ended = ctx.live.current().ended;
+  assert.equal(ended.error, null);
+  assert.equal(ended.title, 'Můj název');
+  assert.equal(ended.video.status, 'ready');
+  ctx.live.dismissEnded();
+  assert.equal(ctx.live.current().ended, null);
 });

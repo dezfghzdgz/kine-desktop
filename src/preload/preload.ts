@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AudioLevels, CaptureCommand, CaptureEvent, Clip, DisplayInfo, GameSource, LiveQuality, LiveStatus, ProcessInfo, ResourceUsage, Settings, Status, UploadRequest } from '../shared/types';
+import type { AudioLevels, CaptureCommand, CaptureEvent, Clip, DisplayInfo, GameSource, LiveAfterStream, LiveQuality, LiveStatus, ProcessInfo, ResourceUsage, Settings, Status, UploadRequest, Visibility } from '../shared/types';
 
 /**
  * Most mezi stránkami a hlavním procesem. Stránky nemají Node ani
@@ -85,6 +85,15 @@ const kine = {
   stopLive: (): Promise<void> => ipcRenderer.invoke('live:stop'),
   /** Stránka vysílání na Kine (diváci, chat). */
   openLivePage: (): Promise<void> => ipcRenderer.invoke('live:openPage'),
+  /** Chat vlastního vysílání v malém okně. */
+  openLiveChat: (): Promise<void> => ipcRenderer.invoke('live:openChat'),
+  /** Záznam posledního vysílání -> video na Kine (karta po skončení). */
+  publishLiveRecording: (opts: { title: string; visibility: Visibility }): Promise<void> => ipcRenderer.invoke('live:publishRecording', opts),
+  dismissLiveEnded: (): Promise<void> => ipcRenderer.invoke('live:dismissEnded'),
+  openLiveRecording: (): Promise<void> => ipcRenderer.invoke('live:openRecording'),
+  /** Co se záznamem po skončení (nastavení na Kine, stejné jako ve studiu); null = nepřihlášený / Kine nejde. */
+  liveAfterStream: (): Promise<LiveAfterStream | null> => ipcRenderer.invoke('live:afterStream'),
+  setLiveAfterStream: (value: Visibility | null): Promise<LiveAfterStream | null> => ipcRenderer.invoke('live:setAfterStream', value),
   /** Obrazovka "Hned jsem zpět" ve vysílání (bez argumentu = přepnout). Vrací, jestli je zapnutá. */
   liveBrb: (on?: boolean): Promise<boolean> => ipcRenderer.invoke('live:brb', on),
   /** Mikrofon jen ve vysílání ztlumit / zapnout. */
@@ -117,7 +126,15 @@ const kine = {
 
   /** Kontrola aktualizací: stav, verze, odkud, důvod chyby, odkaz na ruční stažení (viz main/updater.ts). */
   checkUpdate: (): Promise<{ status: string; version?: string; url?: string; message?: string; source?: string; waitingForGame?: boolean }> => ipcRenderer.invoke('app:checkUpdate'),
+  /** Stažená aktualizace: nainstalovat hned (appka se zavře a znovu spustí). 'busy' = běží vysílání / nahrávání zápasu. */
+  installUpdate: (): Promise<'ok' | 'busy' | 'not-ready'> => ipcRenderer.invoke('app:installUpdate'),
+  /** Aktualizace čeká na konec hry: stáhnout hned. */
+  downloadUpdate: (): Promise<void> => ipcRenderer.invoke('app:downloadUpdate'),
   openLogs: (): Promise<string> => ipcRenderer.invoke('app:openLogs'),
+  /** Snímání znovu (zvuk hry nešel otevřít). 'busy' = běží nahrávka zápasu nebo vysílání. */
+  restartCapture: (): Promise<'ok' | 'busy'> => ipcRenderer.invoke('capture:restart'),
+  /** Zvuk ve Windows (výchozí zařízení, Stereo Mix, výhradní režim). */
+  openSoundSettings: (): Promise<void> => ipcRenderer.invoke('app:openSoundSettings'),
   copyDiagnostics: (): Promise<boolean> => ipcRenderer.invoke('app:copyDiagnostics'),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
   /** Otevře Kine: v režimu "Kine + klipy" jako záložku hlavního okna, jinak v prohlížeči. */

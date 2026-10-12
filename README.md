@@ -395,6 +395,40 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   nikdy oblíbené, nahrávané na Kine ani čerstvé (hodinu od uložení).
 - **Vysílání:** záložka Živě (kamera, „Hned jsem zpět“, diváci, viz výš).
 
+## Novinky 0.9.7
+
+- **Aktualizace s průběhem:** O appce ukazuje stahování nové verze
+  (procenta, MB, rychlost) a pak jedno tlačítko **Aktualizovat teď** -
+  appka se zavře, tiše nainstaluje novou verzi a sama se znovu spustí
+  (`installUpdateNow` -> `quitAndInstall(true, true)`). Během vysílání a
+  nahrávání zápasu to nejde (o vysílání by hráč přišel). Stejné tlačítko
+  je v liště u hodin a odkaz v postranním panelu. Kine Clipper má v O appce
+  svůj název.
+- **Zvuk hry nejde otevřít** (chyba „the audio source could not be
+  opened“): snímání to samo zkusí znovu, pak vezme zařízení, které zvuk
+  počítače umí nahrát (Stereo Mix, VB-Cable, Voicemeeter), a když nic,
+  řekne proč, jaké je výchozí zařízení a co s tím (4 kroky, tlačítko Zkusit
+  znovu a Zvuk ve Windows). V seznamu zdrojů jsou taková zařízení zvlášť od
+  mikrofonů; v diagnostice je řádek „Game audio“.
+- **Záznam vysílání na Kine:** po skončení vysílání je v záložce Živě karta
+  se záznamem - název, kdo ho uvidí a **Zveřejnit záznam na Kine**
+  (`/api/live/recordings`, `videoUid: 'latest'`). Nebo se zveřejní sám:
+  volba **Po skončení vysílání** (stejné nastavení jako ve studiu na webu,
+  ukládá se na Kine). Zveřejněný záznam na webu přehrává i záznam chatu.
+- **Chat v okně:** chat vlastního vysílání v malém okně (dá se nechat
+  nahoře nad hrou v okně bez rámečku), včetně moderování.
+- **Vzhled (Nastavení -> Vzhled):** klasický nebo **sklo** - průhledné
+  plochy nad barevným rozmazaným pozadím (moje barva, Noc, Západ slunce,
+  Les, Oceán, Neon), posuvník průhlednosti, barva appky přímo v nastavení.
+  Na Windows 11 jde zapnout **průhledné okno** (Acrylic - prosvítá plocha za
+  appkou; `setBackgroundMaterial`). Pozadí je jedna vrstva `.app-backdrop`,
+  nic se nerozmazává za běhu.
+- **Přehrávač klipů přes celou obrazovku** (F, dvojklik, ⛶): celá scéna
+  i se šipkami na předchozí / další klip, nahoře název a pozice „3 / 12“;
+  ovládání se po chvíli bez pohybu myši schová.
+- Nahrání bez přihlášení hlásí přeloženou chybu (dřív česká odpověď
+  serveru i v angličtině); klik na okénko vede do Účtu.
+
 ## Vývoj
 
 ```

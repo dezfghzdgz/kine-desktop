@@ -111,6 +111,16 @@ export type Settings = {
   liveMic: boolean;
   /** Po začátku vysílání otevřít stránku vysílání s chatem. */
   liveOpenPage: boolean;
+  /** Okno s chatem vysílání drží nahoře (nad hrou v okně bez rámečku). */
+  liveChatOnTop: boolean;
+  /** Vzhled oken: klasický (plné plochy) nebo sklo (průhledné plochy nad barevným pozadím). */
+  look: Look;
+  /** Barvy pozadí skla: moje barva nebo předvolba. */
+  glassBackdrop: GlassBackdrop;
+  /** Síla skla 0-100 (jak moc je vidět pozadí). */
+  glassStrength: number;
+  /** Průhledné okno: na Windows 11 prosvítá rozmazaně plocha a okna za appkou (Acrylic). */
+  glassWindow: boolean;
   /** Kamera ve vysílání (obraz z webkamery v rohu). Klipy kameru nemají. */
   liveCamera: boolean;
   /** Id kamery ('' = první / výchozí). */
@@ -220,6 +230,10 @@ export type Settings = {
 };
 
 export type PerformanceMode = 'low' | 'balanced' | 'high';
+export type Look = 'classic' | 'glass';
+export const LOOKS: readonly Look[] = ['classic', 'glass'];
+export type GlassBackdrop = 'brand' | 'night' | 'sunset' | 'forest' | 'ocean' | 'neon';
+export const GLASS_BACKDROPS: readonly GlassBackdrop[] = ['brand', 'night', 'sunset', 'forest', 'ocean', 'neon'];
 export type LaunchCapture = 'auto' | 'game' | 'paused';
 export const LAUNCH_CAPTURE: readonly LaunchCapture[] = ['auto', 'game', 'paused'];
 export type LiveCameraPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
@@ -360,6 +374,28 @@ export type Status = {
   hwEncoder: boolean | null;
   /** Živé vysílání z appky. */
   live: LiveStatus;
+  /** Aktualizace appky: stahuje se (průběh) / připravená k instalaci. */
+  update: UpdateProgress;
+  /** Průhledné okno je zapnuté (Windows 11, Acrylic) - pozadí okna prosvítá. */
+  windowGlass: boolean;
+  /** Umí tenhle systém průhledné okno (Windows 11 22H2+)? */
+  windowGlassSupported: boolean;
+};
+
+/**
+ * Průběh aktualizace pro okno (O appce, postranní panel, lišta): kontroluje
+ * se / stahuje se (s procenty) / stažená a připravená ("Aktualizovat" =
+ * restart a instalace) / čeká na konec hry / chyba.
+ */
+export type UpdateProgress = {
+  phase: 'idle' | 'checking' | 'downloading' | 'ready' | 'waiting-game' | 'error';
+  version: string | null;
+  /** 0-100 při stahování. */
+  percent: number | null;
+  bytesPerSecond: number | null;
+  transferred: number | null;
+  total: number | null;
+  error: string | null;
 };
 
 export type GameSource = 'steam' | 'custom' | 'known' | 'fullscreen';
@@ -419,7 +455,13 @@ export type CaptureEvent =
   | { type: 'stopped'; generation: number; at: number }
   | { type: 'error'; generation: number; message: string }
   /** Něco nejde, ale nahrává se dál (třeba mikrofon není). */
-  | { type: 'warning'; generation: number; kind: 'microphone' | 'systemAudio' | 'bluetoothMic'; message: string }
+  | {
+      type: 'warning';
+      generation: number;
+      /** systemLoopback = zvuk hry nejde otevřít; systemAudioFallback = bere se ze Stereo Mix a spol.; systemAudioRetry = povedlo se na druhý pokus. */
+      kind: 'microphone' | 'systemAudio' | 'bluetoothMic' | 'systemLoopback' | 'systemAudioFallback' | 'systemAudioRetry';
+      message: string;
+    }
   /** Hladiny zvuku (0-1, RMS) zhruba každou sekundu - měřáky v nastavení a hlídání ticha. */
   | { type: 'levels'; generation: number; levels: AudioLevels }
   /** Změnilo se výchozí výstupní zařízení Windows (nový název) - loopback je přilepený na staré, snímání se má rozjet znovu. */
@@ -491,7 +533,33 @@ export type LiveStatus = {
   viewers: number | null;
   /** Kamera chtěná, ale nejde (obsazená jiným programem, žádná) - vysílá se bez ní. */
   cameraError: string | null;
+  /** Poslední skončené vysílání (karta v záložce Živě: záznam na Kine); null = žádné / zavřené. */
+  ended: LiveEnded | null;
 };
+
+/**
+ * Skončené vysílání a jeho záznam. Cloudflare každé vysílání nahrává samo;
+ * z karty se záznam jedním klikem zveřejní jako video na Kine (nebo se
+ * zveřejnil sám - nastavení "Po skončení vysílání").
+ */
+export type LiveEnded = {
+  /** Kdy vysílání skončilo (ms od epochy) - zároveň id karty. */
+  at: number;
+  /** Jak dlouho trvalo ("1:02:03"). */
+  duration: string;
+  title: string;
+  /** Kine záznam zveřejňuje sama (nastavení) - čeká se, jak to dopadlo. */
+  autoPending: boolean;
+  /** Záznam už je video na Kine. `auto` = zveřejnil se sám. */
+  video: { id: string; url: string; status: 'ready' | 'processing'; auto: boolean } | null;
+  /** Zveřejňuje se (tlačítko). */
+  publishing: boolean;
+  /** Zveřejnit se nepovedlo: HTTP stav (404 = záznam ještě není, 409 = vysílání ještě běží, 0 = síť) a text. */
+  error: { status: number; message: string } | null;
+};
+
+/** Co se záznamem po skončení vysílání (nastavení na Kine, sdílené se studiem): null = nechat ve studiu. */
+export type LiveAfterStream = { value: Visibility | null; supported: boolean };
 
 /** Co právě teče do zvuku klipu. */
 export type AudioLevels = {
@@ -507,6 +575,12 @@ export type AudioLevels = {
   micDevice?: string;
   /** Výchozí mikrofon jsou sluchátka Bluetooth - appka ho nepoužila (vzala jiný, nebo žádný). */
   bluetoothMicAvoided?: boolean;
+  /** Proč zvuk hry nejde otevřít (zkráceně), když nejde. */
+  systemError?: string;
+  /** Zvuk hry se náhradně bere z tohohle vstupu (Stereo Mix, VB-Cable...). */
+  systemFallback?: string;
+  /** Výchozí výstup Windows (název) - kvůli radě, když zvuk nejde. */
+  defaultOutput?: string;
 };
 
 /** Zvukové zařízení pro výběr v nastavení (z enumerateDevices v okně). */

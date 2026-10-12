@@ -1,3 +1,5 @@
+import type { Visibility } from '../shared/types';
+
 /**
  * Volání na Kine (stejné cesty, jaké používá webová appka při nahrávání).
  *
@@ -47,7 +49,14 @@ export type LiveSetup = {
   migrated: boolean;
   input: { rtmpsUrl: string; streamKey: string } | null;
   stream: { ownerId: string; title: string; description: string; category: string | null } | null;
+  /** Co se záznamem po skončení (null = nechat ve studiu). */
+  recordingVisibility: Visibility | null;
+  /** Umí Kine záznam zveřejnit sama (migrace supabase-migration-zive-2.sql)? */
+  recordingAutoSupported: boolean;
 };
+
+/** Záznam vysílání zveřejněný jako video na Kine. */
+export type PublishedRecording = { videoId: string; status: 'ready' | 'processing'; alreadyPublished: boolean };
 
 export type KineApi = {
   siteUrl(): string;
@@ -65,13 +74,22 @@ export type KineApi = {
   liveCreate(): Promise<LiveSetup>;
   /** Název, popis a kategorie přenosu (vidí je diváci na Kine). */
   liveDetails(details: { title: string; description: string; category: string | null }): Promise<void>;
+  /** Co se záznamem po skončení vysílání (null = nechat ve studiu, jinak zveřejnit s touhle viditelností). */
+  liveSetRecordingVisibility(visibility: Visibility | null): Promise<{ value: Visibility | null; supported: boolean }>;
+  /** Záznam posledního vysílání -> video na Kine (Cloudflare ho nahrálo samo). */
+  livePublishRecording(options: { title: string; visibility: Visibility; language?: string }): Promise<PublishedRecording>;
   /**
    * Appka řekne Kine, že vysílá (started / ping po ~15 s / stopped). Kine podle
    * toho ukáže vysílání jako živé hned, ne až když ho najde u Cloudflare.
    * `confirmed`: Cloudflare proud opravdu přijímá.
    */
-  liveSignal(action: 'started' | 'ping' | 'stopped'): Promise<{ confirmed: boolean; viewers: number | null }>;
+  liveSignal(action: 'started' | 'ping' | 'stopped'): Promise<{ confirmed: boolean; viewers: number | null; recording: { videoId: string; status: 'ready' | 'processing' } | null }>;
 };
+
+const VISIBILITY_VALUES: readonly Visibility[] = ['public', 'subscribers', 'private'];
+function visibilityFrom(value: unknown): Visibility | null {
+  return VISIBILITY_VALUES.includes(value as Visibility) ? (value as Visibility) : null;
+}
 
 function liveSetupFrom(data: any): LiveSetup {
   const input = data?.input && typeof data.input.rtmpsUrl === 'string' && typeof data.input.streamKey === 'string' ? { rtmpsUrl: data.input.rtmpsUrl as string, streamKey: data.input.streamKey as string } : null;
@@ -81,6 +99,8 @@ function liveSetupFrom(data: any): LiveSetup {
     migrated: data?.migrated !== false,
     input,
     stream: s && typeof s.ownerId === 'string' ? { ownerId: s.ownerId, title: String(s.title ?? ''), description: String(s.description ?? ''), category: typeof s.category === 'string' ? s.category : null } : null,
+    recordingVisibility: visibilityFrom(data?.recordingVisibility),
+    recordingAutoSupported: data?.recordingAutoSupported === true,
   };
 }
 
@@ -91,13 +111,14 @@ export function createKineApi(deps: {
 }): KineApi {
   const fetchImpl = deps.fetchImpl ?? fetch;
 
-  async function post(path: string, body: unknown): Promise<any> {
+  async function post(path: string, body: unknown, timeoutMs?: number): Promise<any> {
     const token = await deps.getToken();
     if (!token) throw new KineApiError('Nejsi přihlášený.', 401);
     const res = await fetchImpl(`${deps.siteUrl()}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify(body),
+      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new KineApiError(typeof data?.error === 'string' ? data.error : `Kine odpověděla ${res.status}.`, res.status);
@@ -166,10 +187,27 @@ export function createKineApi(deps: {
       const data: any = await post('/api/live/me', { action });
       // Počet diváků posílá novější Kine (Cloudflare); starší nic - pak null.
       const viewers = Number.isInteger(data?.viewers) && data.viewers >= 0 ? Number(data.viewers) : null;
-      return { confirmed: data?.confirmed === true, viewers };
+      // Po "stopped": záznam, který Kine zveřejnila sama (nastavení "Po skončení vysílání").
+      const r = data?.recording;
+      const recording = r && typeof r.videoId === 'string' ? { videoId: r.videoId as string, status: r.status === 'ready' ? ('ready' as const) : ('processing' as const) } : null;
+      return { confirmed: data?.confirmed === true, viewers, recording };
     },
     async liveDetails(details) {
       await post('/api/live/me', { action: 'details', title: details.title.slice(0, 100), description: details.description.slice(0, 2000), category: details.category });
+    },
+    async liveSetRecordingVisibility(visibility) {
+      const data: any = await post('/api/live/me', { action: 'details', recordingVisibility: visibility }, 20000);
+      // Starší Kine (bez migrace) hodnotu neuloží a pošle recordingAutoSupported: false.
+      return { value: visibilityFrom(data?.recordingVisibility), supported: data?.recordingAutoSupported !== false };
+    },
+    async livePublishRecording(options) {
+      const data: any = await post(
+        '/api/live/recordings',
+        { videoUid: 'latest', title: options.title.slice(0, 150), visibility: options.visibility, language: options.language, rightAfterStream: true },
+        45000
+      );
+      if (typeof data?.videoId !== 'string') throw new KineApiError('Kine záznam nezveřejnila.', 500);
+      return { videoId: data.videoId, status: data.status === 'ready' ? 'ready' : 'processing', alreadyPublished: data.alreadyPublished === true };
     },
   };
 }

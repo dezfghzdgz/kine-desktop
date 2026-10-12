@@ -1,5 +1,5 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
-import type { CaptureCommand, CaptureEvent, CaptureState, LiveAudio, LiveQuality, LiveScene, LiveStatus, Settings } from '../shared/types';
+import type { CaptureCommand, CaptureEvent, CaptureState, LiveAudio, LiveEnded, LiveQuality, LiveScene, LiveStatus, Settings, Visibility } from '../shared/types';
 import { LIVE_PRESETS, liveElapsed, liveErrorKind, livePresetFor } from '../shared/live';
 import { LIVE_MAX_BACKLOG_BYTES, createProgressReader, liveFfmpegArgs, liveProgressSeconds, liveRetryDelay, maskLiveUrl, rtmpUrl } from './livePlan';
 import type { KineApi } from './kineApi';
@@ -31,15 +31,15 @@ export type LiveDeps = {
   spawn: (args: string[]) => ChildProcessWithoutNullStreams;
   log: (message: string) => void;
   onChange: (status: LiveStatus) => void;
-  /** Hlášky hráči: jsi živě / výpadek / konec / spadlo / upload nestíhá. */
-  notify: (kind: 'live' | 'reconnecting' | 'ended' | 'failed' | 'slow', info: { error?: string; duration?: string }) => void;
+  /** Hlášky hráči: jsi živě / výpadek / konec / spadlo / upload nestíhá / záznam je na Kine. */
+  notify: (kind: 'live' | 'reconnecting' | 'ended' | 'failed' | 'slow' | 'recording', info: { error?: string; duration?: string; url?: string }) => void;
   /** Vysílání skončilo (hráč ho ukončil, nebo se vzdalo) - hlavní proces srovná zásobník. */
   onEnded?: () => void;
   /** Jen pro test (KINE_TEST_LIVE_URL): místo Kine místní RTMP server. */
   testUrl?: string | null;
 };
 
-const IDLE: LiveStatus = { state: 'idle', since: null, title: '', watchUrl: null, error: null, confirmed: null, scene: null, stats: null, viewers: null, cameraError: null };
+const IDLE: LiveStatus = { state: 'idle', since: null, title: '', watchUrl: null, error: null, confirmed: null, scene: null, stats: null, viewers: null, cameraError: null, ended: null };
 
 export class LiveController {
   private status: LiveStatus = { ...IDLE };
@@ -70,11 +70,14 @@ export class LiveController {
   /** Kdy začalo téct aktuální spojení (po minutě bez výpadku se pokusy počítají znovu). */
   private connectedAt: number | null = null;
   private slowWarned = false;
+  /** Kine záznam po skončení zveřejní sama (nastavení "Po skončení vysílání" - zjistí se při startu). */
+  private autoPublish = false;
 
   constructor(private deps: LiveDeps) {}
 
   current(): LiveStatus {
-    return { ...this.status };
+    const ended = this.status.ended;
+    return { ...this.status, ended: ended ? { ...ended, video: ended.video ? { ...ended.video } : null } : null };
   }
 
   /** Má se vysílat (i během znovupřipojení)? */
@@ -112,6 +115,8 @@ export class LiveController {
     this.audio = { game: opts.game ?? true, mic: opts.mic ?? true };
     this.scene = opts.scene ?? null;
     const title = opts.title.trim().slice(0, 100);
+    this.autoPublish = false;
+    // Nové vysílání: karta minulého záznamu zmizí (nezveřejněný záznam zůstává 30 dní ve studiu na Kine).
     this.set({ ...IDLE, state: 'starting', title, scene: this.scene });
     try {
       if (this.deps.testUrl) {
@@ -124,6 +129,7 @@ export class LiveController {
         if (!setup.input) setup = await api.liveCreate();
         if (!setup.input) throw new Error('live-not-configured');
         this.url = rtmpUrl(setup.input.rtmpsUrl, setup.input.streamKey);
+        this.autoPublish = setup.recordingAutoSupported && setup.recordingVisibility !== null;
         if (setup.stream?.ownerId) this.set({ watchUrl: `${this.deps.siteUrl()}/live/${setup.stream.ownerId}` });
         // Název, popis a kategorii vidí diváci. Co hráč nevyplnil v appce (popis), zůstává ze studia na Kine.
         const description = opts.description?.trim() ? opts.description.trim() : setup.stream?.description ?? '';
@@ -166,6 +172,7 @@ export class LiveController {
   private async doStop(reason: 'user' | 'quit'): Promise<void> {
     const wasLive = this.status.since !== null;
     const duration = liveElapsed(this.status.since);
+    const title = this.status.title;
     this.wanted = false;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
@@ -191,11 +198,73 @@ export class LiveController {
     this.scene = null;
     this.stopPing(); // pro jistotu - kdyby ho mezitím něco znovu pustilo
     this.deps.log(`vysílání ukončeno${wasLive ? ` (${duration})` : ''}`);
-    this.set({ ...IDLE });
-    // Kine ať přestane ukazovat "živě" hned (při ukončení appky nejvýš 1,5 s čekání).
-    if (wasLive) await Promise.race([this.signal('stopped'), new Promise((r) => setTimeout(r, reason === 'quit' ? 1500 : 4000))]);
+    const ended = wasLive ? this.endedCard(title, duration) : null;
+    this.set({ ...IDLE, ended });
+    // Kine ať přestane ukazovat "živě" hned (při ukončení appky nejvýš 1,5 s čekání). Odpověď
+    // (záznam zveřejněný automaticky) se do karty dopíše, i když přijde až po čekání.
+    if (wasLive) {
+      const stopped = this.signal('stopped');
+      void stopped.then((result) => this.onStoppedSignal(ended, result));
+      await Promise.race([stopped, new Promise((r) => setTimeout(r, reason === 'quit' ? 1500 : 4000))]);
+    }
     if (wasLive && reason === 'user') this.deps.notify('ended', { duration });
     this.deps.onEnded?.();
+  }
+
+  /** Karta skončeného vysílání (záložka Živě). */
+  private endedCard(title: string, duration: string): LiveEnded {
+    return { at: Date.now(), duration, title, autoPending: this.autoPublish && !this.deps.testUrl, video: null, publishing: false, error: null };
+  }
+
+  /** Kine odpověděla na "skončil jsem": záznam zveřejněný automaticky -> do karty a okénko s odkazem. */
+  private onStoppedSignal(ended: LiveEnded | null, result: Awaited<ReturnType<KineApi['liveSignal']>> | null): void {
+    const card = this.status.ended;
+    if (!ended || !card || card.at !== ended.at) return; // mezitím nové vysílání / karta zavřená
+    if (result?.recording) {
+      const url = `${this.deps.siteUrl()}/watch/${result.recording.videoId}`;
+      this.set({ ended: { ...card, autoPending: false, video: { id: result.recording.videoId, url, status: result.recording.status, auto: true } } });
+      this.deps.log(`vysílání: záznam zveřejněný automaticky (${result.recording.videoId})`);
+      this.deps.notify('recording', { url });
+    } else if (card.autoPending) {
+      // Automaticky to nevyšlo (záznam ještě není, starší Kine) - karta nabídne tlačítko.
+      this.set({ ended: { ...card, autoPending: false } });
+    }
+  }
+
+  /**
+   * Záznam posledního vysílání -> video na Kine (tlačítko na kartě). Záznam,
+   * který Cloudflare ještě uzavírá (minuta po konci), jde zveřejnit taky -
+   * Kine ho pak chvíli zpracovává.
+   */
+  async publishRecording(options: { title?: string; visibility: Visibility; language?: string }): Promise<void> {
+    const card = this.status.ended;
+    if (!card || card.publishing || card.video) return;
+    this.set({ ended: { ...card, publishing: true, error: null } });
+    const title = (options.title ?? '').trim().slice(0, 150) || card.title;
+    try {
+      const result = await this.deps.api().livePublishRecording({ title, visibility: options.visibility, language: options.language });
+      const now = this.status.ended;
+      if (!now || now.at !== card.at) return;
+      const url = `${this.deps.siteUrl()}/watch/${result.videoId}`;
+      this.deps.log(`vysílání: záznam zveřejněný (${result.videoId}${result.alreadyPublished ? ', už byl' : ''})`);
+      this.set({ ended: { ...now, title, publishing: false, autoPending: false, video: { id: result.videoId, url, status: result.status, auto: false } } });
+    } catch (e) {
+      const now = this.status.ended;
+      if (!now || now.at !== card.at) return;
+      const status = typeof (e as { status?: unknown }).status === 'number' ? ((e as { status: number }).status) : 0;
+      this.deps.log(`vysílání: záznam se nepovedlo zveřejnit (${status}): ${(e as Error).message}`);
+      this.set({ ended: { ...now, publishing: false, error: { status, message: ((e as Error).message ?? '').slice(0, 200) } } });
+    }
+  }
+
+  /** Nastavení "Po skončení vysílání" se změnilo (i během vysílání) - karta po konci podle něj čeká na automatické zveřejnění. */
+  setAutoPublish(on: boolean): void {
+    this.autoPublish = on;
+  }
+
+  /** Karta skončeného vysílání pryč (✕). */
+  dismissEnded(): void {
+    if (this.status.ended) this.set({ ended: null });
   }
 
   /**
@@ -351,12 +420,14 @@ export class LiveController {
       this.deps.log(`vysílání se vzdává (${this.attempts} pokusů): ${reason}`);
       const duration = liveElapsed(this.status.since);
       const wasLive = this.status.since !== null;
+      const ended = wasLive ? this.endedCard(this.status.title, duration) : null;
       this.wanted = false;
       this.stopWatchdog();
       this.stopPing();
       this.scene = null;
-      this.set({ ...IDLE, error: reason });
-      if (wasLive) void this.signal('stopped');
+      this.set({ ...IDLE, error: reason, ended });
+      // I spadlé vysílání má záznam (do pádu) - karta ho nabídne.
+      if (wasLive) void this.signal('stopped').then((result) => this.onStoppedSignal(ended, result));
       this.deps.notify('failed', { error: reason, duration });
       this.deps.onEnded?.();
       return;
@@ -409,16 +480,18 @@ export class LiveController {
   // ---- hlášení Kine ------------------------------------------------------------------
 
   /** Řekne Kine, že se vysílá (started / ping) nebo že už ne. Chyba se jen zapíše - vysílání to nesmí shodit. */
-  private async signal(action: 'started' | 'ping' | 'stopped'): Promise<void> {
-    if (this.deps.testUrl) return;
+  private async signal(action: 'started' | 'ping' | 'stopped'): Promise<Awaited<ReturnType<KineApi['liveSignal']>> | null> {
+    if (this.deps.testUrl) return null;
     try {
       const result = await this.deps.api().liveSignal(action);
       if (action !== 'stopped' && this.wanted && this.status.state === 'live') {
         const viewers = typeof result.viewers === 'number' ? result.viewers : null;
         if (this.status.confirmed !== result.confirmed || this.status.viewers !== viewers) this.set({ confirmed: result.confirmed, viewers });
       }
+      return result;
     } catch (e) {
       this.deps.log(`vysílání: Kine se nepodařilo říct stav (${action}): ${(e as Error).message}`);
+      return null;
     }
   }
 

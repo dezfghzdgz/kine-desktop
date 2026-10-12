@@ -1,6 +1,6 @@
 import type { KineBridge } from '../preload/preload';
-import type { AppNotice, AudioDevice, AudioLevels, Clip, DisplayInfo, GameSource, Lang, LiveQuality, ProcessInfo, ResourceUsage, Settings, Status, UploadRequest } from '../shared/types';
-import { CATEGORY_KEYS, LANGS, STORAGE_LIMITS_GB, TRASH_DAYS, VISIBILITIES } from '../shared/types';
+import type { AppNotice, AudioDevice, AudioLevels, Clip, DisplayInfo, GameSource, GlassBackdrop, Lang, LiveAfterStream, LiveEnded, LiveQuality, ProcessInfo, ResourceUsage, Settings, Status, UploadRequest, Visibility } from '../shared/types';
+import { CATEGORY_KEYS, GLASS_BACKDROPS, LANGS, STORAGE_LIMITS_GB, TRASH_DAYS, VISIBILITIES } from '../shared/types';
 import { LANG_NAMES, makeT, type Key } from '../shared/i18n';
 import { HotkeyRecorder, formatHotkey, hotkeyLabel } from '../shared/hotkeys';
 import { DISCORD_FILE_MAX_BYTES, isDiscordWebhook, suggestedMbps } from '../shared/settingsSchema';
@@ -57,6 +57,10 @@ let hotkeyRecording: HotkeyField | null = null;
 let hotkeyError: string | null = null;
 const recorder = new HotkeyRecorder();
 let updateResult: { status: string; version?: string; url?: string; message?: string; source?: string; waitingForGame?: boolean } | null = null;
+/** "Aktualizovat teď" zmáčknuto - appka se zavírá a instaluje novou verzi. */
+let updateInstalling = false;
+/** Aktualizovat teď nejde - běží vysílání / nahrávání zápasu. */
+let updateBusy = false;
 let confirmDelete: string | null = null;
 let renaming: string | null = null;
 let editingGame: string | null = null;
@@ -503,8 +507,31 @@ function hotkeyField(field: HotkeyField, label: string, hint?: string, options: 
 
 // ---- vykreslení -------------------------------------------------------------------
 
+/**
+ * Skleněný vzhled (Nastavení -> Vzhled): atributy na <html> a barevné pozadí
+ * za oknem. Pozadí je jedna vrstva mimo #app (překreslování ji nemaže);
+ * plochy nad ní jsou jen průsvitné (style.css, oddíl VZHLED).
+ */
+let backdropEl: HTMLElement | null = null;
+function applyLook() {
+  const root = document.documentElement;
+  const glass = settings.look === 'glass';
+  if (glass) root.setAttribute('data-look', 'glass');
+  else root.removeAttribute('data-look');
+  root.setAttribute('data-backdrop', settings.glassBackdrop);
+  root.style.setProperty('--glass-k', String(Math.max(0, Math.min(100, settings.glassStrength)) / 100));
+  // Průhledné okno: hlavní proces ho zapne jen na Windows 11 (Acrylic) - jinak zůstane barevné pozadí.
+  if (glass && status?.windowGlass) root.setAttribute('data-window-glass', '1');
+  else root.removeAttribute('data-window-glass');
+  if (!backdropEl) {
+    backdropEl = h('div', { class: 'app-backdrop', 'aria-hidden': 'true' });
+    document.body.prepend(backdropEl);
+  }
+}
+
 function render() {
   applyBrandColor(document.documentElement, settings.brandColor || null);
+  applyLook();
   const main = app.querySelector('.main');
   const scrollTop = main ? main.scrollTop : 0;
   const active = document.activeElement as HTMLElement | null;
@@ -934,6 +961,180 @@ function cornerPicker(disabled: boolean) {
 }
 
 /** Záložka Živě: co a jak se vysílá na Kine + tlačítko Vysílat / stav vysílání, kamera, "Hned jsem zpět". */
+/** Co se záznamem po skončení (nastavení na Kine): undefined = ještě se načítá, null = nepřihlášený / nejde načíst. */
+let afterStream: LiveAfterStream | null | undefined;
+let afterStreamLoadedAt = 0;
+let afterStreamSaving = false;
+let afterStreamFailed = false;
+/** Karta skončeného vysílání: název a viditelnost záznamu (předvyplněné, hráč je může změnit). */
+let endedForm: { at: number; title: string; visibility: Visibility } | null = null;
+
+/** Nastavení "Po skončení vysílání" z Kine - při otevření záložky, nejvýš jednou za minutu. */
+function loadAfterStream() {
+  if (!status.account) {
+    afterStream = null;
+    afterStreamLoadedAt = 0;
+    return;
+  }
+  if (Date.now() - afterStreamLoadedAt < 60_000) return;
+  afterStreamLoadedAt = Date.now();
+  void kine.liveAfterStream().then((r) => {
+    afterStream = r;
+    if (tab === 'live') render();
+  });
+}
+
+function saveAfterStream(value: Visibility | null) {
+  afterStreamSaving = true;
+  afterStreamFailed = false;
+  render();
+  void kine
+    .setLiveAfterStream(value)
+    .then((r) => {
+      if (r) afterStream = r;
+      afterStreamLoadedAt = Date.now();
+    })
+    .catch(() => {
+      afterStreamFailed = true;
+    })
+    .finally(() => {
+      afterStreamSaving = false;
+      render();
+    });
+}
+
+/** Proč záznam nejde zveřejnit (podle odpovědi Kine). */
+function endedErrorText(e: { status: number; message: string }): string {
+  if (e.status === 404) return t('liveEndedNotYet');
+  if (e.status === 409) return t('liveEndedStillLive');
+  if (e.status === 401) return t('liveEndedLoginNeeded');
+  return t('liveEndedFailed', { message: e.message || String(e.status) });
+}
+
+/**
+ * Karta skončeného vysílání: záznam (Cloudflare ho nahrálo samo) jedním
+ * klikem jako video na Kine - nebo odkaz, když se zveřejnil sám.
+ */
+function liveEndedCard(ended: LiveEnded) {
+  // Vysílání viděli všichni - záznam je proto předvyplněný jako veřejný (jako na Twitchi), jde to změnit.
+  if (!endedForm || endedForm.at !== ended.at) endedForm = { at: ended.at, title: ended.title, visibility: 'public' };
+  const form = endedForm;
+  const head = h(
+    'div',
+    { class: 'row', style: 'align-items:center' },
+    h('h2', { class: 'grow', style: 'margin:0' }, '🎬 ' + t('liveEndedTitle', { duration: ended.duration })),
+    h('button', { class: 'small quiet live-ended-close', title: t('close'), 'aria-label': t('close'), onclick: () => void kine.dismissLiveEnded() }, '✕')
+  );
+  const studio = h('button', { class: 'small quiet', onclick: () => void kine.openKine('/live') }, t('liveEndedStudio') + ' →');
+
+  if (ended.video) {
+    return h(
+      'div',
+      { class: 'panel stack live-ended published' },
+      head,
+      h('p', { class: 'ok', style: 'margin:0' }, '✓ ' + t(ended.video.auto ? 'liveEndedPublishedAuto' : 'liveEndedPublished')),
+      ended.video.status === 'processing' ? h('p', { class: 'hint', style: 'margin:0' }, t('liveEndedProcessing')) : null,
+      h('div', { class: 'row' }, h('button', { class: 'small primary live-ended-open', onclick: () => void kine.openLiveRecording() }, '▶ ' + t('liveEndedOpen')), studio)
+    );
+  }
+  if (ended.autoPending) {
+    return h('div', { class: 'panel stack live-ended' }, head, h('p', { class: 'hint', style: 'margin:0' }, h('span', { class: 'spin' }), t('liveEndedAutoPending')));
+  }
+  const canPublish = !!status.account && !ended.publishing;
+  return h(
+    'div',
+    { class: 'panel stack live-ended' },
+    head,
+    h('p', { class: 'hint', style: 'margin:0' }, t('liveEndedRecordingHint')),
+    h(
+      'label',
+      {},
+      t('liveEndedVideoTitle'),
+      h('input', {
+        type: 'text',
+        class: 'live-ended-title',
+        'data-keep': 'live-ended-title',
+        maxlength: '150',
+        value: form.title,
+        placeholder: t('liveDefaultTitle'),
+        disabled: ended.publishing,
+        oninput: (e: Event) => (form.title = (e.target as HTMLInputElement).value),
+      })
+    ),
+    h(
+      'div',
+      { class: 'row', style: 'gap:10px;align-items:flex-end;flex-wrap:wrap' },
+      h(
+        'label',
+        { style: 'min-width:200px' },
+        t('liveEndedVisibility'),
+        h(
+          'select',
+          { class: 'live-ended-visibility', disabled: ended.publishing, onchange: (e: Event) => (form.visibility = (e.target as HTMLSelectElement).value as Visibility) },
+          ...VISIBILITIES.map((v) => h('option', { value: v, selected: form.visibility === v }, t(v === 'public' ? 'visibilityPublic' : v === 'subscribers' ? 'visibilitySubscribers' : 'visibilityPrivate')))
+        )
+      ),
+      h(
+        'button',
+        {
+          class: 'primary live-ended-publish',
+          disabled: !canPublish,
+          onclick: () => void kine.publishLiveRecording({ title: form.title.trim() || ended.title, visibility: form.visibility }),
+        },
+        ended.publishing ? h('span', { class: 'spin' }) : '⬆ ',
+        ended.publishing ? t('liveEndedPublishing') : t('liveEndedPublish')
+      )
+    ),
+    !status.account ? h('p', { class: 'hint warn-text', style: 'margin:0' }, t('liveEndedLoginNeeded')) : null,
+    ended.error ? h('p', { class: 'hint warn-text live-ended-error', style: 'margin:0' }, endedErrorText(ended.error)) : null,
+    h('div', {}, studio)
+  );
+}
+
+/** Chat v okně a co se záznamem po skončení. */
+function liveChatRecordingPanel() {
+  loadAfterStream();
+  const value = afterStream?.value ?? null;
+  const unsupported = afterStream?.supported === false;
+  return h(
+    'div',
+    { class: 'panel stack live-chat-panel' },
+    h('h2', { style: 'margin:0' }, '💬 ' + t('liveSecChatRec')),
+    h('p', { class: 'hint', style: 'margin:0' }, t('liveChatWindowHint')),
+    h(
+      'div',
+      { class: 'row', style: 'align-items:center;gap:14px;flex-wrap:wrap' },
+      h('button', { class: 'small live-chat-window', disabled: !status.account, onclick: () => void kine.openLiveChat() }, '🗨 ' + t('liveChatWindow')),
+      checkbox('liveChatOnTop', t('liveChatOnTop'))
+    ),
+    h(
+      'label',
+      { style: 'max-width:460px' },
+      t('liveAfterStreamLabel'),
+      h(
+        'select',
+        {
+          class: 'live-after-stream',
+          disabled: !status.account || afterStream === undefined || afterStreamSaving || unsupported,
+          onchange: (e: Event) => {
+            const v = (e.target as HTMLSelectElement).value;
+            saveAfterStream(v === 'ask' ? null : (v as Visibility));
+          },
+        },
+        h('option', { value: 'ask', selected: value === null }, t('liveAfterStreamAsk')),
+        h('option', { value: 'public', selected: value === 'public' }, t('liveAfterStreamPublic')),
+        h('option', { value: 'subscribers', selected: value === 'subscribers' }, t('liveAfterStreamSubscribers')),
+        h('option', { value: 'private', selected: value === 'private' }, t('liveAfterStreamPrivate'))
+      ),
+      h(
+        'span',
+        { class: `hint ${unsupported || afterStreamFailed ? 'warn-text' : ''}` },
+        unsupported ? t('liveAfterStreamUnsupported') : afterStreamFailed ? t('liveAfterStreamSaveFailed') : t('liveAfterStreamHint')
+      )
+    )
+  );
+}
+
 function renderLive() {
   const live = status.live;
   const idle = live.state === 'idle';
@@ -986,6 +1187,7 @@ function renderLive() {
         live.viewers !== null && onAir ? h('span', { class: 'live-viewers', title: t('liveViewersHint') }, '👁 ' + t('liveViewers', { count: live.viewers })) : null,
         h('span', { class: 'grow' }),
         live.watchUrl ? h('button', { class: 'small quiet', onclick: () => void kine.openLivePage() }, '💬 ' + t('sideLiveOpen')) : null,
+        onAir ? h('button', { class: 'small quiet live-chat-window', onclick: () => void kine.openLiveChat() }, '🗨 ' + t('liveChatWindowShort')) : null,
         h('button', { class: 'small', disabled: live.state === 'starting' || live.state === 'stopping', onclick: (e: Event) => stopLiveClick(e) }, t('sideLiveStop'))
       ),
       onAir
@@ -1044,6 +1246,8 @@ function renderLive() {
     { class: 'stack' },
     h('h1', {}, t('tabLive')),
     statusPanel,
+    // Po skončení vysílání: záznam na Kine (zveřejnit / otevřít).
+    idle && live.ended ? liveEndedCard(live.ended) : null,
 
     h(
       'div',
@@ -1095,6 +1299,8 @@ function renderLive() {
         )
       )
     ),
+
+    liveChatRecordingPanel(),
 
     // Co diváci vidí: náhled (hra + kamera), kamera a její místo, tvar, velikost.
     h(
@@ -1279,6 +1485,12 @@ function renderSide() {
         : null,
       // Na baterii se nahrává úsporně (720p30) - ať hráč ví, proč je klip menší.
       status.batterySaverActive ? h('div', { class: 'side-sub', title: t('batterySaverHint') }, '🔋 ' + t('sideBatterySaver')) : null,
+      // Aktualizace: stahuje se (procenta) / stažená - klik vede do O appce (tam je "Aktualizovat teď").
+      status.update?.phase === 'downloading'
+        ? h('button', { class: 'side-sub side-update', onclick: () => { tab = 'about'; render(); } }, '⬇ ' + t('sideUpdateDownloading', { percent: status.update.percent ?? 0 }))
+        : status.update?.phase === 'ready'
+          ? h('button', { class: 'side-sub side-update ready', onclick: () => { tab = 'about'; render(); } }, '⬆ ' + t('sideUpdateReady', { version: status.update.version ?? '' }))
+          : null,
       // Upozornění, která appka neukázala okénkem (zkratka nejde, mikrofon…) - klik vede tam, kde se to řeší.
       ...status.notices.map((n) => noticeRow(n)),
       // Hra běží, ale zvuk hry je ticho - nejčastěji hraje do jiného zařízení, než Windows nahrává.
@@ -1768,6 +1980,110 @@ function renderSettings() {
         h('span', { class: 'sub hint', style: 'margin-top:4px;display:block' }, t('launchCaptureHint'))
       ),
       h('p', { class: 'hint', style: 'margin:0' }, t('brandColorHint'))
+    ),
+    appearancePanel()
+  );
+}
+
+// ---- vzhled ---------------------------------------------------------------------------
+
+const GLASS_BACKDROP_LABELS: Record<GlassBackdrop, Key> = {
+  brand: 'lookBackdropBrand',
+  night: 'lookBackdropNight',
+  sunset: 'lookBackdropSunset',
+  forest: 'lookBackdropForest',
+  ocean: 'lookBackdropOcean',
+  neon: 'lookBackdropNeon',
+};
+
+/**
+ * Vzhled: klasický nebo sklo (průhledné plochy nad barevným pozadím jako
+ * upravený Spotify), barvy pozadí, síla skla, na Windows 11 průhledné
+ * okno (prosvítá plocha za appkou) a barva appky.
+ */
+function appearancePanel() {
+  const glass = settings.look === 'glass';
+  const lookCard = (look: Settings['look'], title: string, hint: string) =>
+    h(
+      'button',
+      { class: `look-option ${settings.look === look ? 'active' : ''}`, role: 'radio', 'aria-checked': settings.look === look ? 'true' : 'false', onclick: () => update({ look }) },
+      h('span', { class: `look-preview ${look === 'glass' ? 'glass' : ''}`, 'aria-hidden': 'true' }, h('i'), h('i'), h('i')),
+      h('b', {}, title),
+      h('span', { class: 'hint', style: 'margin:0' }, hint)
+    );
+  const custom = h('input', {
+    type: 'color',
+    class: 'color-input',
+    value: settings.brandColor || '#00c9a7',
+    title: t('brandColorCustom'),
+    onchange: (e: Event) => pickColor((e.target as HTMLInputElement).value),
+  });
+  return h(
+    'div',
+    { class: 'panel stack appearance-panel' },
+    h('h2', {}, t('lookTitle')),
+    h('div', { class: 'look-options', role: 'radiogroup', 'aria-label': t('lookTitle') }, lookCard('classic', t('lookClassic'), t('lookClassicHint')), lookCard('glass', t('lookGlass'), t('lookGlassHint'))),
+    glass
+      ? h(
+          'div',
+          { class: 'stack', style: 'gap:12px' },
+          h(
+            'div',
+            {},
+            h('div', { class: 'faint', style: 'margin-bottom:8px' }, t('lookBackdrop')),
+            h(
+              'div',
+              { class: 'look-backdrops', role: 'radiogroup', 'aria-label': t('lookBackdrop') },
+              ...GLASS_BACKDROPS.map((b) =>
+                h(
+                  'button',
+                  { class: `look-chip ${settings.glassBackdrop === b ? 'active' : ''}`, role: 'radio', 'aria-checked': settings.glassBackdrop === b ? 'true' : 'false', onclick: () => update({ glassBackdrop: b }) },
+                  h('span', { class: `look-swatch ${b}`, 'aria-hidden': 'true' }),
+                  t(GLASS_BACKDROP_LABELS[b])
+                )
+              )
+            )
+          ),
+          h(
+            'label',
+            { class: 'look-range' },
+            h('span', { class: 'faint' }, t('lookStrength')),
+            h(
+              'div',
+              { class: 'row', style: 'flex-wrap:nowrap' },
+              h('span', { class: 'faint' }, t('lookStrengthLow')),
+              h('input', {
+                type: 'range',
+                min: '0',
+                max: '100',
+                step: '5',
+                value: String(settings.glassStrength),
+                class: 'grow look-strength',
+                // Posuvník mění vzhled hned (bez čekání na hlavní proces), uloží se po puštění.
+                oninput: (e: Event) => document.documentElement.style.setProperty('--glass-k', String(Number((e.target as HTMLInputElement).value) / 100)),
+                onchange: (e: Event) => update({ glassStrength: Number((e.target as HTMLInputElement).value) }),
+              }),
+              h('span', { class: 'faint' }, t('lookStrengthHigh'))
+            )
+          ),
+          status.windowGlassSupported
+            ? checkbox('glassWindow', t('lookWindowGlass'), t('lookWindowGlassHint'))
+            : h('p', { class: 'hint', style: 'margin:0' }, t('lookWindowGlassUnsupported'))
+        )
+      : null,
+    h(
+      'div',
+      {},
+      h('div', { class: 'faint', style: 'margin-bottom:8px' }, t('brandColorTitle')),
+      h(
+        'div',
+        { class: 'color-row' },
+        ...PRESET_COLORS.map((c) =>
+          h('button', { class: `swatch ${settings.brandColor.toLowerCase() === c ? 'active' : ''}`, style: `background:${c}`, title: c, 'aria-label': c, onclick: () => pickColor(c) })
+        ),
+        h('label', { class: 'swatch custom', title: t('brandColorCustom') }, '+', custom),
+        h('button', { class: 'small quiet', onclick: () => pickColor(null) }, t('brandColorReset'))
+      )
     )
   );
 }
@@ -1897,7 +2213,14 @@ function updateMeters() {
 function audioLiveNote(): string {
   const l = audioLevels;
   if (status.capture !== 'on' || !l) return t('audioMetersIdle');
-  if (l.system === null) return settings.systemAudio ? t('audioNoSystemTrack') : t('audioSystemOff');
+  if (l.system === null) {
+    if (!settings.systemAudio) return t('audioSystemOff');
+    // Proč: zařízení a důvod od Windows (bez něj se nedá poradit).
+    return l.systemError
+      ? t('audioLoopbackFailedNote', { device: l.defaultOutput || t('audioDefaultDevice'), reason: l.systemError })
+      : t('audioNoSystemTrack');
+  }
+  if (l.systemFallback) return t('audioFallbackNote', { device: l.systemFallback });
   const device = l.systemDevice || t('audioDefaultDevice');
   if (l.systemSilentSeconds >= 10) return t('audioSilentNote', { device, seconds: l.systemSilentSeconds });
   return t('audioSourceNote', { device });
@@ -1906,6 +2229,14 @@ function audioLiveNote(): string {
 /** Zařízení Bluetooth (Chromium dává do názvu "(Bluetooth)", sluchátka v režimu hovoru "Hands-Free"). */
 function isBluetooth(label: string): boolean {
   return /\(Bluetooth\)|hands-?free|\bLE Audio\b/i.test(label);
+}
+
+/** Hláška po "Zkusit znovu" u zvuku hry. */
+let audioRetryNote = '';
+
+/** Vstup, který nahrává zvuk počítače (ne hlas): Stereo Mix, VB-Cable, Voicemeeter... (stejné jako capture.ts). */
+function isLoopbackLabel(label: string): boolean {
+  return /stereo ?mix|mix st[ée]r[ée]o|what u hear|cable output|voicemeeter out|wave ?out|loopback/i.test(label);
 }
 
 /** Posun zvuku vůči obrazu (-300..+300 ms): když zvuk v klipech sedí jinak, než by měl. */
@@ -1958,6 +2289,8 @@ function audioPanel(win: boolean) {
       out
     );
   };
+  const loopbackInputs = inputs.filter((d) => isLoopbackLabel(d.label));
+  const micInputs = inputs.filter((d) => !isLoopbackLabel(d.label));
   // Ticho se ukáže i bez rozpoznané hry - hráč se sem dívá právě proto, že něco nehraje.
   const silent = status.capture === 'on' && !!audioLevels && audioLevels.system !== null && audioLevels.systemSilentSeconds >= 10;
   return h(
@@ -1976,6 +2309,40 @@ function audioPanel(win: boolean) {
     h('p', { class: `hint audio-live-note ${silent ? 'error' : ''}`, style: 'margin:0' }, audioLiveNote()),
     // Sluchátka Bluetooth: nejčastější důvod ticha i špatného zvuku (režim hovoru) - vlastní rada.
     silent ? h('p', { class: 'hint audio-silent-help', style: 'margin:0' }, isBluetooth(audioLevels?.systemDevice ?? '') ? t('audioSilentHelpBluetooth') : t('audioSilentHelp')) : null,
+    // Zvuk hry nejde otevřít: proč, co s tím a zkusit znovu (snímání se rozjede znovu).
+    status.capture === 'on' && settings.systemAudio && audioLevels && audioLevels.system === null && !settings.systemAudioDevice
+      ? h(
+          'div',
+          { class: 'audio-fix stack', style: 'gap:6px' },
+          h('p', { class: 'hint', style: 'margin:0' }, t('audioLoopbackSteps')),
+          h(
+            'ol',
+            { class: 'audio-fix-steps' },
+            h('li', {}, t('audioLoopbackStep1', { device: audioLevels.defaultOutput || t('audioDefaultDevice') })),
+            h('li', {}, t('audioLoopbackStep2')),
+            h('li', {}, t('audioLoopbackStep3')),
+            h('li', {}, t('audioLoopbackStep4'))
+          ),
+          h(
+            'div',
+            { class: 'row' },
+            h(
+              'button',
+              {
+                class: 'small',
+                onclick: () =>
+                  void kine.restartCapture().then((r) => {
+                    audioRetryNote = r === 'busy' ? t('audioRetryBusy') : t('audioRetrying');
+                    render();
+                  }),
+              },
+              '↻ ' + t('audioRetry')
+            ),
+            h('button', { class: 'small quiet', onclick: () => void kine.openSoundSettings() }, t('audioOpenWindowsSound'))
+          ),
+          audioRetryNote ? h('p', { class: 'hint', style: 'margin:0' }, audioRetryNote) : null
+        )
+      : null,
     status.capture === 'on' && audioLevels?.bluetoothMicAvoided
       ? h('p', { class: 'hint audio-bt-note', style: 'margin:0' }, '🎧 ' + (audioLevels.micDevice ? t('audioBluetoothMicSwitched', { mic: audioLevels.micDevice }) : t('audioBluetoothMicOff')))
       : null,
@@ -1989,7 +2356,14 @@ function audioPanel(win: boolean) {
             'select',
             { class: 'system-audio-device', onchange: (e: Event) => update({ systemAudioDevice: (e.target as HTMLSelectElement).value }) },
             h('option', { value: '', selected: settings.systemAudioDevice === '' }, t('systemAudioLoopback')),
-            ...inputs.map((d) => h('option', { value: d.id, selected: settings.systemAudioDevice === d.id }, d.label)),
+            // Vstupy, které nahrávají zvuk počítače (Stereo Mix, VB-Cable...), zvlášť od mikrofonů -
+            // mikrofon jako "zvuk hry" by nahrál hlas, ne hru.
+            loopbackInputs.length > 0
+              ? h('optgroup', { label: t('audioSourceLoopbackGroup') }, ...loopbackInputs.map((d) => h('option', { value: d.id, selected: settings.systemAudioDevice === d.id }, d.label)))
+              : null,
+            micInputs.length > 0
+              ? h('optgroup', { label: t('audioSourceMicGroup') }, ...micInputs.map((d) => h('option', { value: d.id, selected: settings.systemAudioDevice === d.id }, d.label)))
+              : null,
             settings.systemAudioDevice && !inputs.some((d) => d.id === settings.systemAudioDevice)
               ? h('option', { value: settings.systemAudioDevice, selected: true }, t('audioMissingDevice'))
               : null
@@ -2429,7 +2803,8 @@ function uploadState(clip: Clip) {
   if (u.state === 'paused') return h('div', {}, h('div', { class: 'progress' }, h('span', { style: `width:${u.percent}%` })), h('div', { class: 'state' }, t(u.reason === 'game' ? 'uploadPausedGame' : 'uploadPausedOffline', { percent: u.percent })));
   if (u.state === 'done' && u.ready === false) return h('div', { class: 'state processing', title: t('uploadProcessingHint') }, h('span', { class: 'spin' }), ' ' + t('uploadProcessing'));
   if (u.state === 'done') return h('div', { class: 'state done' }, '✓ ' + t('uploadDone'));
-  return h('div', { class: 'state error' }, t('uploadError', { message: u.message }));
+  // Nepřihlášený (kód z uploaderu): přeložená hláška místo české odpovědi serveru.
+  return h('div', { class: 'state error' }, u.message === 'login-required' ? t('uploadErrorLogin') : t('uploadError', { message: u.message }));
 }
 
 function dateFrom(filter: DateFilter): number {
@@ -3055,6 +3430,79 @@ function renderClips() {
 
 // ---- o appce -------------------------------------------------------------------------------
 
+/** Velikost v MB s jedním desetinným místem podle jazyka. */
+function mbText(bytes: number): string {
+  return (bytes / 1048576).toLocaleString(settings.lang, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+}
+
+/** Stáhnout teď / Aktualizovat teď (O appce, postranní panel). */
+function installUpdateClick() {
+  if (updateInstalling) return;
+  updateInstalling = true;
+  updateBusy = false;
+  render();
+  void kine.installUpdate().then((r) => {
+    if (r === 'ok') return;
+    updateInstalling = false;
+    updateBusy = r === 'busy';
+    render();
+  });
+}
+
+/**
+ * Aktualizace, která se stahuje / je stažená: průběh (procenta, MB,
+ * rychlost) a pak jedno tlačítko "Aktualizovat teď" - appka se zavře,
+ * nainstaluje novou verzi a sama se znovu spustí.
+ */
+function updateProgressBox() {
+  const u = status.update;
+  if (!u || (u.phase !== 'downloading' && u.phase !== 'ready' && u.phase !== 'waiting-game' && u.phase !== 'error' && u.phase !== 'checking')) return null;
+  const version = u.version ?? '';
+  const box = h('div', { class: `stack update-progress ${u.phase}`, style: 'gap:8px' });
+  if (u.phase === 'checking') {
+    box.append(h('p', { class: 'faint', style: 'margin:0' }, h('span', { class: 'spin' }), ' ', t('aboutUpdateChecking')));
+  } else if (u.phase === 'downloading') {
+    const percent = Math.max(0, Math.min(100, u.percent ?? 0));
+    box.append(
+      h('p', { style: 'margin:0' }, t('aboutUpdateDownloading', { version, percent })),
+      h('div', { class: 'progress update-bar', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(percent) }, h('span', { style: `width:${percent}%` }))
+    );
+    if (u.total) {
+      box.append(
+        h(
+          'p',
+          { class: 'faint', style: 'margin:0' },
+          t('aboutUpdateDownloadedOf', { done: mbText(u.transferred ?? 0), total: mbText(u.total) }) +
+            (u.bytesPerSecond ? ' · ' + t('aboutUpdateSpeed', { speed: mbText(u.bytesPerSecond) }) : '')
+        )
+      );
+    }
+  } else if (u.phase === 'ready') {
+    box.append(
+      h('p', { class: 'ok', style: 'margin:0' }, '✓ ' + t('aboutUpdateReady', { version })),
+      h(
+        'div',
+        { class: 'row', style: 'align-items:center' },
+        h(
+          'button',
+          { class: 'primary update-now', disabled: updateInstalling, onclick: installUpdateClick },
+          updateInstalling ? h('span', { class: 'spin' }) : '⬆ ',
+          updateInstalling ? t('aboutUpdateInstalling') : t('aboutUpdateNow')
+        )
+      ),
+      updateBusy ? h('p', { class: 'hint warn-text', style: 'margin:0' }, t('aboutUpdateBusy')) : h('p', { class: 'faint', style: 'margin:0' }, t('aboutUpdateRestartHint'))
+    );
+  } else if (u.phase === 'waiting-game') {
+    box.append(
+      h('p', { style: 'margin:0' }, t('aboutUpdateWaitsGame', { version })),
+      h('div', {}, h('button', { class: 'small', onclick: () => void kine.downloadUpdate() }, '⬇ ' + t('aboutUpdateDownloadNow')))
+    );
+  } else if (u.phase === 'error') {
+    box.append(h('p', { class: 'error', style: 'margin:0' }, t('aboutUpdateFailed', { message: u.error ?? '' })));
+  }
+  return box;
+}
+
 /** Výsledek kontroly aktualizací: stav, důvod chyby, odkud se berou, u ručního stažení tlačítko. */
 function updateStatus(r: NonNullable<typeof updateResult>) {
   const version = r.version ?? '';
@@ -3084,10 +3532,13 @@ let diagnosticsCopiedAt = 0;
 
 function renderAbout() {
   const copied = Date.now() - diagnosticsCopiedAt < 5000;
+  const progressBox = updateProgressBox();
+  // Průběh stahování nahrazuje hlášku "verze X je venku" z ručního zkontrolování (jinak by tam byly dvě).
+  const showResult = updateResult && !(progressBox && (updateResult.status === 'available' || updateResult.status === 'checking' || updateResult.status === 'error'));
   return h(
     'div',
     { class: 'stack' },
-    h('h1', {}, t('aboutTitle')),
+    h('h1', {}, status.variant === 'clipper' ? t('variantClipperName') : t('aboutTitle')),
     h(
       'div',
       { class: 'panel stack' },
@@ -3114,7 +3565,8 @@ function renderAbout() {
         h('button', { class: 'small quiet', onclick: () => void kine.openLogs() }, t('aboutLogs')),
         h('button', { class: 'small quiet', onclick: () => void kine.openKine() }, t('trayOpenKine'))
       ),
-      updateResult ? updateStatus(updateResult) : null
+      progressBox,
+      showResult && updateResult ? updateStatus(updateResult) : null
     ),
     // Když něco nejde: technické údaje do schránky, hráč je vloží do zprávy.
     h(

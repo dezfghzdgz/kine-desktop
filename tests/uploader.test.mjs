@@ -158,8 +158,10 @@ test('bez přihlášení skončí klip s chybou, ne zaseknutý', async () => {
   const failed = new Promise((resolve) => uploader.on((e) => e.type === 'error' && resolve(e)));
   uploader.enqueue([{ clipId: 'c1', visibility: 'private' }]);
   const e = await failed;
-  assert.match(e.message, /přihlášen/);
+  // Kód místo české hlášky serveru - okno i okénko ho ukážou přeložený (uploadErrorLogin).
+  assert.equal(e.message, 'login-required');
   assert.equal(library.get('c1').upload.state, 'error');
+  assert.equal(library.get('c1').upload.message, 'login-required');
   assert.equal(uploader.pending(), 0);
   mock.server.close();
 });

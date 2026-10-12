@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { cpus, homedir, release, totalmem } from 'node:os';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, statfsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
@@ -30,6 +31,7 @@ import {
   type CaptureEvent,
   type Clip,
   type DisplayInfo,
+  type LiveAfterStream,
   type LiveQuality,
   type LiveScene,
   type LiveStatus,
@@ -56,10 +58,10 @@ import { GameWatcher, type DetectedGame } from './games';
 import { GameEvents } from './gameEvents';
 import { KNOWN_GAMES } from './gamesParse';
 import { Auth } from './auth';
-import { createKineApi } from './kineApi';
-import { Uploader } from './uploader';
+import { createKineApi, type KineApi } from './kineApi';
+import { UPLOAD_ERROR_LOGIN, Uploader } from './uploader';
 import { Toast, type ToastHandle, type ToastOptions } from './toast';
-import { checkForUpdates, initUpdater, onGameEnded as updaterGameEnded } from './updater';
+import { checkForUpdates, downloadUpdateNow, initUpdater, installUpdateNow, onGameEnded as updaterGameEnded, onUpdateProgress, updateProgress } from './updater';
 import { runTestDriver } from './testDriver';
 import { WinHelper } from './winHelper';
 import { makeGif, makeThumbnail, mergeClips, trimClip } from './edit';
@@ -169,6 +171,9 @@ class KineApp {
   capture!: CaptureManager;
   /** Živé vysílání z appky na Kine (tlačítko Vysílat). */
   live!: LiveController;
+  private kineApi!: KineApi;
+  /** Okno s chatem vlastního vysílání (Twitch "popout chat"). */
+  private chatWindow: BrowserWindow | null = null;
   /** Zásobník rozjelo až vysílání (nebyla hra / ruční režim) - po konci vysílání se zase vypne. */
   private liveStartedCapture = false;
   games!: GameWatcher;
@@ -276,6 +281,7 @@ class KineApp {
 
     this.auth = new Auth(() => this.settings.get().siteUrl);
     const api = createKineApi({ siteUrl: () => this.settings.get().siteUrl, getToken: () => this.auth.getToken() });
+    this.kineApi = api;
 
     this.toast = new Toast({
       preload: PRELOAD,
@@ -325,6 +331,17 @@ class KineApp {
           this.quietNotice(`capture:${kind}`, this.t('toastSystemAudioDevice', { message: clean }), 'warn', 'settings');
           return;
         }
+        if (kind === 'systemLoopback') {
+          // Zvuk hry (výchozí výstup Windows) nejde otevřít - rada je v Nastavení -> Záznam.
+          const device = message.split(' | ')[1]?.trim() || this.t('audioDefaultDevice');
+          this.quietNotice(`capture:${kind}`, this.t('toastAudioLoopbackFailed', { device }), 'warn', 'settings');
+          return;
+        }
+        if (kind === 'systemAudioFallback') {
+          this.quietNotice(`capture:${kind}`, this.t('toastAudioFallback', { device: clean }), 'info', 'settings');
+          return;
+        }
+        if (kind === 'systemAudioRetry') return; // povedlo se na druhý pokus - jen do logu
         this.quietNotice(`capture:${kind}`, this.t('toastMicUnavailable', { message: clean }), 'warn', 'settings');
       },
       onLevels: (levels) => this.onAudioLevels(levels),
@@ -425,7 +442,10 @@ class KineApp {
         const id = e.clip.id;
         void this.toast.show(this.t('toastOnKine', { title: e.clip.title }), 'ok', { notification: true, onClick: () => this.openClipOnKine(id) });
       }
-      if (e.type === 'error') void this.toast.show(this.t('toastUploadFailed', { title: e.clip.title }) + ` (${e.message})`, 'error', { notification: true });
+      if (e.type === 'error') {
+        const reason = e.message === UPLOAD_ERROR_LOGIN ? this.t('uploadErrorLogin') : e.message;
+        void this.toast.show(this.t('toastUploadFailed', { title: e.clip.title }) + ` (${reason})`, 'error', { notification: true, onClick: e.message === UPLOAD_ERROR_LOGIN ? () => this.openSettings('account') : undefined });
+      }
       this.pushStatus();
       this.pushClips();
     });
@@ -450,6 +470,8 @@ class KineApp {
     this.createTray();
     this.applyLoginItem();
     initUpdater({ variant: VARIANT, siteUrl: () => this.settings.get().siteUrl, gameRunning: () => !!this.games.current(), checkHours: () => this.profile().updateCheckHours });
+    // Průběh stahování aktualizace do okna (O appce, postranní panel) a "Aktualizovat" do lišty.
+    onUpdateProgress(() => this.pushStatusSoon());
 
     this.settings.onChange((s, prev) => this.onSettingsChanged(s, prev));
     this.announceVersion();
@@ -890,6 +912,10 @@ class KineApp {
     const level = (v: number | null) => (v === null ? 'off' : v > 0 ? `${Math.round(20 * Math.log10(v))} dB` : 'silent');
     if (l) {
       lines.push(`Levels: game ${level(l.system)} from "${l.systemDevice || 'default'}" (silent ${l.systemSilentSeconds} s) · mic ${level(l.mic)}${l.micDevice ? ` "${l.micDevice}"` : ''}${l.bluetoothMicAvoided ? ' · Bluetooth mic avoided' : ''}`);
+      // Zvuk hry nejde: důvod od Windows a výchozí výstup - podle toho se dá poradit.
+      if (l.systemError || l.systemFallback || l.defaultOutput) {
+        lines.push(`Game audio: default output "${l.defaultOutput || '?'}"${l.systemError ? ` · FAILED: ${l.systemError}` : ''}${l.systemFallback ? ` · fallback input "${l.systemFallback}"` : ''}`);
+      }
     }
     lines.push(`Game: ${this.games.current()?.name ?? '-'} · detection ${s.detection} · performance ${s.performance} · clip ${s.clipSeconds} s · paused ${yesNo(this.paused)} · recording ${yesNo(!!c.recordingInfo())}`);
     lines.push(`Library: ${this.library.list().length} clips · free ${Math.round(freeDiskBytes(this.settings.clipsDir()) / 1024 ** 3)} GB`);
@@ -1088,6 +1114,110 @@ class KineApp {
     this.openSettings('live');
   }
 
+  /** Záznam posledního vysílání na Kine (karta v záložce Živě, okénko). */
+  openLiveRecording(): void {
+    const video = this.live.current().ended?.video;
+    this.openKine(video ? `/watch/${video.id}` : '/live');
+  }
+
+  /** Zveřejnit záznam posledního vysílání (karta v záložce Živě). */
+  async publishLiveRecording(opts: { title?: unknown; visibility?: unknown }): Promise<void> {
+    const s = this.settings.get();
+    const visibility = (VISIBILITIES as readonly string[]).includes(String(opts?.visibility)) ? (opts.visibility as Visibility) : 'public';
+    await this.live.publishRecording({ title: typeof opts?.title === 'string' ? opts.title : undefined, visibility, language: s.videoLanguage });
+  }
+
+  /** Co se záznamem po skončení vysílání - nastavení žije na Kine (stejné jako ve studiu na webu). */
+  async liveAfterStream(): Promise<LiveAfterStream | null> {
+    if (!this.auth.current()) return null;
+    try {
+      const setup = await this.kineApi.liveSetup();
+      return { value: setup.recordingVisibility, supported: setup.recordingAutoSupported };
+    } catch (e) {
+      log(`vysílání: nastavení záznamu nejde načíst: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  async setLiveAfterStream(value: unknown): Promise<LiveAfterStream | null> {
+    if (!this.auth.current()) return null;
+    const visibility = (VISIBILITIES as readonly string[]).includes(String(value)) ? (value as Visibility) : null;
+    try {
+      const result = await this.kineApi.liveSetRecordingVisibility(visibility);
+      this.live.setAutoPublish(result.supported && result.value !== null);
+      log(`vysílání: po skončení ${result.value ?? 'nechat ve studiu'}${result.supported ? '' : ' (Kine to zatím neumí)'}`);
+      return result;
+    } catch (e) {
+      log(`vysílání: nastavení záznamu nejde uložit: ${(e as Error).message}`);
+      throw e;
+    }
+  }
+
+  /**
+   * Chat vlastního vysílání v malém okně (jako "popout chat" na Twitchi):
+   * jde dát na druhý monitor, nebo nechat nahoře nad hrou v okně bez
+   * rámečku. Relace je stejná jako u Kine v okně; přihlášení appky se do
+   * něj předá jednorázovým tokenem (/connect/app), ať jde i psát.
+   */
+  async openLiveChat(): Promise<void> {
+    const account = this.auth.current();
+    const watchUrl = this.live.current().watchUrl;
+    const ownerId = watchUrl?.split('/live/')[1]?.split(/[/?#]/)[0] || account?.userId || null;
+    if (!ownerId) {
+      this.openSettings('account');
+      return;
+    }
+    const onTop = this.settings.get().liveChatOnTop;
+    if (this.chatWindow && !this.chatWindow.isDestroyed()) {
+      this.chatWindow.setAlwaysOnTop(onTop, 'floating');
+      this.chatWindow.show();
+      this.chatWindow.focus();
+      return;
+    }
+    const site = this.settings.get().siteUrl;
+    const chatPath = `/live/${encodeURIComponent(ownerId)}/chat`;
+    const win = new BrowserWindow({
+      width: 380,
+      height: 640,
+      minWidth: 280,
+      minHeight: 320,
+      title: this.t('liveChatWindowTitle'),
+      backgroundColor: '#0b0b0d',
+      autoHideMenuBar: true,
+      icon: this.appIcon(),
+      webPreferences: { partition: 'persist:kine-web', contextIsolation: true, sandbox: true, spellcheck: true },
+    });
+    win.setMenuBarVisibility(false);
+    win.setAlwaysOnTop(onTop, 'floating');
+    this.chatWindow = win;
+    win.on('closed', () => {
+      if (this.chatWindow === win) this.chatWindow = null;
+    });
+    win.on('page-title-updated', (e) => e.preventDefault());
+    win.webContents.setUserAgent(`${win.webContents.getUserAgent()} KineDesktop/${app.getVersion()}`);
+    // Odkazy z chatu do prohlížeče; okno zůstává u chatu.
+    win.webContents.setWindowOpenHandler(({ url }) => {
+      if (/^https?:/.test(url)) void shell.openExternal(url);
+      return { action: 'deny' };
+    });
+    win.webContents.on('will-navigate', (e, target) => {
+      if (!this.isKineUrl(target)) {
+        e.preventDefault();
+        if (/^https?:/.test(target)) void shell.openExternal(target);
+      }
+    });
+    let url = site + chatPath;
+    if (account) {
+      try {
+        const th = await this.auth.webLinkToken();
+        if (th) url = `${site}/connect/app?th=${encodeURIComponent(th)}&next=${encodeURIComponent(chatPath)}`;
+      } catch (e) {
+        log(`chat v okně: přihlášení se nepředalo (${(e as Error).message}) - jen ke čtení`);
+      }
+    }
+    if (!win.isDestroyed()) void win.loadURL(url);
+  }
+
   /** Po konci vysílání: zásobník, který rozjelo jen vysílání, se zase vypne. */
   private afterLive(): void {
     const s = this.settings.get();
@@ -1104,10 +1234,14 @@ class KineApp {
     return this.t(key, key === 'liveErrOther' ? { message: clean.slice(0, 160) } : {});
   }
 
-  private onLiveNotice(kind: 'live' | 'reconnecting' | 'ended' | 'failed' | 'slow', info: { error?: string; duration?: string }): void {
+  private onLiveNotice(kind: 'live' | 'reconnecting' | 'ended' | 'failed' | 'slow' | 'recording', info: { error?: string; duration?: string; url?: string }): void {
     if (kind === 'live') void this.toast.show(this.t('toastLiveStarted'), 'ok', { notification: true, onClick: () => this.openLivePage() });
     else if (kind === 'reconnecting') void this.toast.show(this.t('toastLiveReconnecting'), 'warn');
-    else if (kind === 'ended') void this.toast.show(this.t('toastLiveEnded', { duration: info.duration ?? '' }), 'ok', { onClick: () => this.openKine('/live') });
+    else if (kind === 'ended') {
+      // Klik vede na kartu záznamu v záložce Živě (zveřejnit na Kine / otevřít).
+      const auto = !!this.live.current().ended?.autoPending;
+      void this.toast.show(this.t(auto ? 'toastLiveEndedAuto' : 'toastLiveEndedPublish', { duration: info.duration ?? '' }), 'ok', { onClick: () => this.openSettings('live') });
+    } else if (kind === 'recording') void this.toast.show(this.t('toastLiveRecordingOnKine'), 'ok', { notification: true, onClick: () => this.openLiveRecording() });
     else if (kind === 'slow') void this.toast.show(this.t('toastLiveSlow'), 'warn', { notification: true });
     else void this.toast.show(this.t('toastLiveFailed', { message: this.liveErrorText(info.error) }), 'error', { notification: true });
   }
@@ -1228,6 +1362,10 @@ class KineApp {
   // ---- nastavení ----------------------------------------------------------------
 
   private onSettingsChanged(s: Settings, prev: Settings): void {
+    // Vzhled: průhledné okno (Windows 11) zapnout / vypnout hned.
+    if (s.look !== prev.look || s.glassWindow !== prev.glassWindow) this.applyWindowGlass(this.settingsWindow);
+    // Okno s chatem: "drž nahoře" platí hned.
+    if (s.liveChatOnTop !== prev.liveChatOnTop && this.chatWindow && !this.chatWindow.isDestroyed()) this.chatWindow.setAlwaysOnTop(s.liveChatOnTop, 'floating');
     if (
       s.clipHotkey !== prev.clipHotkey ||
       s.toggleHotkey !== prev.toggleHotkey ||
@@ -1561,9 +1699,20 @@ class KineApp {
       { label: this.t('traySettings'), click: () => this.openSettings('settings') },
       { label: this.paused ? this.t('trayResume') : this.t('trayPause'), click: () => void this.togglePause() },
       { label: this.t('trayOpenKine'), click: () => this.openKine() },
-      { type: 'separator' },
-      { label: this.t('trayQuit'), click: () => this.quit() }
+      { type: 'separator' }
     );
+    // Stažená aktualizace: jedním klikem restart do nové verze (během vysílání / nahrávání vede do okna, kde se řekne proč ne).
+    const update = updateProgress();
+    if (update.phase === 'ready') {
+      items.push({
+        label: this.t('trayUpdateNow', { version: update.version ?? '' }),
+        click: () =>
+          void this.installUpdate().then((r) => {
+            if (r !== 'ok') this.openSettings('about');
+          }),
+      });
+    }
+    items.push({ label: this.t('trayQuit'), click: () => this.quit() });
     this.tray.setContextMenu(Menu.buildFromTemplate(items));
     this.tray.setToolTip(`${PRODUCT} · ${this.statusLine()}`);
     // Červená tečka na ikoně, dokud běží nahrávání zápasu nebo vysílání.
@@ -1614,6 +1763,7 @@ class KineApp {
     });
     win.setMenuBarVisibility(false);
     this.settingsWindow = win;
+    this.applyWindowGlass(win);
     void win.loadFile(join(RENDERER_DIR, 'settings.html'), { query: tab ? { tab } : {} });
     win.on('closed', () => {
       this.settingsWindow = null;
@@ -1964,7 +2114,36 @@ class KineApp {
       notices: [...this.notices],
       hwEncoder: this.capture.hwEncoder,
       live: this.live.current(),
+      update: updateProgress(),
+      windowGlass: this.windowGlassOn(),
+      windowGlassSupported: this.windowGlassSupported(),
     };
+  }
+
+  // ---- vzhled: průhledné okno ------------------------------------------------------------
+
+  /** Acrylic za oknem umí Windows 11 22H2+ (sestavení 22621); jinde zůstane barevné pozadí ve stránce. */
+  private windowGlassSupported(): boolean {
+    if (process.platform !== 'win32') return false;
+    const build = Number(release().split('.')[2] ?? 0);
+    return Number.isFinite(build) && build >= 22621;
+  }
+
+  private windowGlassOn(): boolean {
+    const s = this.settings.get();
+    return s.look === 'glass' && s.glassWindow && this.windowGlassSupported();
+  }
+
+  /** Průhledné okno: Acrylic (rozmazaná plocha za oknem) + průhledné pozadí okna; vypnuto = plná barva. */
+  private applyWindowGlass(win: BrowserWindow | null | undefined): void {
+    if (!win || win.isDestroyed() || process.platform !== 'win32') return;
+    const on = this.windowGlassOn();
+    try {
+      win.setBackgroundMaterial(on ? 'acrylic' : 'none');
+      win.setBackgroundColor(on ? '#00000000' : '#050506');
+    } catch (e) {
+      log(`průhledné okno: ${(e as Error).message}`);
+    }
   }
 
   pushStatus(): void {
@@ -2343,6 +2522,12 @@ class KineApp {
     ipcMain.handle('live:start', (_e, opts: { title?: unknown; quality?: unknown }) => this.startLive(opts ?? {}));
     ipcMain.handle('live:stop', () => this.stopLive());
     ipcMain.handle('live:openPage', () => this.openLivePage());
+    ipcMain.handle('live:openChat', () => this.openLiveChat());
+    ipcMain.handle('live:publishRecording', (_e, opts: { title?: unknown; visibility?: unknown }) => this.publishLiveRecording(opts ?? {}));
+    ipcMain.handle('live:dismissEnded', () => this.live.dismissEnded());
+    ipcMain.handle('live:openRecording', () => this.openLiveRecording());
+    ipcMain.handle('live:afterStream', () => this.liveAfterStream());
+    ipcMain.handle('live:setAfterStream', (_e, value: unknown) => this.setLiveAfterStream(value));
     ipcMain.handle('live:brb', (_e, on?: unknown) => this.toggleLiveBrb(typeof on === 'boolean' ? on : undefined));
     ipcMain.handle('live:muteMic', (_e, muted: unknown) => this.setLiveMicMuted(Boolean(muted)));
     ipcMain.handle('app:usage', () => this.resourceUsage());
@@ -2497,7 +2682,23 @@ class KineApp {
     });
 
     ipcMain.handle('app:checkUpdate', () => checkForUpdates());
+    ipcMain.handle('app:installUpdate', () => this.installUpdate());
+    ipcMain.handle('app:downloadUpdate', () => downloadUpdateNow());
     ipcMain.handle('app:openLogs', () => shell.openPath(logDir()));
+    // Zvuk hry nejde: "Zkusit znovu" (snímání se rozjede znovu) a Zvuk ve Windows (zařízení, Stereo Mix, výhradní režim).
+    ipcMain.handle('capture:restart', async () => {
+      if (this.capture.recordingInfo() || this.finishingRecording || this.live.active()) return 'busy';
+      await this.capture.restartIfOn();
+      return 'ok';
+    });
+    ipcMain.handle('app:openSoundSettings', () => {
+      if (process.platform !== 'win32') return;
+      try {
+        spawn('control', ['mmsys.cpl', 'sounds'], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
+      } catch {
+        void shell.openExternal('ms-settings:sound');
+      }
+    });
     ipcMain.handle('app:copyDiagnostics', async () => {
       await clipboard.writeText(await this.diagnostics());
       return true;
@@ -2548,6 +2749,39 @@ class KineApp {
   }
 
   private quitting = false;
+
+  /**
+   * "Aktualizovat" (O appce, lišta): stažená verze se nainstaluje hned a
+   * appka se sama znovu spustí. Během vysílání a nahrávání zápasu ne (o
+   * vysílání by hráč přišel) - okno řekne, ať je nejdřív ukončí.
+   */
+  async installUpdate(): Promise<'ok' | 'busy' | 'not-ready'> {
+    if (this.live.active() || this.capture.recordingInfo() || this.finishingRecording) return 'busy';
+    if (updateProgress().phase !== 'ready') return 'not-ready';
+    if (this.quitting) return 'ok';
+    this.quitting = true;
+    log('konec kvůli aktualizaci');
+    const started = await installUpdateNow(async () => {
+      this.helper?.stop();
+      this.uploader.stopWaiting();
+      await Promise.race([this.gameEvents.stop(), new Promise((r) => setTimeout(r, 2000))]).catch(() => undefined);
+      await Promise.race([this.stopCapture('quit'), new Promise((r) => setTimeout(r, 6000))]).catch(() => undefined);
+      this.toast.destroy();
+    });
+    if (started === 'not-ready') {
+      this.quitting = false;
+      return 'not-ready';
+    }
+    if (started === 'failed') {
+      // Snímání a pomocník už stojí - čistý restart do stávající verze (aktualizace se zkusí znovu příště).
+      app.relaunch();
+      app.exit(0);
+      return 'ok';
+    }
+    // Pojistka: instalátor už běží - kdyby se appka sama nezavřela, zavřít ji (jinak by instalátor čekal).
+    setTimeout(() => app.exit(0), 8000);
+    return 'ok';
+  }
 
   quit(): void {
     // Druhé "Ukončit" (lišta, okno) během ukončování nic nespouští znovu.

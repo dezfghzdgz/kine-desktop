@@ -137,7 +137,7 @@ export class CaptureManager {
       rendererDir: string;
       /** `runtime` = snímání spadlo za běhu (ne při startu) - hlavní proces ho zkusí rozjet znovu. */
       onState: (state: CaptureState, error: string | null, runtime: boolean) => void;
-      onWarning?: (kind: 'microphone' | 'systemAudio' | 'bluetoothMic', message: string) => void;
+      onWarning?: (kind: Extract<CaptureEvent, { type: 'warning' }>['kind'], message: string) => void;
       /** Hladiny zvuku ze snímací stránky (zhruba každou sekundu). */
       onLevels?: (levels: AudioLevels) => void;
       /** Výchozí výstup Windows se změnil - snímání se má rozjet znovu (loopback visí na starém). */

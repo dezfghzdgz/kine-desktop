@@ -46,6 +46,10 @@ let meters: { system: AnalyserNode | null; mic: AnalyserNode | null; timer: Retu
 /** Název výchozího výstupního zařízení Windows ve chvíli startu (loopback na něm visí). */
 let defaultOutputAtStart = '';
 let systemDeviceLabel = '';
+/** Proč se zvuk hry nepodařilo otevřít (krátce, pro nastavení a diagnostiku); prázdné = jde. */
+let systemAudioError = '';
+/** Zvuk hry se bere náhradně ze vstupu "Stereo Mix" a spol. (název), protože loopback výstupu nešel. */
+let systemAudioFallback = '';
 /** Zpoždění mikrofonu podle Chromia (ms) - o tolik se při stavbě klipu mikrofon posune dopředu. */
 let micLatencyMs = 0;
 /** Je v počítači hardwarový kodér H.264? Zjišťuje se jednou (WebCodecs). */
@@ -175,6 +179,68 @@ function trackLatencyMs(track: MediaStreamTrack | null): number {
   return typeof latency === 'number' && Number.isFinite(latency) && latency > 0 && latency < 1 ? Math.round(latency * 1000) : 0;
 }
 
+/** Krátký důvod chyby pro hráče a diagnostiku ("NotReadableError: Could not start audio source"). */
+function errorText(e: unknown): string {
+  if (!e) return '';
+  const err = e as { name?: string; message?: string };
+  const text = `${err.name && err.name !== 'Error' ? `${err.name}: ` : ''}${err.message ?? String(e)}`;
+  return text.replace(/\s+/g, ' ').trim().slice(0, 160);
+}
+
+/**
+ * Zvuk hry (loopback výchozího výstupu Windows) se nepodařilo otevřít.
+ * Stává se to u výchozího výstupu, který Windows "drží" jinak než běžná
+ * sluchátka: virtuální zařízení (Oculus / Meta Quest, Steam Streaming),
+ * 7.1 prostorový zvuk ovladače headsetu, zařízení ve výhradním režimu
+ * jiné aplikace, nebo jen chvilka po probuzení zařízení. Postup:
+ *   1. za chvíli to zkusit znovu (přechodná chyba),
+ *   2. vzít zvuk ze vstupu, který nahrává zvuk počítače (Stereo Mix,
+ *      VB-Cable, Voicemeeter...), když v počítači je,
+ *   3. jinak nahrávat bez zvuku hry - a v nastavení říct proč a co s tím.
+ */
+async function recoverSystemAudio(firstError: unknown): Promise<MediaStreamTrack | null> {
+  // 1) znovu, po krátké pauze (jen zvuk - obraz z druhého pokusu se hned zahodí)
+  await new Promise((r) => setTimeout(r, 1200));
+  try {
+    const again = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    for (const v of again.getVideoTracks()) v.stop();
+    const track = again.getAudioTracks()[0] ?? null;
+    if (track) {
+      sourceTracks.push(track);
+      report({ type: 'warning', generation, kind: 'systemAudioRetry', message: errorText(firstError) });
+      return track;
+    }
+  } catch (e) {
+    firstError = firstError ?? e;
+  }
+  // 2) vstup, který nahrává zvuk počítače
+  try {
+    const inputs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput' && d.deviceId !== 'default' && d.deviceId !== 'communications' && isLoopbackInput(d.label));
+    for (const input of inputs) {
+      try {
+        const source = await navigator.mediaDevices.getUserMedia({
+          audio: { deviceId: { exact: input.deviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        });
+        const track = source.getAudioTracks()[0] ?? null;
+        if (!track) continue;
+        sourceTracks.push(...source.getTracks());
+        systemAudioFallback = input.label;
+        systemDeviceLabel = input.label;
+        report({ type: 'warning', generation, kind: 'systemAudioFallback', message: input.label });
+        return track;
+      } catch {
+        // další
+      }
+    }
+  } catch {
+    // seznam zařízení nejde - nic
+  }
+  // 3) bez zvuku hry
+  systemAudioError = errorText(firstError) || 'unknown';
+  report({ type: 'warning', generation, kind: 'systemLoopback', message: `${systemAudioError} | ${defaultOutputAtStart}` });
+  return null;
+}
+
 /**
  * Připraví proudy: `stream` = obraz + zvuk hry (tak, jak ho Chromium dává,
  * bez úprav), `micStream` = jen mikrofon. Měřáky se navěsí na obě stopy.
@@ -197,6 +263,9 @@ async function getStreams(settings: Settings): Promise<void> {
 
   let display: MediaStream | null = null;
   let lastError: unknown = null;
+  let legacyAudioError: unknown = null;
+  systemAudioError = '';
+  systemAudioFallback = '';
   // 1) moderní cesta: getDisplayMedia (obrazovku vybírá hlavní proces)
   try {
     display = await navigator.mediaDevices.getDisplayMedia({ video, audio: wantAudio });
@@ -223,6 +292,7 @@ async function getStreams(settings: Settings): Promise<void> {
       display = await legacy(wantAudio);
     } catch (e) {
       if (!wantAudio) throw new Error(`${String(lastError)} / ${String(e)}`);
+      legacyAudioError = e;
       display = await legacy(false);
     }
   }
@@ -247,9 +317,11 @@ async function getStreams(settings: Settings): Promise<void> {
       report({ type: 'warning', generation, kind: 'systemAudio', message: String(e) });
       systemTrack = null;
     }
-  } else if (systemTrack) {
+  } else if (wantAudio) {
+    // Výchozí výstup se hlídá i když zvuk nejde - přepnutí zařízení ve Windows snímání rozjede znovu.
     defaultOutputAtStart = await defaultOutputLabel();
-    systemDeviceLabel = defaultOutputAtStart;
+    if (!systemTrack) systemTrack = await recoverSystemAudio(lastError ?? legacyAudioError);
+    if (systemTrack && !systemAudioFallback) systemDeviceLabel = defaultOutputAtStart;
   }
 
   // Mikrofon (zvolený nebo výchozí, ne sluchátka Bluetooth) - bez něj se nahrává dál, hráč jen dostane upozornění.
@@ -359,6 +431,9 @@ function startMeters(systemTrack: MediaStreamTrack | null, micTrack: MediaStream
         systemSilentSeconds: system && meters.silentSince ? Math.round((now - meters.silentSince) / 1000) : 0,
         micDevice: micDeviceLabel,
         bluetoothMicAvoided,
+        systemError: systemAudioError || undefined,
+        systemFallback: systemAudioFallback || undefined,
+        defaultOutput: defaultOutputAtStart || undefined,
       },
     });
     peakSystem = 0;

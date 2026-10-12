@@ -37,7 +37,9 @@ import {
   type LiveStatus,
   type ResourceUsage,
   type Settings,
+  type SmartAppControlState,
   type Status,
+  type UpdateIssue,
   type UploadRequest,
   type Visibility,
 } from '../shared/types';
@@ -62,7 +64,17 @@ import { checkSiteMove } from './siteMove';
 import { createKineApi, type KineApi } from './kineApi';
 import { UPLOAD_ERROR_LOGIN, Uploader } from './uploader';
 import { Toast, type ToastHandle, type ToastOptions } from './toast';
-import { checkForUpdates, downloadUpdateNow, initUpdater, installUpdateNow, onGameEnded as updaterGameEnded, onUpdateProgress, updateProgress } from './updater';
+import {
+  checkForUpdates,
+  downloadUpdateNow,
+  initUpdater,
+  installUpdateNow,
+  onGameEnded as updaterGameEnded,
+  onUpdateProgress,
+  smartAppControlState,
+  takeUpdateOutcome,
+  updateProgress,
+} from './updater';
 import { runTestDriver } from './testDriver';
 import { WinHelper } from './winHelper';
 import { makeGif, makeThumbnail, mergeClips, trimClip } from './edit';
@@ -217,6 +229,10 @@ class KineApp {
   private readonly startedAt = Date.now();
   /** Tichá upozornění v okně (postranní panel) místo okének a systémových oznámení. */
   private notices: AppNotice[] = [];
+  /** Poslední aktualizace neprošla (O appce řekne proč) - do zavření hráčem. */
+  private updateIssue: UpdateIssue | null = null;
+  /** Smart App Control ve Windows 11 (zjišťuje se po startu a před aktualizací). */
+  private smartAppControl: SmartAppControlState | null = null;
   /** Nahrávka zápasu se ukládá - další stisk / konec hry počká na totéž uložení (žádné dvojí soubory). */
   private finishingRecording: Promise<Clip | null> | null = null;
   private storageLimitTimer: NodeJS.Timeout | null = null;
@@ -365,7 +381,7 @@ class KineApp {
 
     if (WinHelper.supported() && !process.env.KINE_NO_HELPER) {
       this.helper = new WinHelper(app.getPath('userData'));
-      this.helper.on({ state: () => this.pushStatus() });
+      this.helper.on({ state: () => this.pushStatus(), blocked: () => this.onHelperBlocked() });
     }
 
     this.games = new GameWatcher({
@@ -472,7 +488,13 @@ class KineApp {
     this.applyLoginItem();
     initUpdater({ variant: VARIANT, siteUrl: () => this.settings.get().siteUrl, gameRunning: () => !!this.games.current(), checkHours: () => this.profile().updateCheckHours });
     // Průběh stahování aktualizace do okna (O appce, postranní panel) a "Aktualizovat" do lišty.
-    onUpdateProgress(() => this.pushStatusSoon());
+    onUpdateProgress(() => {
+      // Stažená aktualizace: zjistit Smart App Control (O appce u tlačítka upozorní, že ji může zablokovat).
+      if (updateProgress().phase === 'ready') void this.refreshSmartAppControl();
+      this.pushStatusSoon();
+    });
+    // Jak dopadla poslední aktualizace (neprošla -> O appce řekne proč; okno se otevře tam).
+    this.checkUpdateOutcome();
 
     this.settings.onChange((s, prev) => this.onSettingsChanged(s, prev));
     this.announceVersion();
@@ -530,7 +552,7 @@ class KineApp {
     const hidden = process.argv.includes('--hidden');
     const s = this.settings.get();
     if (!s.onboarded) this.openSettings('wizard');
-    else if (!hidden) this.openSettings(s.appMode === 'full' ? 'kine' : 'clips');
+    else if (!hidden) this.openSettings(this.updateIssue ? 'about' : s.appMode === 'full' ? 'kine' : 'clips');
 
     // Odkaz kine://…, kterým appku někdo spustil (Windows předává v argv).
     for (const arg of process.argv) if (arg.startsWith('kine://')) void this.handleDeepLink(arg);
@@ -593,6 +615,89 @@ class KineApp {
       this.addNotice({ id: 'updated', text: this.t('toastUpdated', { version }), kind: 'info', tab: 'about' });
     }
     this.settings.update({ lastVersion: version });
+  }
+
+  /**
+   * Aktualizace, která neprošla: instalátor nechal starou verzi a appka se
+   * spustila znovu. Jednou upozornění a v O appce vysvětlení (Smart App
+   * Control, antivir, soubory držené jiným programem) - dokud ho hráč nezavře.
+   */
+  private checkUpdateOutcome(): void {
+    let outcome: ReturnType<typeof takeUpdateOutcome>;
+    try {
+      outcome = takeUpdateOutcome(VARIANT);
+    } catch (e) {
+      log(`výsledek aktualizace nejde přečíst: ${(e as Error).message}`);
+      return;
+    }
+    if (outcome.kind === 'updated') log(`aktualizace ${outcome.from} -> ${outcome.to} prošla`);
+    if (outcome.kind !== 'failed') {
+      void this.refreshSmartAppControl();
+      return;
+    }
+    log(`aktualizace na ${outcome.version} neprošla (${outcome.reason}) - běží dál ${app.getVersion()}`);
+    this.updateIssue = { version: outcome.version, reason: outcome.reason };
+    this.addNotice({ id: 'update-failed', text: this.updateIssueText(), kind: 'warn', tab: 'about' });
+    // Stažená verze leží v mezipaměti - "Aktualizovat teď" ať je zpátky hned (ne až po půl minutě).
+    setTimeout(() => void checkForUpdates(), 5000).unref?.();
+    // Text závisí na Smart App Control - po zjištění se upřesní.
+    void this.refreshSmartAppControl().then(() => {
+      if (!this.updateIssue) return;
+      const notice = this.notices.find((n) => n.id === 'update-failed');
+      if (notice) notice.text = this.updateIssueText();
+      log(`Smart App Control: ${this.smartAppControl ?? 'nezjištěno'}`);
+      this.pushStatusSoon();
+    });
+  }
+
+  private async refreshSmartAppControl(): Promise<void> {
+    const state = await smartAppControlState().catch(() => null);
+    if (state === this.smartAppControl) return;
+    this.smartAppControl = state;
+    this.pushStatusSoon();
+  }
+
+  /** Jen samočinná zkouška (KINE_TEST): aktualizace, která neprošla, a stav Smart App Control. */
+  simulateUpdateIssue(issue: UpdateIssue | null, sac: SmartAppControlState | null): void {
+    if (!process.env.KINE_TEST) return;
+    this.smartAppControl = sac;
+    this.updateIssue = issue;
+    if (issue) this.addNotice({ id: 'update-failed', text: this.updateIssueText(), kind: 'warn', tab: 'about' });
+    else this.dismissNotice('update-failed');
+    this.pushStatus();
+  }
+
+  /** Krátké upozornění (postranní panel) k aktualizaci, která neprošla. */
+  private updateIssueText(): string {
+    const issue = this.updateIssue;
+    if (!issue) return '';
+    const version = issue.version;
+    switch (issue.reason) {
+      case 'in-use':
+        return this.t('updateFailedInUse', { version });
+      case 'not-started':
+        return this.t('updateFailedNotStarted', { version });
+      default:
+        return this.smartAppControl === 'on' ? this.t('updateFailedSac', { version }) : this.t('updateFailedBlocked', { version });
+    }
+  }
+
+  /**
+   * Windows nepustí pomocníka (Smart App Control / App Control): zkratky z
+   * více kláves, tlačítka myši a ovladače nejdou a hra se pozná hůř.
+   * Řekne to jednou v okně (ne okénkem) - zkratky ukážou vlastní důvod.
+   */
+  private onHelperBlocked(): void {
+    void this.refreshSmartAppControl().then(() => {
+      this.addNotice({
+        id: 'helper-blocked',
+        text: this.smartAppControl === 'on' ? this.t('helperBlockedSac') : this.t('helperBlocked'),
+        kind: 'warn',
+        tab: 'settings',
+      });
+      this.syncHotkeyNotices();
+      this.pushStatusSoon();
+    });
   }
 
   // ---- hry ---------------------------------------------------------------------
@@ -1504,6 +1609,12 @@ class KineApp {
   dismissNotice(id: string): void {
     const before = this.notices.length;
     this.notices = this.notices.filter((n) => n.id !== id);
+    // Zavřené upozornění na neprošlou aktualizaci zavře i vysvětlení v O appce (a naopak).
+    if (id === 'update-failed' && this.updateIssue) {
+      this.updateIssue = null;
+      this.pushStatus();
+      return;
+    }
     if (this.notices.length !== before) this.pushStatus();
   }
 
@@ -1578,7 +1689,7 @@ class KineApp {
       case 'unsupported':
         return this.t('hotkeyChordUnsupported');
       case 'helper-down':
-        return this.t('hotkeyHelperDown');
+        return this.helper?.isBlocked() ? this.t('hotkeyHelperBlocked') : this.t('hotkeyHelperDown');
       default:
         return reason;
     }
@@ -2134,6 +2245,9 @@ class KineApp {
       hwEncoder: this.capture.hwEncoder,
       live: this.live.current(),
       update: updateProgress(),
+      updateIssue: this.updateIssue,
+      smartAppControl: this.smartAppControl,
+      helperBlocked: this.helper?.isBlocked() ?? false,
       windowGlass: this.windowGlassOn(),
       windowGlassSupported: this.windowGlassSupported(),
     };
@@ -2717,6 +2831,13 @@ class KineApp {
       } catch {
         void shell.openExternal('ms-settings:sound');
       }
+    });
+    // Zabezpečení Windows: Smart App Control / Historie ochrany (jen tyhle dvě stránky -
+    // windowsdefender:// umí i věci jako restart počítače, nic jiného se odsud neotevře).
+    ipcMain.handle('app:openWindowsSecurity', (_e, page: unknown) => {
+      if (process.platform !== 'win32') return;
+      const url = page === 'smartapp' ? 'windowsdefender://smartapp/' : page === 'history' ? 'windowsdefender://history' : null;
+      if (url) void shell.openExternal(url).catch((e) => log(`Zabezpečení Windows nejde otevřít: ${(e as Error).message}`));
     });
     ipcMain.handle('app:copyDiagnostics', async () => {
       await clipboard.writeText(await this.diagnostics());

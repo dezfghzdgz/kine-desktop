@@ -3513,6 +3513,8 @@ function updateProgressBox() {
       ),
       updateBusy ? h('p', { class: 'hint warn-text', style: 'margin:0' }, t('aboutUpdateBusy')) : h('p', { class: 'faint', style: 'margin:0' }, t('aboutUpdateRestartHint'))
     );
+    // Smart App Control (Windows 11) blokuje nepodepsané soubory - i kus instalátoru. Říct to dopředu.
+    if (status.smartAppControl === 'on') box.append(h('p', { class: 'hint warn-text update-sac-hint', style: 'margin:0' }, '⚠ ' + t('aboutUpdateSacHint')));
   } else if (u.phase === 'waiting-game') {
     box.append(
       h('p', { style: 'margin:0' }, t('aboutUpdateWaitsGame', { version })),
@@ -3522,6 +3524,42 @@ function updateProgressBox() {
     box.append(h('p', { class: 'error', style: 'margin:0' }, t('aboutUpdateFailed', { message: u.error ?? '' })));
   }
   return box;
+}
+
+/**
+ * Aktualizace, která neprošla (instalátor nechal starou verzi): proč (Smart
+ * App Control / antivir / soubory držené jiným programem / instalátor se
+ * nespustil), co s tím a tlačítka rovnou do Zabezpečení Windows.
+ */
+function updateIssueBox() {
+  const issue = status.updateIssue;
+  if (!issue) return null;
+  const sac = status.smartAppControl === 'on';
+  const why =
+    issue.reason === 'in-use'
+      ? t('aboutIssueInUseWhy')
+      : issue.reason === 'not-started'
+        ? t('aboutIssueNotStartedWhy')
+        : sac
+          ? t('aboutIssueSacWhy')
+          : t('aboutIssueBlockedWhy');
+  const what = issue.reason === 'in-use' ? t('aboutIssueInUseWhat') : sac ? t('aboutIssueSacWhat') : t('aboutIssueAvWhat');
+  return h(
+    'div',
+    { class: 'panel stack update-issue', role: 'alert' },
+    h('p', { class: 'update-issue-title', style: 'margin:0' }, '⚠ ' + t('aboutIssueTitle', { version: issue.version })),
+    h('p', { style: 'margin:0' }, why),
+    h('p', { class: 'hint', style: 'margin:0' }, what),
+    h(
+      'div',
+      { class: 'row', style: 'align-items:center;flex-wrap:wrap' },
+      sac && issue.reason !== 'in-use'
+        ? h('button', { class: 'small primary open-sac', onclick: () => void kine.openWindowsSecurity('smartapp') }, t('aboutIssueOpenSac'))
+        : null,
+      issue.reason !== 'in-use' ? h('button', { class: 'small open-history', onclick: () => void kine.openWindowsSecurity('history') }, t('aboutIssueOpenHistory')) : null,
+      h('button', { class: 'small quiet dismiss-issue', onclick: () => void kine.dismissNotice('update-failed') }, t('aboutIssueDismiss'))
+    )
+  );
 }
 
 /** Výsledek kontroly aktualizací: stav, důvod chyby, odkud se berou, u ručního stažení tlačítko. */
@@ -3560,6 +3598,7 @@ function renderAbout() {
     'div',
     { class: 'stack' },
     h('h1', {}, status.variant === 'clipper' ? t('variantClipperName') : t('aboutTitle')),
+    updateIssueBox(),
     h(
       'div',
       { class: 'panel stack' },

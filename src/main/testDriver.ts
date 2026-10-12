@@ -1191,6 +1191,33 @@ export async function runTestDriver(kine: {
       const gone = await aboutWin.webContents.executeJavaScript(`!document.querySelector('.update-progress') && !document.querySelector('.side-update')`);
       result.updateProgress = { downloading, ready, gone, title };
       result.updateProgressOk = downloading && ready && gone && (clipperApp ? title === 'Kine Clipper' : title !== 'Kine Clipper' && title.length > 0);
+
+      // Aktualizace neprošla (Smart App Control zablokoval část instalátoru): nahoře v O appce
+      // vysvětlení s verzí a tlačítky do Zabezpečení Windows, upozornění v panelu; "Rozumím" obojí zavře.
+      // U připravené aktualizace s Smart App Control varování u tlačítka.
+      // (Připravená aktualizace nejdřív - při ní si appka stav Smart App Control zjistí znovu, tady null.)
+      const k = kine as any;
+      simulateUpdateProgress({ phase: 'ready', version: '9.9.9', percent: 100 });
+      await sleep(300);
+      k.simulateUpdateIssue({ version: '9.9.9', reason: 'blocked' }, 'on');
+      await sleep(700);
+      const issueShown = await aboutWin.webContents.executeJavaScript(
+        `(() => { const b = document.querySelector('.update-issue'); return { box: !!b, version: !!b && /9\.9\.9/.test(b.textContent), sac: !!(b && b.querySelector('.open-sac')), history: !!(b && b.querySelector('.open-history')), notice: [...document.querySelectorAll('.side-notice')].some((n) => /9\.9\.9/.test(n.textContent)), hint: !!document.querySelector('.update-sac-hint') }; })()`
+      );
+      await shot(aboutWin, 'settings-about-update-blocked');
+      k.simulateUpdateIssue({ version: '9.9.9', reason: 'in-use' }, 'off');
+      await sleep(600);
+      const inUse = await aboutWin.webContents.executeJavaScript(
+        `(() => { const b = document.querySelector('.update-issue'); return !!b && !b.querySelector('.open-sac') && !b.querySelector('.open-history') && !document.querySelector('.update-sac-hint'); })()`
+      );
+      await aboutWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.update-issue .dismiss-issue'); if (b) b.click(); return !!b; })()`);
+      await sleep(700);
+      const issueGone = await aboutWin.webContents.executeJavaScript(`!document.querySelector('.update-issue') && ![...document.querySelectorAll('.side-notice')].some((n) => /9\.9\.9/.test(n.textContent))`);
+      simulateUpdateProgress({ phase: 'idle', version: null, percent: null, transferred: null, total: null, bytesPerSecond: null });
+      k.simulateUpdateIssue(null, null);
+      await sleep(300);
+      result.updateIssue = { ...issueShown, inUse, issueGone };
+      result.updateIssueOk = issueShown.box && issueShown.version && issueShown.sac && issueShown.history && issueShown.notice && issueShown.hint && inUse && issueGone;
     }
 
     // Vzhled: sklo (barvy Západ slunce, silné) -> <html> dostane atributy a pozadí; pak zpět klasický.
@@ -1276,6 +1303,7 @@ export async function runTestDriver(kine: {
       'playerNav', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
       'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
       'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'screenshotOk', 'clipToastInstant', 'recordingStopOnceOk', 'updateProgressOk', 'playerFullscreenOk', 'lookOk', 'lookFollowOk',
+      'updateIssueOk',
     ];
     if (process.env.KINE_TEST_LIVE_URL) common.push('liveOk');
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];

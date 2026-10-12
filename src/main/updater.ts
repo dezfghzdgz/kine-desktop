@@ -1,8 +1,10 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { app } from 'electron';
-import type { UpdateProgress, Variant } from '../shared/types';
+import type { SmartAppControlState, UpdateProgress, Variant } from '../shared/types';
 import { isNewerVersion, parseUpdateYml, type FeedConfig } from './updaterParse';
+import { judgeUpdateOutcome, parseInstallerResult, parseSmartAppControl, parseUpdateAttempt, type UpdateOutcome } from './updateOutcome';
 import { log } from './log';
 
 /**
@@ -16,8 +18,12 @@ import { log } from './log';
  * (/api/desktop/latest), jaká verze je venku - ať "Zkontrolovat
  * aktualizace" vždycky řekne něco užitečného, ne jen "nejde to".
  *
- * Stahuje se jen když se nehraje (nikdy během hry - lagovalo by to),
- * instaluje se po ukončení appky. Hráči se nic neukazuje uprostřed hry.
+ * Stahuje se jen když se nehraje (nikdy během hry - lagovalo by to).
+ * Instaluje se jen tlačítkem "Aktualizovat" (O appce, lišta u hodin) a s
+ * okénkem instalátoru - ne potichu po ukončení appky: tichá instalace při
+ * vypínání Windows nebo hned po zavření appky (hráč klikne na zástupce,
+ * zatímco se soubory vyměňují) mohla nechat hráče bez appky. Jak instalace
+ * dopadla, appka zjistí po dalším startu (takeUpdateOutcome).
  */
 export type UpdateCheck = {
   status:
@@ -56,6 +62,9 @@ let deps: Deps | null = null;
 let pendingVersion: string | null = null;
 let downloading = false;
 let lastCheck: UpdateCheck | null = null;
+/** Kdy appka předala instalaci instalátoru (0 = nepředala). */
+let installStartedAt = 0;
+let relaunching = false;
 
 let progress: UpdateProgress = { phase: 'idle', version: null, percent: null, bytesPerSecond: null, transferred: null, total: null, error: null };
 const listeners = new Set<(p: UpdateProgress) => void>();
@@ -115,9 +124,11 @@ export function initUpdater(d: Deps): void {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { autoUpdater } = require('electron-updater') as typeof import('electron-updater');
     autoUpdater.logger = { info: log, warn: log, error: log, debug: () => undefined } as any;
-    // Stahování řídíme sami (ne během hry), instalace až po ukončení appky.
+    // Stahování řídíme sami (ne během hry). Instalace jen na "Aktualizovat" -
+    // ne potichu při ukončení appky (při vypínání Windows by ji systém mohl
+    // useknout uprostřed, kdy stará verze už je pryč a nová ještě není).
     autoUpdater.autoDownload = false;
-    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.autoInstallOnAppQuit = false;
     autoUpdater.on('download-progress', (p) => {
       // Do okna jen po celých procentech (okno se nepřekresluje při každém kousku).
       const percent = Math.max(0, Math.min(100, Math.floor(p.percent ?? 0)));
@@ -126,12 +137,20 @@ export function initUpdater(d: Deps): void {
     });
     autoUpdater.on('update-downloaded', (info) => {
       downloading = false;
-      log(`aktualizace ${info.version} stažená - nainstaluje se po ukončení appky (nebo hned tlačítkem Aktualizovat)`);
+      log(`aktualizace ${info.version} stažená - nainstaluje se tlačítkem Aktualizovat`);
       setProgress({ phase: 'ready', version: info.version, percent: 100, error: null });
     });
     autoUpdater.on('error', (e) => {
       downloading = false;
       log(`aktualizace: ${e.message}`);
+      // Instalátor se nespustil (Windows ho zablokoval, chybí): electron-updater
+      // to ohlásí až ve chvíli, kdy appka už končí - spustit znovu tuhle verzi
+      // (po startu řekne, že aktualizace neprošla).
+      if (installStartedAt && Date.now() - installStartedAt < 20000) {
+        log('instalátor aktualizace se nespustil - appka se spustí znovu ve stávající verzi');
+        relaunchCurrent();
+        return;
+      }
       // Chyby kontroly (jeden zdroj nejde, zkusí se další) hlásí výsledek kontroly; sem jen chyba stahování.
       if (progress.phase === 'downloading') setProgress({ phase: 'error', error: shortError(e) });
     });
@@ -185,8 +204,11 @@ export function downloadUpdateNow(): void {
  */
 export async function installUpdateNow(prepare: () => Promise<void>): Promise<'started' | 'failed' | 'not-ready'> {
   if (!updater || progress.phase !== 'ready') return 'not-ready';
-  log(`aktualizace ${progress.version}: instaluje se hned (restart)`);
+  const version = progress.version;
+  log(`aktualizace ${version}: instaluje se hned (restart, okénko instalátoru)`);
   await prepare().catch(() => undefined);
+  // Pokus si zapsat: po startu appka pozná, jestli aktualizace prošla (a když ne, proč).
+  recordAttempt(version);
   // Instalátor chybí / nejde spustit: electron-updater to ohlásí hned (událost error) a appku nezavře.
   let failed: string | null = null;
   const onError = (e: Error) => {
@@ -194,18 +216,132 @@ export async function installUpdateNow(prepare: () => Promise<void>): Promise<'s
   };
   updater.once('error', onError);
   try {
-    // Tiše (bez průvodce instalátoru) a po instalaci appku zase spustit.
-    updater.quitAndInstall(true, true);
+    // S okénkem instalátoru ("Installing, please wait…"): hráč vidí, že se něco
+    // děje, a když Windows část instalátoru zablokuje, instalátor to řekne a
+    // nechá starou verzi. Po instalaci se appka spustí sama (--force-run).
+    updater.quitAndInstall(false, true);
   } catch (e) {
     failed = shortError(e);
   }
   updater.removeListener('error', onError);
   if (failed) {
+    clearAttempt();
     log(`instalace aktualizace: ${failed}`);
     setProgress({ phase: 'error', error: failed });
     return 'failed';
   }
+  installStartedAt = Date.now();
   return 'started';
+}
+
+/** Spustit znovu tuhle verzi (instalátor se nespustil). Jen jednou. */
+function relaunchCurrent(): void {
+  if (relaunching) return;
+  relaunching = true;
+  try {
+    app.relaunch();
+  } catch {
+    // nejde - aspoň skončit, ať nezůstane viset napůl ukončená appka
+  }
+  app.exit(0);
+}
+
+// ---- jak dopadla poslední aktualizace -------------------------------------------
+
+function attemptFile(): string {
+  return join(app.getPath('userData'), 'update-attempt.json');
+}
+
+function recordAttempt(version: string | null): void {
+  if (!version) return;
+  try {
+    writeFileSync(attemptFile(), JSON.stringify({ from: app.getVersion(), to: version, at: Date.now() }));
+  } catch (e) {
+    log(`pokus o aktualizaci se nezapsal: ${(e as Error).message}`);
+  }
+}
+
+function clearAttempt(): void {
+  try {
+    unlinkSync(attemptFile());
+  } catch {
+    // nebyl
+  }
+}
+
+/**
+ * Složka electron-updateru (%LOCALAPPDATA%\<appka>-updater) - sem zapisuje
+ * instalátor installer-result.txt (build/installer.nsh).
+ */
+function updaterCacheDir(variant: Variant): string | null {
+  const base = process.env.LOCALAPPDATA;
+  if (!base) return null;
+  let name = '';
+  try {
+    const yml = readFileSync(join(process.resourcesPath, 'app-update.yml'), 'utf8');
+    name = /^updaterCacheDirName:\s*(.+)$/m.exec(yml)?.[1]?.trim().replace(/^['"]|['"]$/g, '') ?? '';
+  } catch {
+    // appka bez app-update.yml (vývoj) - podle varianty
+  }
+  if (!/^[\w.-]+$/.test(name)) name = variant === 'clipper' ? 'kine-clipper-updater' : 'kine-desktop-updater';
+  return join(base, name);
+}
+
+/**
+ * Po startu: jak dopadla poslední aktualizace? Přečte (a smaže - hlásí se
+ * jednou) záznam o pokusu a výsledek od instalátoru.
+ */
+export function takeUpdateOutcome(variant: Variant): UpdateOutcome {
+  let attemptText: string | null = null;
+  try {
+    attemptText = readFileSync(attemptFile(), 'utf8');
+  } catch {
+    // žádný pokus
+  }
+  const dir = process.platform === 'win32' ? updaterCacheDir(variant) : null;
+  const resultFile = dir ? join(dir, 'installer-result.txt') : null;
+  let resultText: string | null = null;
+  try {
+    if (resultFile) resultText = readFileSync(resultFile, 'utf8');
+  } catch {
+    // instalátor nic nezapsal
+  }
+  const installer = parseInstallerResult(resultText);
+  const outcome = judgeUpdateOutcome({ current: app.getVersion(), attempt: parseUpdateAttempt(attemptText), installer, now: Date.now() });
+  if (installer) log(`instalátor naposledy: ${installer.result}${installer.version ? ` (${installer.version})` : ''}`);
+  if (attemptText !== null) clearAttempt();
+  if (resultFile && resultText !== null) {
+    try {
+      unlinkSync(resultFile);
+    } catch {
+      // nevadí - příště se přečte znovu (a podle verze nic nehlásí)
+    }
+  }
+  return outcome;
+}
+
+let sacCache: { at: number; value: SmartAppControlState | null } | null = null;
+
+/**
+ * Smart App Control ve Windows 11 (blokuje nepodepsané programy a jejich
+ * části - i kus instalátoru): 'on' / 'off' / 'evaluation', null = Windows
+ * 10, jiný systém nebo nejde zjistit. Výsledek se pamatuje 10 minut.
+ */
+export function smartAppControlState(): Promise<SmartAppControlState | null> {
+  if (process.platform !== 'win32') return Promise.resolve(null);
+  if (sacCache && Date.now() - sacCache.at < 10 * 60 * 1000) return Promise.resolve(sacCache.value);
+  return new Promise((resolve) => {
+    execFile(
+      'reg',
+      ['query', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy', '/v', 'VerifiedAndReputablePolicyState'],
+      { windowsHide: true, timeout: 5000 },
+      (err, stdout) => {
+        const value = err ? null : parseSmartAppControl(String(stdout));
+        sacCache = { at: Date.now(), value };
+        resolve(value);
+      }
+    );
+  });
 }
 
 export function lastUpdateCheck(): UpdateCheck | null {

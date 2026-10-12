@@ -135,6 +135,8 @@ const kine = {
   restartCapture: (): Promise<'ok' | 'busy'> => ipcRenderer.invoke('capture:restart'),
   /** Zvuk ve Windows (výchozí zařízení, Stereo Mix, výhradní režim). */
   openSoundSettings: (): Promise<void> => ipcRenderer.invoke('app:openSoundSettings'),
+  /** Zabezpečení Windows: nastavení Smart App Control / Historie ochrany. */
+  openWindowsSecurity: (page: 'smartapp' | 'history'): Promise<void> => ipcRenderer.invoke('app:openWindowsSecurity', page),
   copyDiagnostics: (): Promise<boolean> => ipcRenderer.invoke('app:copyDiagnostics'),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
   /** Otevře Kine: v režimu "Kine + klipy" jako záložku hlavního okna, jinak v prohlížeči. */

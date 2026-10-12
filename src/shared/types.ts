@@ -380,6 +380,12 @@ export type Status = {
   live: LiveStatus;
   /** Aktualizace appky: stahuje se (průběh) / připravená k instalaci. */
   update: UpdateProgress;
+  /** Poslední aktualizace neprošla - O appce řekne proč a co s tím (dokud to hráč nezavře). */
+  updateIssue: UpdateIssue | null;
+  /** Smart App Control ve Windows 11; null = Windows 10 / jiný systém / nejde zjistit. */
+  smartAppControl: SmartAppControlState | null;
+  /** Windows (Smart App Control / App Control) nepustí pomocníka - zkratky z více kláves a přesné poznání hry nejdou. */
+  helperBlocked: boolean;
   /** Průhledné okno je zapnuté (Windows 11, Acrylic) - pozadí okna prosvítá. */
   windowGlass: boolean;
   /** Umí tenhle systém průhledné okno (Windows 11 22H2+)? */
@@ -401,6 +407,20 @@ export type UpdateProgress = {
   total: number | null;
   error: string | null;
 };
+
+/**
+ * Smart App Control ve Windows 11 blokuje programy a jejich části (DLL, kus
+ * instalátoru), které nejsou digitálně podepsané: zapnuto / vypnuto /
+ * zkušební režim (jen sleduje, nic neblokuje).
+ */
+export type SmartAppControlState = 'on' | 'off' | 'evaluation';
+
+/**
+ * Aktualizace, která neprošla (stará verze zůstala): Windows zablokoval část
+ * instalátoru / soubory držel jiný program / po instalaci appka chyběla /
+ * instalátor se vůbec nespustil.
+ */
+export type UpdateIssue = { version: string; reason: 'blocked' | 'in-use' | 'files-missing' | 'not-started' };
 
 export type GameSource = 'steam' | 'custom' | 'known' | 'fullscreen';
 

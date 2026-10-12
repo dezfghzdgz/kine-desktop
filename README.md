@@ -556,3 +556,45 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
 - **Podpory ve vysílání:** v záložce Živě je nápověda - podpory od diváků
   (💛) se v okně chatu ukážou zvýrazněné a ikonkou 🔊 si je streamer nechá
   číst nahlas (nebo všechny nové zprávy).
+
+## Novinky 0.9.9
+
+- **Aktualizace už nesmaže appku.** Při aktualizaci z 0.9.7 na 0.9.8 se
+  stalo, že Windows (Smart App Control - "Část této aplikace byla
+  zablokována") zablokoval kus instalátoru, který rozbaluje novou verzi.
+  Instalátor z electron-builderu ale v tu chvíli už měl starou verzi
+  odinstalovanou - zůstala prázdná složka a zástupce do prázdna ("Problém se
+  zástupcem"). Ověřeno pod wine: zablokovaný `nsis7z.dll` = appka pryč.
+  Teď (`build/installer.nsh`):
+  - nová verze se nejdřív celá rozbalí a zkontroluje a teprve potom se stará
+    odinstaluje; když rozbalení nejde, stará verze zůstane, instalátor to
+    řekne a appku znovu spustí,
+  - když starou verzi nejde odinstalovat (soubory drží jiný program),
+    zůstane a spustí se znovu (dřív instalátor jen potichu skončil),
+  - po instalaci se zkontroluje, že appka na disku opravdu je,
+  - zástupci, kteří před aktualizací byli a během ní zmizeli (klik na
+    zástupce zrovna ve chvíli výměny souborů -> Windows nabídne smazat),
+    se vytvoří znovu,
+  - čerstvá instalace, kterou Windows zablokuje, už nevytvoří zástupce do
+    prázdna - řekne, co se stalo a co s tím.
+  Výsledek zapíše do `%LOCALAPPDATA%\<appka>-updater\installer-result.txt`.
+- **Aktualizace jen tlačítkem a s okénkem:** "Aktualizovat teď" spustí
+  instalátor viditelně ("Installing, please wait…"), ne potichu. Tichá
+  instalace po ukončení appky je vypnutá (při vypínání Windows ji systém
+  mohl useknout uprostřed). Stažená aktualizace počká na kliknutí.
+- **Appka řekne, jak aktualizace dopadla** (`src/main/updateOutcome.ts`):
+  když neprošla, otevře se O appce s vysvětlením (Smart App Control /
+  antivir / soubory držené jiným programem / instalátor se nespustil) a
+  tlačítky rovnou do Zabezpečení Windows (nastavení Smart App Control,
+  Historie ochrany). U stažené aktualizace appka upozorní, když je Smart
+  App Control zapnutý.
+- **Pomocník při Smart App Control:** Windows pouští nepodepsané skripty
+  jen v omezeném režimu, kde pomocník (PowerShell) nejde. Dřív se tvářil,
+  že běží, a do logu psal chybu každých 30 ms; teď to pozná, skončí, appka
+  jede bez něj (jednoduché zkratky jako F8 fungují) a řekne proč.
+- **Podpis:** jediné opravdové řešení pro Smart App Control je podepsaná
+  appka (instalátor, appka i pluginy instalátoru). Azure Artifact Signing
+  (dřív Trusted Signing) je zatím pro jednotlivce jen v USA a Kanadě;
+  možnosti: Microsoft Store (MSIX podepíše Microsoft), SignPath pro open
+  source, nebo klasický certifikát (OV). Workflow podpis přes Azure umí,
+  až bude k dispozici.

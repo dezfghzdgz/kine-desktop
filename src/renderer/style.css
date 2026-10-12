@@ -686,6 +686,10 @@ textarea.live-description { width: 100%; resize: vertical; min-height: 64px; }
 .update-progress .update-bar { height: 8px; border-radius: 4px; }
 .update-progress .update-bar > span { border-radius: 4px; }
 .update-progress .update-now { min-width: 190px; }
+/* Aktualizace neprošla (Smart App Control / antivir) - vysvětlení nahoře v O appce. */
+.update-issue { border: 1px solid rgba(255, 200, 87, 0.55); background: rgba(255, 200, 87, 0.08); gap: 8px; }
+.update-issue .update-issue-title { color: var(--warn); font-weight: 650; }
+.update-sac-hint { line-height: 1.4; }
 .side-update { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 0; color: var(--brand); cursor: pointer; font: inherit; }
 .side-update:hover { text-decoration: underline; }
 .side-update.ready { font-weight: 600; }

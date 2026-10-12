@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from './log';
 import { lowerPriority } from './ffmpeg';
+import { isWindowsPolicyBlock } from './updateOutcome';
 
 /**
  * Pomocník pro Windows: jeden dlouho běžící PowerShell, který se ptá
@@ -38,14 +39,25 @@ type Listener = {
   foreground?: (info: ForegroundInfo) => void;
   windows?: (exes: Set<string>) => void;
   state?: (running: boolean) => void;
+  /** Windows pomocníka nepustí (Smart App Control / App Control) - do restartu appky se nezkouší. */
+  blocked?: (reason: string) => void;
 };
 
 const SCRIPT = String.raw`
 $ErrorActionPreference = 'SilentlyContinue'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+# Smart App Control / App Control ve Windows pousti nepodepsane skripty jen
+# v omezenem rezimu (ConstrainedLanguage): Add-Type tam nejde a nic nize by
+# nefungovalo. Rict to appce a skoncit (jinak by kazde kolo jen hlasilo chybu).
+$langMode = [string]$ExecutionContext.SessionState.LanguageMode
+if ($langMode -ne 'FullLanguage') {
+  Write-Output ('{"t":"fatal","why":"language","m":"' + $langMode + '"}')
+  exit 3
+}
 # Vsechno, co se pta Windows, je v C# (zkompiluje se jednou pri startu):
 # levne volani API misto Get-Process, ktery pro kazdy proces stavi objekty.
-Add-Type -Namespace KineWin -Name Native -MemberDefinition @'
+try {
+Add-Type -Namespace KineWin -Name Native -ErrorAction Stop -MemberDefinition @'
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
@@ -137,6 +149,11 @@ public static uint[] WindowedPids() {
   return result;
 }
 '@
+} catch {
+  # Treba Windows nepusti zkompilovanou knihovnu (Application Control) - bez ni to nejde.
+  Write-Output ('{"t":"fatal","why":"addtype","m":' + (ConvertTo-Json ([string]$_)) + '}')
+  exit 4
+}
 
 # Zkratky: "119;17,120" = F8 a Ctrl+F9 (virtual-key kody). Kody od 0x100000 vys
 # jsou tlacitka ovladace (0x100000 + maska XInput) - viz shared/hotkeys.ts.
@@ -307,6 +324,10 @@ export class WinHelper {
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = true;
   private buffer = '';
+  /** Windows pomocníka nepustí (omezený režim PowerShellu / zablokovaná knihovna): důvod, jinak null. */
+  private blockedReason: string | null = null;
+  /** Poslední chyba ze skriptu - stejná se do logu píše nejvýš jednou za minutu. */
+  private lastErr: { text: string; at: number; skipped: number } | null = null;
 
   constructor(private userDataDir: string) {}
 
@@ -317,6 +338,11 @@ export class WinHelper {
   /** Běží pomocník teď? */
   isRunning(): boolean {
     return this.running;
+  }
+
+  /** Nepustí ho Windows (Smart App Control / App Control)? Pak se do restartu appky nezkouší. */
+  isBlocked(): boolean {
+    return this.blockedReason !== null;
   }
 
   on(listener: Listener): () => void {
@@ -391,7 +417,7 @@ export class WinHelper {
   }
 
   private spawn(): void {
-    if (this.proc) return;
+    if (this.proc || this.blockedReason !== null) return;
     let file: string;
     try {
       file = this.scriptPath();
@@ -448,7 +474,7 @@ export class WinHelper {
   private onExit(): void {
     this.proc = null;
     this.setRunning(false);
-    if (this.stopped) return;
+    if (this.stopped || this.blockedReason !== null) return;
     const now = Date.now();
     this.failures = this.failures.filter((t) => now - t < 120000);
     this.failures.push(now);
@@ -472,6 +498,18 @@ export class WinHelper {
       this.lastForeground = null;
     }
     for (const l of this.listeners) l.state?.(value);
+  }
+
+  /** Chyba ze skriptu do logu - stejná nejvýš jednou za minutu (smyčka běží i po 30 ms). */
+  private logScriptError(text: string): void {
+    const now = Date.now();
+    if (this.lastErr && this.lastErr.text === text && now - this.lastErr.at < 60000) {
+      this.lastErr.skipped++;
+      return;
+    }
+    const skipped = this.lastErr?.skipped ?? 0;
+    this.lastErr = { text, at: now, skipped: 0 };
+    log(`pomocník: ${text}${skipped ? ` (předchozí chyba ještě ${skipped}x)` : ''}`);
   }
 
   private onData(chunk: string): void {
@@ -531,8 +569,21 @@ export class WinHelper {
         break;
       }
       case 'err':
-        log(`pomocník: ${String(msg.m).slice(0, 300)}`);
+        this.logScriptError(String(msg.m).slice(0, 300));
         break;
+      case 'fatal': {
+        const detail = `${String(msg.why ?? '')}: ${String(msg.m ?? '').slice(0, 300)}`;
+        // Omezený režim PowerShellu = politika Windows, ne náhoda - zkoušet znovu nemá smysl
+        // (a u zablokované knihovny by Windows pokaždé ukázal "část aplikace byla zablokována").
+        if (msg.why === 'language' || isWindowsPolicyBlock(String(msg.m ?? ''))) {
+          this.blockedReason = detail;
+          log(`pomocník: Windows ho nepustí (${detail}) - appka pojede bez něj (zkratky z více kláves, tlačítka myši a ovladače, přesné poznání hry)`);
+          for (const l of this.listeners) l.blocked?.(detail);
+        } else {
+          log(`pomocník se nerozjel: ${detail}`);
+        }
+        break;
+      }
     }
   }
 }

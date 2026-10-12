@@ -76,6 +76,7 @@ await build({
     storage: 'src/shared/storage.ts',
     siteMove: 'src/main/siteMove.ts',
     updateOutcome: 'src/main/updateOutcome.ts',
+    compress: 'src/shared/compress.ts',
   },
   outdir: 'dist/esm',
   platform: 'node',

@@ -9,6 +9,8 @@ import { performanceProfile } from '../shared/performance';
 import { clear, clipMeta, errorText, fileUrl, formatBytes, formatDate, formatDuration, h, isPortrait, thumbImages } from './ui';
 import { closePlayer, openPlayer, openPlayerId, type Neighbors, type PlayerHandle } from './player';
 import { attachBackdrop, followImage, hasFollowImage } from './ambient';
+import { icon, type IconName } from './icons';
+import { COMPRESS_LEVELS, compressSummary, type CompressLevel } from '../shared/compress';
 import { VIDEO_LANGS, openUploadDialog } from './uploadDialog';
 import { LIVE_BITRATES_KBPS, LIVE_QUALITIES, cleanLiveError, liveElapsed, liveErrorTextKey, livePresetFor, livePresetLabel, liveUploadMbps } from '../shared/live';
 import { cameraRect } from '../shared/liveLayout';
@@ -53,7 +55,7 @@ let tab: Tab = 'clips';
 let wizardStep: number | null = null;
 let authWaiting = false;
 let authError: string | null = null;
-type HotkeyField = 'clipHotkey' | 'toggleHotkey' | 'recordHotkey' | 'screenshotHotkey' | 'liveBrbHotkey';
+type HotkeyField = 'clipHotkey' | 'toggleHotkey' | 'recordHotkey' | 'liveBrbHotkey';
 let hotkeyRecording: HotkeyField | null = null;
 let hotkeyError: string | null = null;
 const recorder = new HotkeyRecorder();
@@ -105,7 +107,11 @@ async function init() {
   currentGame = await kine.currentGame();
   const wanted = params.get('tab');
   if (!settings.onboarded || wanted === 'wizard') wizardStep = 0;
-  else if (wanted && visibleTabs().includes(wanted as Tab)) tab = wanted as Tab;
+  else if (wanted && visibleTabs().includes(wanted.split(':')[0] as Tab)) {
+    tab = wanted.split(':')[0] as Tab;
+    const section = wanted.split(':')[1];
+    if (tab === 'settings' && isSection(section)) setSection(section);
+  }
   else if (settings.appMode === 'full') tab = 'kine';
   document.documentElement.lang = settings.lang;
   document.title = status.variant === 'clipper' ? 'Kine Clipper' : 'Kine';
@@ -161,10 +167,8 @@ async function init() {
     void refreshAudioDevices();
   });
   kine.onNavigate((target) => {
-    if (visibleTabs().includes(target as Tab)) {
-      tab = target as Tab;
-      wizardStep = null;
-      render();
+    if (navigateTo(target)) {
+      // hotovo (záložka, případně oddíl nastavení)
     } else if (target === 'wizard') {
       wizardStep = 0;
       render();
@@ -407,7 +411,7 @@ function finishIfDone(done: ReturnType<HotkeyRecorder['keyUp']>) {
   const field = hotkeyRecording;
   const text = formatHotkey(done);
   // Stejná zkratka na dvě věci by jedna z nich nikdy nedostala.
-  const HOTKEY_LABELS: Record<HotkeyField, Key> = { clipHotkey: 'clipHotkey', toggleHotkey: 'toggleHotkey', recordHotkey: 'recordHotkey', screenshotHotkey: 'screenshotHotkey', liveBrbHotkey: 'liveBrbHotkey' };
+  const HOTKEY_LABELS: Record<HotkeyField, Key> = { clipHotkey: 'clipHotkey', toggleHotkey: 'toggleHotkey', recordHotkey: 'recordHotkey', liveBrbHotkey: 'liveBrbHotkey' };
   const duplicate = (Object.keys(HOTKEY_LABELS) as HotkeyField[]).find((f) => f !== field && !!settings[f] && settings[f].toLowerCase() === text.toLowerCase());
   if (duplicate) {
     hotkeyError = t('hotkeyDuplicate', { name: t(HOTKEY_LABELS[duplicate]) });
@@ -468,15 +472,16 @@ function stopPadPoll() {
   padTimer = null;
 }
 
-function hotkeyField(field: HotkeyField, label: string, hint?: string, options: { clearable?: boolean } = {}) {
+function hotkeyField(field: HotkeyField, label: string, help?: string, options: { clearable?: boolean; icon?: IconName } = {}) {
   const recording = hotkeyRecording === field;
   const held = recording ? recorder.current() : null;
   const heldText = held && held.mods.length + held.keys.length + held.mouse.length + held.pad.length > 0 ? hotkeyLabel(formatHotkey(held)) : '';
   const value = settings[field];
+  const helpId = `hotkey:${field}`;
   return h(
     'div',
     { class: 'field' },
-    h('label', {}, label),
+    h('div', { class: 'field-head' }, h('span', { class: 'field-label' }, options.icon ? icon(options.icon, 16) : null, label), help ? helpButton(helpId) : null),
     h(
       'div',
       { class: 'row' },
@@ -502,7 +507,7 @@ function hotkeyField(field: HotkeyField, label: string, hint?: string, options: 
       recording ? h('span', { class: 'faint' }, t('hotkeyEsc')) : null,
       hotkeyError && recording ? h('span', { class: 'error' }, hotkeyError) : null
     ),
-    hint ? h('p', { class: 'hint' }, hint) : null
+    help ? helpText(helpId, help) : null
   );
 }
 
@@ -648,7 +653,7 @@ function maxClip(): number {
 }
 
 function plusLink(label?: string) {
-  return h('button', { class: 'small quiet', onclick: () => void kine.openKine('/plus') }, label ?? t('plusLearnMore'));
+  return h('button', { class: 'small quiet plus-link', onclick: () => void kine.openKine('/plus') }, icon('sparkle', 14), label ?? t('plusLearnMore'));
 }
 
 function statusText(): { text: string; cls: string } {
@@ -739,7 +744,7 @@ function tabButton(name: Tab) {
 function liveButton(): HTMLElement {
   const live = status.live;
   if (live.state === 'idle') {
-    return h('button', { class: 'small quiet side-live', title: t('liveDialogTitle'), onclick: () => { tab = 'live'; render(); } }, h('span', { class: 'live-dot' }), t('sideLive'));
+    return h('button', { class: 'small quiet side-live', title: t('liveDialogTitle'), onclick: () => { tab = 'live'; render(); } }, icon('broadcast', 15, 'live-icon'), t('sideLive'));
   }
   if (live.state === 'starting') {
     return h('button', { class: 'small side-live pending', disabled: true }, h('span', { class: 'live-dot' }), t('sideLiveConnecting'));
@@ -771,24 +776,22 @@ function stopLiveClick(e: Event) {
 
 /** Řádek upozornění v panelu: text (klik = kde se to řeší) a křížek (schovat). */
 function noticeRow(n: AppNotice) {
-  const target = n.tab && visibleTabs().includes(n.tab as Tab) ? (n.tab as Tab) : null;
   return h(
     'div',
     { class: `side-sub side-notice ${n.kind}` },
+    icon(n.kind === 'info' ? 'info' : 'warning', 14, 'notice-icon'),
     h(
       'button',
       {
         class: 'notice-text',
         title: n.text,
         onclick: () => {
-          if (!target) return;
-          tab = target;
-          render();
+          if (n.tab) navigateTo(n.tab);
         },
       },
-      (n.kind === 'info' ? 'ℹ ' : '⚠ ') + n.text
+      n.text
     ),
-    h('button', { class: 'notice-x', title: t('close'), 'aria-label': t('close'), onclick: () => void kine.dismissNotice(n.id) }, '✕')
+    h('button', { class: 'notice-x', title: t('close'), 'aria-label': t('close'), onclick: () => void kine.dismissNotice(n.id) }, icon('close', 12))
   );
 }
 
@@ -941,7 +944,7 @@ function livePreview() {
     void video.play().catch(() => undefined);
     cam.append(video);
   } else {
-    cam.append(h('span', { class: 'faint' }, camPreview?.error ? '⚠' : '…'));
+    cam.append(h('span', { class: 'faint' }, camPreview?.error ? icon('warning', 16) : '…'));
   }
   box.append(cam);
   return box;
@@ -1034,19 +1037,19 @@ function liveEndedCard(ended: LiveEnded) {
   const head = h(
     'div',
     { class: 'row', style: 'align-items:center' },
-    h('h2', { class: 'grow', style: 'margin:0' }, '🎬 ' + t('liveEndedTitle', { duration: ended.duration })),
-    h('button', { class: 'small quiet live-ended-close', title: t('close'), 'aria-label': t('close'), onclick: () => void kine.dismissLiveEnded() }, '✕')
+    h('h2', { class: 'grow icon-title', style: 'margin:0' }, icon('film', 18), h('span', {}, t('liveEndedTitle', { duration: ended.duration }))),
+    h('button', { class: 'small quiet live-ended-close', title: t('close'), 'aria-label': t('close'), onclick: () => void kine.dismissLiveEnded() }, icon('close', 14))
   );
-  const studio = h('button', { class: 'small quiet', onclick: () => void kine.openKine('/live') }, t('liveEndedStudio') + ' →');
+  const studio = h('button', { class: 'small quiet', onclick: () => void kine.openKine('/live') }, icon('external', 14), t('liveEndedStudio'));
 
   if (ended.video) {
     return h(
       'div',
       { class: 'panel stack live-ended published' },
       head,
-      h('p', { class: 'ok', style: 'margin:0' }, '✓ ' + t(ended.video.auto ? 'liveEndedPublishedAuto' : 'liveEndedPublished')),
+      h('p', { class: 'ok', style: 'margin:0' }, icon('check', 14), ' ', t(ended.video.auto ? 'liveEndedPublishedAuto' : 'liveEndedPublished')),
       ended.video.status === 'processing' ? h('p', { class: 'hint', style: 'margin:0' }, t('liveEndedProcessing')) : null,
-      h('div', { class: 'row' }, h('button', { class: 'small primary live-ended-open', onclick: () => void kine.openLiveRecording() }, '▶ ' + t('liveEndedOpen')), studio)
+      h('div', { class: 'row' }, h('button', { class: 'small primary live-ended-open', onclick: () => void kine.openLiveRecording() }, icon('play', 14), t('liveEndedOpen')), studio)
     );
   }
   if (ended.autoPending) {
@@ -1093,7 +1096,7 @@ function liveEndedCard(ended: LiveEnded) {
           disabled: !canPublish,
           onclick: () => void kine.publishLiveRecording({ title: form.title.trim() || ended.title, visibility: form.visibility }),
         },
-        ended.publishing ? h('span', { class: 'spin' }) : '⬆ ',
+        ended.publishing ? h('span', { class: 'spin' }) : icon('upload', 15),
         ended.publishing ? t('liveEndedPublishing') : t('liveEndedPublish')
       )
     ),
@@ -1111,19 +1114,15 @@ function liveChatRecordingPanel() {
   return h(
     'div',
     { class: 'panel stack live-chat-panel' },
-    h('h2', { style: 'margin:0' }, '💬 ' + t('liveSecChatRec')),
-    h('p', { class: 'hint', style: 'margin:0' }, t('liveChatWindowHint')),
+    // Podpory od diváků (💛) a jejich čtení nahlas - ikonka 🔊 přímo v okně chatu (web Kine): vysvětlení pod otazníčkem.
+    ...panelTitle('chat', t('liveSecChatRec'), { id: 'liveChat', help: t('liveChatWindowHint') + ' ' + t('liveChatTtsHint') }),
     h(
       'div',
       { class: 'row', style: 'align-items:center;gap:14px;flex-wrap:wrap' },
-      h('button', { class: 'small live-chat-window', disabled: !status.account, onclick: () => void kine.openLiveChat() }, '🗨 ' + t('liveChatWindow')),
+      h('button', { class: 'small live-chat-window', disabled: !status.account, onclick: () => void kine.openLiveChat() }, icon('chat', 15), t('liveChatWindow')),
       checkbox('liveChatOnTop', t('liveChatOnTop'))
     ),
-    // Podpory od diváků (💛) a jejich čtení nahlas - ikonka 🔊 přímo v okně chatu (web Kine).
-    h('p', { class: 'hint live-chat-tts-hint', style: 'margin:0' }, t('liveChatTtsHint')),
-    h(
-      'label',
-      { style: 'max-width:460px' },
+    field(
       t('liveAfterStreamLabel'),
       h(
         'select',
@@ -1140,11 +1139,13 @@ function liveChatRecordingPanel() {
         h('option', { value: 'subscribers', selected: value === 'subscribers' }, t('liveAfterStreamSubscribers')),
         h('option', { value: 'private', selected: value === 'private' }, t('liveAfterStreamPrivate'))
       ),
-      h(
-        'span',
-        { class: `hint ${unsupported || afterStreamFailed ? 'warn-text' : ''}` },
-        unsupported ? t('liveAfterStreamUnsupported') : afterStreamFailed ? t('liveAfterStreamSaveFailed') : t('liveAfterStreamHint')
-      )
+      {
+        id: 'afterStream',
+        icon: 'film',
+        help: t('liveAfterStreamHint'),
+        style: 'max-width:460px',
+        extra: [unsupported || afterStreamFailed ? h('span', { class: 'hint warn-text' }, unsupported ? t('liveAfterStreamUnsupported') : t('liveAfterStreamSaveFailed')) : null],
+      }
     )
   );
 }
@@ -1163,15 +1164,14 @@ function renderLive() {
     statusPanel = h(
       'div',
       { class: 'panel stack live-panel' },
-      h('p', { class: 'hint', style: 'margin:0' }, t('liveDialogIntro')),
       status.account
         ? null
-        : h('p', { class: 'hint warn live-login' }, t('liveNeedLogin'), ' ', h('button', { class: 'small', onclick: () => { tab = 'account'; render(); } }, t('sideSignIn'))),
-      err ? h('p', { class: 'hint warn live-error' }, err) : null,
+        : h('p', { class: 'hint warn live-login' }, icon('user', 14), ' ', t('liveNeedLogin'), ' ', h('button', { class: 'small', onclick: () => { tab = 'account'; render(); } }, t('sideSignIn'))),
+      err ? h('p', { class: 'hint warn live-error' }, icon('warning', 14), ' ', err) : null,
       h(
         'div',
         { class: 'row live-actions' },
-        h('button', { class: 'primary live-start', disabled: liveStarting, onclick: () => void goLive() }, liveStarting ? t('liveDialogStarting') : '● ' + t('liveDialogStart'))
+        h('button', { class: 'primary live-start', disabled: liveStarting, onclick: () => void goLive() }, liveStarting ? h('span', { class: 'spin' }) : icon('broadcast', 17), liveStarting ? t('liveDialogStarting') : t('liveDialogStart'))
       )
     );
   } else {
@@ -1179,6 +1179,16 @@ function renderLive() {
     const slow = !!stats && ((stats.speed !== null && stats.speed < 0.92) || stats.backlogMb > 4);
     const brb = !!live.scene?.brb;
     const micMuted = !!live.scene?.micMuted;
+    // Řádek se statistikou jen když je co ukázat (na začátku vysílání ještě nic není).
+    const statsText = stats
+      ? [
+          stats.kbps !== null ? t('liveStatsRate', { mbps: (Math.round(stats.kbps / 100) / 10).toLocaleString(settings.lang) }) : null,
+          stats.fps !== null ? `${Math.round(stats.fps)} fps` : null,
+          slow ? t('liveStatsSlow') : null,
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      : '';
     statusPanel = h(
       'div',
       { class: 'panel stack live-panel on-air' },
@@ -1198,10 +1208,10 @@ function renderLive() {
                 : t('liveNow')
         ),
         onAir && live.since ? h('span', { class: 'live-time' }, liveElapsed(live.since)) : null,
-        live.viewers !== null && onAir ? h('span', { class: 'live-viewers', title: t('liveViewersHint') }, '👁 ' + t('liveViewers', { count: live.viewers })) : null,
+        live.viewers !== null && onAir ? h('span', { class: 'live-viewers', title: t('liveViewersHint') }, icon('eye', 15), ' ', t('liveViewers', { count: live.viewers })) : null,
         h('span', { class: 'grow' }),
-        live.watchUrl ? h('button', { class: 'small quiet', onclick: () => void kine.openLivePage() }, '💬 ' + t('sideLiveOpen')) : null,
-        onAir ? h('button', { class: 'small quiet live-chat-window', onclick: () => void kine.openLiveChat() }, '🗨 ' + t('liveChatWindowShort')) : null,
+        live.watchUrl ? h('button', { class: 'small quiet', onclick: () => void kine.openLivePage() }, icon('external', 14), t('sideLiveOpen')) : null,
+        onAir ? h('button', { class: 'small quiet live-chat-window', onclick: () => void kine.openLiveChat() }, icon('chat', 14), t('liveChatWindowShort')) : null,
         h('button', { class: 'small', disabled: live.state === 'starting' || live.state === 'stopping', onclick: (e: Event) => stopLiveClick(e) }, t('sideLiveStop'))
       ),
       onAir
@@ -1211,43 +1221,37 @@ function renderLive() {
             h(
               'button',
               { class: `small live-brb-toggle ${brb ? 'active' : ''}`, 'aria-pressed': brb ? 'true' : 'false', title: settings.liveBrbHotkey ? hotkeyLabel(settings.liveBrbHotkey) : t('liveBrbHint'), onclick: () => void kine.liveBrb() },
-              brb ? '▶ ' + t('liveBrbBack') : '⏸ ' + t('liveBrbOn')
+              brb ? icon('play', 14) : icon('pause', 14),
+              brb ? t('liveBrbBack') : t('liveBrbOn')
             ),
             live.scene && (settings.liveMic && settings.microphone)
               ? h(
                   'button',
                   { class: `small live-mute ${micMuted ? 'active' : ''}`, 'aria-pressed': micMuted ? 'true' : 'false', onclick: () => void kine.liveMuteMic(!micMuted) },
-                  micMuted ? '🔇 ' + t('liveMicUnmute') : '🎤 ' + t('liveMicMute')
+                  micMuted ? icon('micOff', 14) : icon('mic', 14),
+                  micMuted ? t('liveMicUnmute') : t('liveMicMute')
                 )
               : null
           )
         : null,
-      stats && onAir
-        ? h(
-            'p',
-            { class: `hint live-stats ${slow ? 'warn' : ''}`, style: 'margin:0' },
-            [
-              stats.kbps !== null ? t('liveStatsRate', { mbps: (Math.round(stats.kbps / 100) / 10).toLocaleString(settings.lang) }) : null,
-              stats.fps !== null ? `${Math.round(stats.fps)} fps` : null,
-              slow ? '⚠ ' + t('liveStatsSlow') : null,
-            ]
-              .filter(Boolean)
-              .join(' · ')
-          )
+      stats && onAir && statsText
+        ? h('p', { class: `hint live-stats ${slow ? 'warn' : ''}`, style: 'margin:0' }, slow ? icon('warning', 14) : icon('gauge', 14), ' ', statsText)
         : null,
       live.state === 'live' && live.confirmed !== null
         ? h(
             'p',
             { class: live.confirmed ? 'ok' : 'hint warn', style: 'margin:0' },
+            live.confirmed ? icon('check', 14) : icon('timer', 14),
+            ' ',
             live.confirmed
-              ? '✓ ' + t('liveConfirmedOk')
+              ? t('liveConfirmedOk')
               : // Kine nepotvrzený přenos po 3 minutách z "Živě" stáhne - po 90 s je čas to říct naplno.
                 live.since !== null && Date.now() - live.since > 90_000
                 ? t('liveConfirmedLong')
                 : t('liveConfirmedWait')
           )
         : null,
-      live.cameraError ? h('p', { class: 'hint warn', style: 'margin:0' }, '📷 ' + cameraErrorMessage(live.cameraError)) : null
+      live.cameraError ? h('p', { class: 'hint warn', style: 'margin:0' }, icon('camera', 14), ' ', cameraErrorMessage(live.cameraError)) : null
     );
   }
 
@@ -1258,7 +1262,7 @@ function renderLive() {
   return h(
     'div',
     { class: 'stack' },
-    h('h1', {}, t('tabLive')),
+    ...pageTitle(t('tabLive'), { id: 'live', help: t('liveDialogIntro') }),
     statusPanel,
     // Po skončení vysílání: záznam na Kine (zveřejnit / otevřít).
     idle && live.ended ? liveEndedCard(live.ended) : null,
@@ -1266,7 +1270,7 @@ function renderLive() {
     h(
       'div',
       { class: 'panel stack' },
-      h('h2', { style: 'margin:0' }, t('liveSecInfo')),
+      ...panelTitle('info', t('liveSecInfo'), { id: 'liveInfo' }),
       h(
         'label',
         {},
@@ -1283,9 +1287,7 @@ function renderLive() {
           onchange: (e: Event) => saveText('liveTitle', (e.target as HTMLInputElement).value.trim(), true),
         })
       ),
-      h(
-        'label',
-        {},
+      field(
         t('liveDescriptionLabel'),
         h(
           'textarea',
@@ -1300,7 +1302,7 @@ function renderLive() {
           },
           settings.liveDescription
         ),
-        h('span', { class: 'hint' }, t('liveDescriptionHint'))
+        { id: 'liveDescription', help: t('liveDescriptionHint') }
       ),
       h(
         'label',
@@ -1320,21 +1322,19 @@ function renderLive() {
     h(
       'div',
       { class: 'panel stack live-scene-panel' },
-      h('h2', { style: 'margin:0' }, t('liveSecWhat')),
-      h(
-        'div',
-        { class: 'row' },
-        h('p', { class: 'hint grow', style: 'margin:0' }, t('liveWhatPicture')),
-        h('button', { class: 'small quiet', onclick: () => { tab = 'settings'; render(); } }, t('liveChangeCapture'))
-      ),
-      checkbox('liveGameAudio', t('liveGameAudio'), gameOff ? t('liveAudioOffInCapture') : undefined, locked),
-      checkbox('liveMic', t('liveMicOn'), micOff ? t('liveAudioOffInCapture') : undefined, locked),
+      ...panelTitle('monitor', t('liveSecWhat'), {
+        id: 'liveWhat',
+        help: t('liveWhatPicture'),
+        right: h('button', { class: 'small quiet', onclick: () => void navigateTo('settings:quality') }, icon('quality', 14), t('liveChangeCapture')),
+      }),
+      checkbox('liveGameAudio', t('liveGameAudio'), { note: gameOff ? t('liveAudioOffInCapture') : undefined, disabled: locked, icon: 'volume' }),
+      checkbox('liveMic', t('liveMicOn'), { note: micOff ? t('liveAudioOffInCapture') : undefined, disabled: locked, icon: 'mic' }),
       h('div', { class: 'live-scene-grid' },
         livePreview(),
         h(
           'div',
           { class: 'stack live-camera-settings' },
-          checkbox('liveCamera', '📷 ' + t('liveCamera'), t('liveCameraHint')),
+          checkbox('liveCamera', t('liveCamera'), { help: t('liveCameraHint'), icon: 'camera' }),
           settings.liveCamera
             ? h(
                 'div',
@@ -1384,8 +1384,8 @@ function renderLive() {
                     )
                   )
                 ),
-                checkbox('liveCameraMirror', t('liveCameraMirror'), t('liveCameraMirrorHint')),
-                camPreview?.error ? h('p', { class: 'hint warn', style: 'margin:0' }, '⚠ ' + cameraErrorMessage(camPreview.error)) : null
+                checkbox('liveCameraMirror', t('liveCameraMirror'), { help: t('liveCameraMirrorHint') }),
+                camPreview?.error ? h('p', { class: 'hint warn', style: 'margin:0' }, icon('warning', 14), ' ', cameraErrorMessage(camPreview.error)) : null
               )
             : null
         )
@@ -1396,8 +1396,7 @@ function renderLive() {
     h(
       'div',
       { class: 'panel stack' },
-      h('h2', { style: 'margin:0' }, '⏸ ' + t('liveBrbTitle')),
-      h('p', { class: 'hint', style: 'margin:0' }, t('liveBrbIntro')),
+      ...panelTitle('pause', t('liveBrbTitle'), { id: 'liveBrb', help: t('liveBrbIntro') }),
       h(
         'label',
         {},
@@ -1413,14 +1412,14 @@ function renderLive() {
           onchange: (e: Event) => saveText('liveBrbText', (e.target as HTMLInputElement).value.trim(), true),
         })
       ),
-      checkbox('liveBrbMuteMic', t('liveBrbMuteMic')),
-      hotkeyField('liveBrbHotkey', t('liveBrbHotkey'), t('liveBrbHotkeyHint'), { clearable: true })
+      checkbox('liveBrbMuteMic', t('liveBrbMuteMic'), { icon: 'micOff' }),
+      hotkeyField('liveBrbHotkey', t('liveBrbHotkey'), t('liveBrbHotkeyHint'), { clearable: true, icon: 'keyboard' })
     ),
 
     h(
       'div',
       { class: 'panel stack' },
-      h('h2', { style: 'margin:0' }, t('liveSecHow')),
+      ...panelTitle('gauge', t('liveSecHow'), { id: 'liveHow', help: t('liveDialogQualityHint') + ' ' + t('liveUploadNeed', { mbps: liveUploadMbps(kbps) }) }),
       h(
         'div',
         { class: 'row', style: 'gap:12px;align-items:flex-end' },
@@ -1446,11 +1445,10 @@ function renderLive() {
           )
         )
       ),
-      h('p', { class: 'hint', style: 'margin:0' }, t('liveDialogQualityHint') + ' ' + t('liveUploadNeed', { mbps: liveUploadMbps(kbps) })),
-      checkbox('liveOpenPage', t('liveOpenPage'))
+      checkbox('liveOpenPage', t('liveOpenPage'), { icon: 'external' })
     ),
 
-    h('div', {}, h('button', { class: 'small quiet live-studio', onclick: () => void kine.openKine('/live') }, t('liveDialogStudio') + ' →'))
+    h('div', {}, h('button', { class: 'small quiet live-studio', onclick: () => void kine.openKine('/live') }, icon('external', 14), t('liveDialogStudio')))
   );
 }
 
@@ -1468,8 +1466,13 @@ function renderSide() {
   };
 
   const pauseBtn = manual
-    ? h('button', { class: 'small quiet side-pause', onclick: () => void kine.toggleCapture() }, capturing || status.capture === 'starting' ? t('sideBufferOff') : t('sideBufferOn'))
-    : h('button', { class: 'small quiet side-pause', onclick: () => void kine.togglePause() }, status.paused ? '▶ ' + t('sideResume') : '❚❚ ' + t('sidePause'));
+    ? h('button', { class: 'small quiet side-pause', onclick: () => void kine.toggleCapture() }, icon('power', 14), capturing || status.capture === 'starting' ? t('sideBufferOff') : t('sideBufferOn'))
+    : h(
+        'button',
+        { class: 'small quiet side-pause', 'data-paused': status.paused ? '1' : '0', onclick: () => void kine.togglePause() },
+        status.paused ? icon('play', 14) : icon('pause', 14),
+        status.paused ? t('sideResume') : t('sidePause')
+      );
 
   return h(
     'nav',
@@ -1498,18 +1501,18 @@ function renderSide() {
         ? h('div', { class: 'side-sub' }, status.uploadsPaused ? t('trayUploadsPaused', { count: status.uploadsPending }) : t('trayUploads', { count: status.uploadsPending }))
         : null,
       // Na baterii se nahrává úsporně (720p30) - ať hráč ví, proč je klip menší.
-      status.batterySaverActive ? h('div', { class: 'side-sub', title: t('batterySaverHint') }, '🔋 ' + t('sideBatterySaver')) : null,
+      status.batterySaverActive ? h('div', { class: 'side-sub side-line', title: t('batterySaverHint') }, icon('battery', 14), t('sideBatterySaver')) : null,
       // Aktualizace: stahuje se (procenta) / stažená - klik vede do O appce (tam je "Aktualizovat teď").
       status.update?.phase === 'downloading'
-        ? h('button', { class: 'side-sub side-update', onclick: () => { tab = 'about'; render(); } }, '⬇ ' + t('sideUpdateDownloading', { percent: status.update.percent ?? 0 }))
+        ? h('button', { class: 'side-sub side-update side-line', onclick: () => { tab = 'about'; render(); } }, icon('download', 14), t('sideUpdateDownloading', { percent: status.update.percent ?? 0 }))
         : status.update?.phase === 'ready'
-          ? h('button', { class: 'side-sub side-update ready', onclick: () => { tab = 'about'; render(); } }, '⬆ ' + t('sideUpdateReady', { version: status.update.version ?? '' }))
+          ? h('button', { class: 'side-sub side-update side-line ready', onclick: () => { tab = 'about'; render(); } }, icon('refresh', 14), t('sideUpdateReady', { version: status.update.version ?? '' }))
           : null,
       // Upozornění, která appka neukázala okénkem (zkratka nejde, mikrofon…) - klik vede tam, kde se to řeší.
       ...status.notices.map((n) => noticeRow(n)),
       // Hra běží, ale zvuk hry je ticho - nejčastěji hraje do jiného zařízení, než Windows nahrává.
       capturing && status.game && audioLevels && audioLevels.system !== null && audioLevels.systemSilentSeconds >= 10 && !status.notices.some((n) => n.id === 'audio-silent')
-        ? h('button', { class: 'side-sub warn side-audio-warn', onclick: () => { tab = 'settings'; render(); } }, '⚠ ' + t('sideAudioSilent'))
+        ? h('button', { class: 'side-sub warn side-audio-warn side-line', onclick: () => void navigateTo('settings:audio') }, icon('warning', 14), t('sideAudioSilent'))
         : null,
       h(
         'div',
@@ -1517,7 +1520,7 @@ function renderSide() {
         h(
           'button',
           { class: `small primary side-clip ${status.clipsSaving > 0 ? 'saving' : ''}`, disabled: !capturing, title: hotkeyLabel(settings.clipHotkey), onclick: () => void kine.clipNow() },
-          status.clipsSaving > 0 ? h('span', { class: 'spin' }) : '● ',
+          status.clipsSaving > 0 ? h('span', { class: 'spin' }) : icon('clipAdd', 15),
           status.clipsSaving > 0 ? t('sideClipSaving') : t('sideSaveClip')
         ),
         pauseBtn
@@ -1546,19 +1549,14 @@ function renderSide() {
             : h(
                 'button',
                 { class: 'small quiet side-record', disabled: !capturing, title: settings.recordHotkey ? hotkeyLabel(settings.recordHotkey) : '', onclick: () => void kine.toggleRecording() },
-                '⏺ ' + t('sideRecord')
-              ),
-        // Snímek obrazovky jde vždycky (i bez hry a zásobníku).
-        h(
-          'button',
-          { class: 'small quiet side-shot', title: settings.screenshotHotkey ? `${t('screenshotHotkey')} (${hotkeyLabel(settings.screenshotHotkey)})` : t('screenshotHotkey'), onclick: () => void kine.takeScreenshot() },
-          '📷'
-        )
+                icon('record', 14),
+                t('sideRecord')
+              )
       ),
       // Živé vysílání na Kine: dialog, pak čas vysílání + Ukončit; pod tím stránka vysílání s chatem.
       h('div', { class: 'side-actions' }, liveButton()),
       status.live.state !== 'idle' && status.live.watchUrl
-        ? h('button', { class: 'side-sub side-live-open', onclick: () => void kine.openLivePage() }, '💬 ' + t('sideLiveOpen'))
+        ? h('button', { class: 'side-sub side-live-open side-line', onclick: () => void kine.openLivePage() }, icon('external', 13), t('sideLiveOpen'))
         : null,
       account
         ? h(
@@ -1591,15 +1589,15 @@ function renderKineBar() {
     status.uploadsPending > 0
       ? h('span', { class: 'bar-item' }, status.uploadsPaused ? t('trayUploadsPaused', { count: status.uploadsPending }) : t('trayUploads', { count: status.uploadsPending }))
       : null,
-    ...status.notices.filter((n) => n.kind !== 'info').map((n) => h('span', { class: 'bar-item warn', title: n.text }, '⚠ ', n.text)),
+    ...status.notices.filter((n) => n.kind !== 'info').map((n) => h('span', { class: 'bar-item warn', title: n.text }, icon('warning', 14), ' ', n.text)),
     status.recordingSaving ? h('span', { class: 'bar-item' }, h('span', { class: 'spin' }), t('sideRecordSaving')) : null,
     h('span', { class: 'grow' }),
     // Během vysílání: čas a Ukončit i nad webem (chat je na stránce vysílání v okně).
     status.live.state === 'live' || status.live.state === 'reconnecting'
       ? h('span', { class: 'side-actions bar-live' }, liveButton())
       : null,
-    h('button', { class: 'small quiet', onclick: go('clips') }, clips.length > 0 ? t('barClipsCount', { count: clips.length }) : t('tabClips')),
-    h('button', { class: 'small quiet', onclick: go('settings') }, t('tabSettings'))
+    h('button', { class: 'small quiet', onclick: go('clips') }, icon('film', 14), clips.length > 0 ? t('barClipsCount', { count: clips.length }) : t('tabClips')),
+    h('button', { class: 'small quiet', onclick: go('settings') }, icon('sliders', 14), t('tabSettings'))
   );
 }
 
@@ -1770,8 +1768,8 @@ function variantPanel() {
   const clipper = status.variant === 'clipper';
   return h(
     'div',
-    { class: 'panel stack' },
-    h('h2', {}, t('variantTitle')),
+    { class: 'panel stack variant-panel' },
+    ...panelTitle('desktop', t('variantTitle')),
     h(
       'div',
       { class: 'row', style: 'gap:12px;align-items:flex-start' },
@@ -1783,144 +1781,259 @@ function variantPanel() {
         h('p', { class: 'hint' }, clipper ? t('variantClipperText') : t('variantFullText'))
       )
     ),
-    h('div', {}, h('button', { class: 'small quiet', onclick: () => void kine.openKine('/download') }, clipper ? t('variantGetFull') : t('variantGetClipper')))
+    h('div', {}, h('button', { class: 'small quiet', onclick: () => void kine.openKine('/download') }, icon('download', 14), clipper ? t('variantGetFull') : t('variantGetClipper')))
+  );
+}
+
+// ---- nastavení po oddílech -------------------------------------------------------------
+
+/**
+ * Nastavení (záložka Záznam) po oddílech: nahoře řada ikon (zkratky,
+ * kvalita, zvuk, výkon, úložiště, vzhled, obecné), pod ní jen ten jeden
+ * oddíl - žádná dlouhá stěna textu. Vysvětlení jsou pod otazníčky.
+ */
+type SettingsSection = 'hotkeys' | 'quality' | 'audio' | 'performance' | 'storage' | 'look' | 'general';
+const SETTINGS_SECTIONS: { id: SettingsSection; icon: IconName; key: Key }[] = [
+  { id: 'hotkeys', icon: 'keyboard', key: 'hotkeysTitle' },
+  { id: 'quality', icon: 'quality', key: 'qualityTitle' },
+  { id: 'audio', icon: 'volume', key: 'audioTitle' },
+  { id: 'performance', icon: 'gauge', key: 'secPerformance' },
+  { id: 'storage', icon: 'drive', key: 'secStorage' },
+  { id: 'look', icon: 'palette', key: 'lookTitle' },
+  { id: 'general', icon: 'sliders', key: 'generalTitle' },
+];
+const SECTION_STORE = 'kine-settings-section';
+
+function isSection(value: unknown): value is SettingsSection {
+  return SETTINGS_SECTIONS.some((x) => x.id === value);
+}
+
+let settingsSection: SettingsSection = (() => {
+  try {
+    const saved = localStorage.getItem(SECTION_STORE);
+    return isSection(saved) ? saved : 'hotkeys';
+  } catch {
+    return 'hotkeys';
+  }
+})();
+
+function setSection(id: SettingsSection) {
+  settingsSection = id;
+  try {
+    localStorage.setItem(SECTION_STORE, id);
+  } catch {
+    // nevadí - příště se otevře první oddíl
+  }
+}
+
+/** "settings:audio" -> záložka Nastavení, oddíl Zvuk; "clips" -> záložka. Vrací, jestli to vyšlo. */
+function navigateTo(target: string): boolean {
+  const [name, section] = target.split(':');
+  if (!visibleTabs().includes(name as Tab)) return false;
+  tab = name as Tab;
+  if (name === 'settings' && isSection(section)) setSection(section);
+  wizardStep = null;
+  render();
+  if (section) {
+    const main = app.querySelector('.main');
+    if (main) main.scrollTop = 0;
+  }
+  return true;
+}
+
+/** Upozornění, které se týká oddílu (zkratka nejde, zvuk je ticho…) - tečka na jeho ikoně. */
+function sectionWarn(id: SettingsSection): boolean {
+  if (status.notices.some((n) => n.kind !== 'info' && n.tab === `settings:${id}`)) return true;
+  if (id === 'audio') return status.capture === 'on' && !!audioLevels && audioLevels.system !== null && audioLevels.systemSilentSeconds >= 10;
+  return false;
+}
+
+function sectionNav() {
+  return h(
+    'div',
+    { class: 'section-nav', role: 'tablist', 'aria-label': t('tabSettings') },
+    ...SETTINGS_SECTIONS.map((x) =>
+      h(
+        'button',
+        {
+          class: `section-chip ${settingsSection === x.id ? 'active' : ''}`,
+          role: 'tab',
+          'aria-selected': String(settingsSection === x.id),
+          'data-section': x.id,
+          onclick: () => {
+            setSection(x.id);
+            render();
+            const main = app.querySelector('.main');
+            if (main) main.scrollTop = 0;
+          },
+        },
+        icon(x.icon, 20),
+        h('span', { class: 'section-label' }, t(x.key)),
+        sectionWarn(x.id) ? h('span', { class: 'section-warn', 'aria-hidden': 'true' }) : null
+      )
+    )
   );
 }
 
 function renderSettings() {
+  const win = kine.platform === 'win32';
+  let body: (HTMLElement | null)[];
+  switch (settingsSection) {
+    case 'hotkeys':
+      body = [hotkeysPanel(win)];
+      break;
+    case 'quality':
+      body = [qualityPanel()];
+      break;
+    case 'audio':
+      body = [audioPanel(win)];
+      break;
+    case 'performance':
+      body = [performancePanel()];
+      break;
+    case 'storage':
+      body = [storagePanel()];
+      break;
+    case 'look':
+      body = [appearancePanel()];
+      break;
+    default:
+      body = [generalPanel(win), variantPanel()];
+  }
+  return h('div', { class: 'stack settings-page' }, h('h1', {}, t('settingsTitle')), sectionNav(), ...body);
+}
+
+/** Zkratky a délka klipu. */
+function hotkeysPanel(win: boolean) {
   const limit = maxClip();
   const seconds = Math.min(settings.clipSeconds, limit);
   const secondsOptions = [...clipOptionsFor(status.account?.plan)].filter((n) => n <= limit) as number[];
   if (!secondsOptions.includes(seconds)) secondsOptions.push(seconds);
   secondsOptions.sort((a, b) => a - b);
-  const win = kine.platform === 'win32';
-
   return h(
     'div',
-    { class: 'stack' },
-    h('h1', {}, t('settingsTitle')),
-    h(
-      'div',
-      { class: 'panel stack' },
-      h('h2', {}, t('hotkeysTitle')),
-      hotkeyField('clipHotkey', t('clipHotkey'), t('clipHotkeyHint')),
-      hotkeyField('toggleHotkey', t('toggleHotkey')),
-      hotkeyField('recordHotkey', '⏺ ' + t('recordHotkey'), t('recordHotkeyHint'), { clearable: true }),
-      hotkeyField('screenshotHotkey', '📷 ' + t('screenshotHotkey'), t('screenshotHotkeyHint'), { clearable: true }),
-      win ? h('p', { class: 'hint' }, '🎮 ' + t('hotkeyPadHint')) : null,
-      win && !status.chordsSupported ? h('p', { class: 'hint warn' }, t('hotkeyHelperDown')) : null,
-      !win ? h('p', { class: 'hint' }, t('hotkeyChordUnsupported')) : null,
-      h(
-        'div',
-        { class: 'field' },
-        h('label', {}, t('clipSeconds')),
-        h(
-          'div',
-          { class: 'row' },
-          h(
-            'select',
-            { style: 'width:auto', onchange: (e: Event) => update({ clipSeconds: Number((e.target as HTMLSelectElement).value) }) },
-            ...secondsOptions.map((n) => h('option', { value: String(n), selected: n === seconds }, `${n} s`))
-          ),
-          h('input', {
-            type: 'number',
-            min: '5',
-            max: String(limit),
-            value: String(seconds),
-            style: 'width:90px',
-            onchange: (e: Event) => update({ clipSeconds: Math.min(limit, Number((e.target as HTMLInputElement).value)) }),
-          })
-        ),
-        h('p', { class: 'hint' }, t('clipSecondsHint') + ' ' + (clipsPlus() ? t('clipSecondsPlusHint', { max: limit }) : t('clipSecondsFreeHint', { max: limit }))),
-        clipsPlus() ? null : h('div', {}, plusLink())
-      )
-    ),
-    performancePanel(),
-    h(
-      'div',
-      { class: 'panel stack' },
-      h(
-        'div',
-        { class: 'spread' },
-        h('h2', { style: 'margin:0' }, t('qualityTitle')),
-        h(
-          'div',
-          { class: 'row', style: 'gap:6px' },
-          // Doporučená kvalita pro hry (plynulý obraz, žádné kostičky) - s kódováním na grafice skoro nic nestojí.
-          h(
-            'button',
-            {
-              class: `small quality-recommended ${recommendedActive() ? 'quiet' : ''}`,
-              disabled: recommendedActive(),
-              onclick: () => update({ maxHeight: 1080, fps: 60, videoMbps: 20 }),
-            },
-            '⚡ ' + t('recommendedPreset')
-          ),
-          // Jedním klikem nejúspornější nastavení - pro slabší PC nebo když hra při nahrávání trhá.
-          h(
-            'button',
-            {
-              class: `small ${lowLoadActive() ? 'quiet' : ''}`,
-              disabled: lowLoadActive(),
-              onclick: () => update({ maxHeight: 720, fps: 30, videoMbps: 5 }),
-            },
-            '🍃 ' + t('lowLoadPreset')
-          )
-        )
-      ),
-      h('p', { class: 'hint', style: 'margin-top:-4px' }, t('lowLoadHint')),
+    { class: 'panel stack hotkeys-panel' },
+    ...panelTitle('keyboard', t('hotkeysTitle'), { help: win ? t('hotkeyPadHint') : t('hotkeyChordUnsupported') }),
+    hotkeyField('clipHotkey', t('clipHotkey'), t('clipHotkeyHint'), { icon: 'clipAdd' }),
+    hotkeyField('toggleHotkey', t('toggleHotkey'), undefined, { icon: 'power' }),
+    hotkeyField('recordHotkey', t('recordHotkey'), t('recordHotkeyHint'), { clearable: true, icon: 'record' }),
+    win && !status.chordsSupported ? h('p', { class: 'hint warn' }, icon('warning', 14), ' ', t('hotkeyHelperDown')) : null,
+    field(
+      t('clipSeconds'),
       h(
         'div',
         { class: 'row' },
         h(
-          'label',
-          { class: 'grow' },
-          t('maxHeight'),
-          h(
-            'select',
-            { onchange: (e: Event) => update({ maxHeight: Number((e.target as HTMLSelectElement).value) as Settings['maxHeight'] }) },
-            h('option', { value: '720', selected: settings.maxHeight === 720 }, '720p'),
-            h('option', { value: '1080', selected: settings.maxHeight === 1080 }, '1080p'),
-            h('option', { value: '1440', selected: settings.maxHeight === 1440 }, '1440p'),
-            h('option', { value: '0', selected: settings.maxHeight === 0 }, t('maxHeightSource'))
-          )
+          'select',
+          { style: 'width:auto', 'aria-label': t('clipSeconds'), onchange: (e: Event) => update({ clipSeconds: Number((e.target as HTMLSelectElement).value) }) },
+          ...secondsOptions.map((n) => h('option', { value: String(n), selected: n === seconds }, `${n} s`))
         ),
+        h('input', {
+          type: 'number',
+          min: '5',
+          max: String(limit),
+          value: String(seconds),
+          style: 'width:90px',
+          'aria-label': t('clipSeconds'),
+          onchange: (e: Event) => update({ clipSeconds: Math.min(limit, Number((e.target as HTMLInputElement).value)) }),
+        }),
+        clipsPlus() ? null : plusLink()
+      ),
+      {
+        id: 'clipSeconds',
+        icon: 'timer',
+        help: t('clipSecondsHint') + ' ' + (clipsPlus() ? t('clipSecondsPlusHint', { max: limit }) : t('clipSecondsFreeHint', { max: limit })),
+      }
+    )
+  );
+}
+
+/** Kvalita klipů: dvě předvolby, rozlišení / snímky / datový tok, kdo kóduje, kodek, obrazovka. */
+function qualityPanel() {
+  const presets = h(
+    'div',
+    { class: 'row', style: 'gap:6px' },
+    // Doporučená kvalita pro hry (plynulý obraz, žádné kostičky) - s kódováním na grafice skoro nic nestojí.
+    h(
+      'button',
+      {
+        class: `small quality-recommended ${recommendedActive() ? 'quiet' : ''}`,
+        disabled: recommendedActive(),
+        onclick: () => update({ maxHeight: 1080, fps: 60, videoMbps: 20 }),
+      },
+      icon('bolt', 15),
+      t('recommendedPreset')
+    ),
+    // Jedním klikem nejúspornější nastavení - pro slabší PC nebo když hra při nahrávání trhá.
+    h(
+      'button',
+      {
+        class: `small low-load ${lowLoadActive() ? 'quiet' : ''}`,
+        disabled: lowLoadActive(),
+        onclick: () => update({ maxHeight: 720, fps: 30, videoMbps: 5 }),
+      },
+      icon('leaf', 15),
+      t('lowLoadPreset')
+    )
+  );
+  return h(
+    'div',
+    { class: 'panel stack quality-panel' },
+    ...panelTitle('quality', t('qualityTitle'), {
+      help: t('lowLoadHint') + ' ' + t('videoMbpsHint', { mbps: suggestedMbps(settings.maxHeight, settings.fps) }),
+      right: presets,
+    }),
+    h(
+      'div',
+      { class: 'row field-row' },
+      field(
+        t('maxHeight'),
         h(
-          'label',
-          { class: 'grow' },
-          t('fps'),
-          h(
-            'select',
-            { onchange: (e: Event) => update({ fps: Number((e.target as HTMLSelectElement).value) as Settings['fps'] }) },
-            h('option', { value: '30', selected: settings.fps === 30 }, '30'),
-            h('option', { value: '60', selected: settings.fps === 60 }, '60')
-          )
+          'select',
+          { onchange: (e: Event) => update({ maxHeight: Number((e.target as HTMLSelectElement).value) as Settings['maxHeight'] }) },
+          h('option', { value: '720', selected: settings.maxHeight === 720 }, '720p'),
+          h('option', { value: '1080', selected: settings.maxHeight === 1080 }, '1080p'),
+          h('option', { value: '1440', selected: settings.maxHeight === 1440 }, '1440p'),
+          h('option', { value: '0', selected: settings.maxHeight === 0 }, t('maxHeightSource'))
         ),
+        { cls: 'grow' }
+      ),
+      field(
+        t('fps'),
         h(
-          'label',
-          { class: 'grow' },
-          t('videoMbps'),
-          h('input', {
-            type: 'number',
-            min: '1',
-            max: '50',
-            step: '1',
-            value: String(settings.videoMbps),
-            onchange: (e: Event) => update({ videoMbps: Number((e.target as HTMLInputElement).value) }),
-          })
-        )
+          'select',
+          { onchange: (e: Event) => update({ fps: Number((e.target as HTMLSelectElement).value) as Settings['fps'] }) },
+          h('option', { value: '30', selected: settings.fps === 30 }, '30'),
+          h('option', { value: '60', selected: settings.fps === 60 }, '60')
+        ),
+        { cls: 'grow' }
       ),
-      h('p', { class: 'hint' }, t('videoMbpsHint', { mbps: suggestedMbps(settings.maxHeight, settings.fps) })),
-      // Kdo kóduje: grafika (skoro zadarmo) / procesor (náročné - appka pak nahrává nejvýš 30 fps).
-      h(
-        'p',
-        { class: `hint encoder-status ${status.hwEncoder === false ? 'warn-text' : status.hwEncoder ? 'ok' : ''}`, style: 'margin:0' },
-        status.hwEncoder === true ? '✓ ' + t('encoderHardware') : status.hwEncoder === false ? '⚠ ' + t('encoderSoftware') : t('encoderUnknown')
-      ),
-      checkbox('batterySaver', '🔋 ' + t('batterySaver'), t('batterySaverHint')),
-      h(
-        'label',
-        {},
+      field(
+        t('videoMbps'),
+        h('input', {
+          type: 'number',
+          min: '1',
+          max: '50',
+          step: '1',
+          value: String(settings.videoMbps),
+          onchange: (e: Event) => update({ videoMbps: Number((e.target as HTMLInputElement).value) }),
+        }),
+        { cls: 'grow' }
+      )
+    ),
+    // Kdo kóduje: grafika (skoro zadarmo) / procesor (náročné - appka pak nahrává nejvýš 30 fps).
+    h(
+      'p',
+      { class: `hint encoder-status ${status.hwEncoder === false ? 'warn-text' : status.hwEncoder ? 'ok' : ''}`, style: 'margin:0' },
+      status.hwEncoder === true ? icon('check', 14) : status.hwEncoder === false ? icon('warning', 14) : icon('info', 14),
+      ' ',
+      status.hwEncoder === true ? t('encoderHardware') : status.hwEncoder === false ? t('encoderSoftware') : t('encoderUnknown')
+    ),
+    checkbox('batterySaver', t('batterySaver'), { help: t('batterySaverHint'), icon: 'battery' }),
+    h(
+      'div',
+      { class: 'row field-row' },
+      field(
         t('codec'),
         h(
           'select',
@@ -1929,73 +2042,77 @@ function renderSettings() {
           h('option', { value: 'h264', selected: settings.codec === 'h264' }, 'H.264 (mp4)'),
           h('option', { value: 'vp9', selected: settings.codec === 'vp9' }, 'VP9 (webm)'),
           h('option', { value: 'vp8', selected: settings.codec === 'vp8' }, 'VP8 (webm)')
-        )
+        ),
+        { id: 'codec', help: t('codecHint'), cls: 'grow' }
       ),
-      h('p', { class: 'hint' }, t('codecHint')),
-      h(
-        'label',
-        {},
+      field(
         t('display'),
         h(
           'select',
           { onchange: (e: Event) => update({ displayId: (e.target as HTMLSelectElement).value }) },
           h('option', { value: '', selected: settings.displayId === '' }, t('displayPrimary')),
           ...displays.map((d) => h('option', { value: d.id, selected: settings.displayId === d.id }, d.label))
-        )
+        ),
+        { icon: 'monitor', cls: 'grow' }
       )
-    ),
-    audioPanel(win),
-    h(
-      'div',
-      { class: 'panel stack' },
-      h('label', {}, t('clipsDir')),
+    )
+  );
+}
+
+/** Kam se klipy ukládají, kolik zabírají, strop místa. */
+function storagePanel() {
+  return h(
+    'div',
+    { class: 'panel stack storage-panel' },
+    ...panelTitle('drive', t('secStorage'), { help: t('storageHint', { days: TRASH_DAYS }) }),
+    field(
+      t('clipsDir'),
       h(
         'div',
         { class: 'row' },
         h('code', { class: 'grow faint', style: 'word-break:break-all' }, settings.clipsDir || '…/Videos/Kine'),
-        h('button', { class: 'small', onclick: () => void kine.pickClipsDir() }, t('clipsDirChange')),
-        h('button', { class: 'small', onclick: () => void kine.openClipsDir() }, t('clipsDirOpen'))
+        h('button', { class: 'small', onclick: () => void kine.pickClipsDir() }, icon('pencil', 14), t('clipsDirChange')),
+        h('button', { class: 'small quiet', onclick: () => void kine.openClipsDir() }, icon('folder', 14), t('clipsDirOpen'))
       ),
-      storageRows(),
-      // Strop místa: nejstarší klipy (kromě oblíbených a čerstvých) se smažou samy.
-      h(
-        'label',
-        { style: 'max-width:360px' },
-        t('storageLimit'),
-        h(
-          'select',
-          { class: 'storage-limit', onchange: (e: Event) => update({ storageLimitGb: Number((e.target as HTMLSelectElement).value) }) },
-          ...STORAGE_LIMITS_GB.map((gb) => h('option', { value: String(gb), selected: settings.storageLimitGb === gb }, gb === 0 ? t('storageLimitOff') : `${gb} GB`))
-        ),
-        h('span', { class: 'sub hint', style: 'margin-top:4px;display:block' }, t('storageLimitHint'))
-      ),
-      checkbox('toast', t('toastSetting'), t('toastSettingHint')),
-      checkbox('clipSound', t('clipSoundSetting'), t('clipSoundHint'))
+      { icon: 'folder' }
     ),
-    variantPanel(),
-    h(
-      'div',
-      { class: 'panel stack' },
-      h('h2', {}, t('generalTitle')),
-      h('label', {}, t('language'), languageSelect()),
-      checkbox('startWithSystem', t('startWithSystem'), t('startWithSystemHint')),
-      // Po spuštění appky: nahrávat hned / počkat na hru / nic, dokud to hráč nezapne.
+    storageRows(),
+    // Strop místa: nejstarší klipy (kromě oblíbených a čerstvých) se smažou samy.
+    field(
+      t('storageLimit'),
       h(
-        'label',
-        { style: 'max-width:460px' },
-        t('launchCapture'),
-        h(
-          'select',
-          { class: 'launch-capture', onchange: (e: Event) => update({ launchCapture: (e.target as HTMLSelectElement).value as Settings['launchCapture'] }) },
-          h('option', { value: 'auto', selected: settings.launchCapture === 'auto' }, t('launchCaptureAuto')),
-          h('option', { value: 'game', selected: settings.launchCapture === 'game' }, t('launchCaptureGame')),
-          h('option', { value: 'paused', selected: settings.launchCapture === 'paused' }, t('launchCapturePaused'))
-        ),
-        h('span', { class: 'sub hint', style: 'margin-top:4px;display:block' }, t('launchCaptureHint'))
+        'select',
+        { class: 'storage-limit', onchange: (e: Event) => update({ storageLimitGb: Number((e.target as HTMLSelectElement).value) }) },
+        ...STORAGE_LIMITS_GB.map((gb) => h('option', { value: String(gb), selected: settings.storageLimitGb === gb }, gb === 0 ? t('storageLimitOff') : `${gb} GB`))
       ),
-      h('p', { class: 'hint', style: 'margin:0' }, t('brandColorHint'))
-    ),
-    appearancePanel()
+      { id: 'storageLimit', help: t('storageLimitHint'), style: 'max-width:360px' }
+    )
+  );
+}
+
+/** Jazyk, start s Windows, ikona na ploše, co po spuštění, oznámení o klipu. */
+function generalPanel(win: boolean) {
+  return h(
+    'div',
+    { class: 'panel stack general-panel' },
+    ...panelTitle('sliders', t('generalTitle')),
+    field(t('language'), languageSelect(), { icon: 'globe', style: 'max-width:360px' }),
+    checkbox('startWithSystem', t('startWithSystem'), { help: t('startWithSystemHint'), icon: 'power' }),
+    win ? checkbox('desktopShortcut', t('desktopShortcutSetting'), { help: t('desktopShortcutHint'), icon: 'desktop' }) : null,
+    checkbox('toast', t('toastSetting'), { help: t('toastSettingHint'), icon: 'bell' }),
+    checkbox('clipSound', t('clipSoundSetting'), { help: t('clipSoundHint'), icon: 'volume' }),
+    // Po spuštění appky: nahrávat hned / počkat na hru / nic, dokud to hráč nezapne.
+    field(
+      t('launchCapture'),
+      h(
+        'select',
+        { class: 'launch-capture', onchange: (e: Event) => update({ launchCapture: (e.target as HTMLSelectElement).value as Settings['launchCapture'] }) },
+        h('option', { value: 'auto', selected: settings.launchCapture === 'auto' }, t('launchCaptureAuto')),
+        h('option', { value: 'game', selected: settings.launchCapture === 'game' }, t('launchCaptureGame')),
+        h('option', { value: 'paused', selected: settings.launchCapture === 'paused' }, t('launchCapturePaused'))
+      ),
+      { id: 'launchCapture', icon: 'record', help: t('launchCaptureHint'), style: 'max-width:460px' }
+    )
   );
 }
 
@@ -2035,7 +2152,7 @@ function appearancePanel() {
   return h(
     'div',
     { class: 'panel stack appearance-panel' },
-    h('h2', {}, t('lookTitle')),
+    ...panelTitle('palette', t('lookTitle'), { help: t('brandColorHint') }),
     h('div', { class: 'look-options', role: 'radiogroup', 'aria-label': t('lookTitle') }, lookCard('classic', t('lookClassic'), t('lookClassicHint')), lookCard('glass', t('lookGlass'), t('lookGlassHint'))),
     glass
       ? h(
@@ -2080,14 +2197,14 @@ function appearancePanel() {
               h('span', { class: 'faint' }, t('lookStrengthHigh'))
             )
           ),
-          checkbox('lookMotion', t('lookMotion'), t('lookMotionHint')),
+          checkbox('lookMotion', t('lookMotion'), { help: t('lookMotionHint') }),
           status.windowGlassSupported
-            ? checkbox('glassWindow', t('lookWindowGlass'), t('lookWindowGlassHint'))
+            ? checkbox('glassWindow', t('lookWindowGlass'), { help: t('lookWindowGlassHint') })
             : h('p', { class: 'hint', style: 'margin:0' }, t('lookWindowGlassUnsupported'))
         )
       : null,
     // Světlo kolem přehrávače funguje i v klasickém vzhledu; se sklem se podle klipu mění i pozadí.
-    checkbox('lookFollow', t('lookFollow'), t('lookFollowHint')),
+    checkbox('lookFollow', t('lookFollow'), { help: t('lookFollowHint') }),
     h(
       'div',
       {},
@@ -2137,7 +2254,7 @@ function storageRows() {
         {},
         info.trashCount > 0 ? `${formatBytes(info.trashBytes)} · ${t('clipsCount', { count: info.trashCount })}` : '—',
         info.trashCount > 0
-          ? h('button', { class: 'small quiet danger', style: 'margin-left:10px', onclick: () => void kine.emptyTrash().then(() => { storageAt = 0; render(); }) }, t('trashEmpty'))
+          ? h('button', { class: 'small quiet danger', style: 'margin-left:10px', onclick: () => void kine.emptyTrash().then(() => { storageAt = 0; render(); }) }, icon('trash', 14), t('trashEmpty'))
           : null
       ),
       h('span', { class: 'faint' }, t('storageBuffer')),
@@ -2145,7 +2262,24 @@ function storageRows() {
       h('span', { class: 'faint' }, t('storageFree')),
       h('b', { class: low ? 'error' : '' }, info.freeBytes >= 0 ? formatBytes(info.freeBytes) : '?')
     ),
-    h('p', { class: 'hint', style: 'margin:0' }, low ? t('storageLowHint') : t('storageHint', { days: TRASH_DAYS }))
+    h(
+      'div',
+      { class: 'row' },
+      h(
+        'button',
+        {
+          class: 'small storage-compress',
+          onclick: () => {
+            tab = 'clips';
+            compressOpen = true;
+            render();
+          },
+        },
+        icon('compress', 15),
+        t('compressTitle')
+      )
+    ),
+    low ? h('p', { class: 'hint warn-text', style: 'margin:0' }, icon('warning', 14), ' ', t('storageLowHint')) : null
   );
 }
 
@@ -2265,35 +2399,40 @@ function offsetSlider() {
     'div',
     { class: 'stack', style: 'gap:4px' },
     h(
-      'label',
-      { class: 'gain' },
-      h('span', {}, t('audioOffset')),
-      h('input', {
-        type: 'range',
-        class: 'audio-offset',
+      'div',
+      { class: 'gain-row' },
+      h(
+        'label',
+        { class: 'gain' },
+        h('span', {}, t('audioOffset')),
+        h('input', {
+          type: 'range',
+          class: 'audio-offset',
         min: '-300',
         max: '300',
         step: '10',
         value: String(value),
-        oninput: (e: Event) => (out.textContent = label(Number((e.target as HTMLInputElement).value))),
-        onchange: (e: Event) => update({ audioOffsetMs: Number((e.target as HTMLInputElement).value) }),
-      }),
-      out
+          oninput: (e: Event) => (out.textContent = label(Number((e.target as HTMLInputElement).value))),
+          onchange: (e: Event) => update({ audioOffsetMs: Number((e.target as HTMLInputElement).value) }),
+        }),
+        out
+      ),
+      helpButton('audioOffset')
     ),
-    h('p', { class: 'hint', style: 'margin:0' }, t('audioOffsetHint'))
+    helpText('audioOffset', t('audioOffsetHint'))
   );
 }
 
 function audioPanel(win: boolean) {
   void refreshAudioDevices();
   const inputs = audioDevices.filter((d) => d.kind === 'input');
-  const gainSlider = (field: 'systemGain' | 'micGain', label: string) => {
+  const gainSlider = (field: 'systemGain' | 'micGain', label: string, iconName: IconName) => {
     const value = settings[field];
     const out = h('b', { style: 'min-width:44px;text-align:right' }, `${Math.round(value * 100)} %`);
     return h(
       'label',
       { class: 'gain' },
-      h('span', {}, label),
+      h('span', {}, icon(iconName, 15), ' ', label),
       h('input', {
         type: 'range',
         min: '0',
@@ -2313,14 +2452,14 @@ function audioPanel(win: boolean) {
   return h(
     'div',
     { class: 'panel stack audio-panel' },
-    h('h2', {}, t('audioTitle')),
+    ...panelTitle('volume', t('audioTitle')),
     // Měřáky: hned je vidět, jestli do klipu jde zvuk hry a mikrofon.
     h(
       'div',
       { class: 'meters' },
-      h('span', { class: 'faint' }, '🔊 ' + t('audioMeterSystem')),
+      h('span', { class: 'faint meter-label' }, icon('volume', 15), t('audioMeterSystem')),
       meter(audioLevels ? shownLevels.system : null, 'system'),
-      h('span', { class: 'faint' }, '🎤 ' + t('audioMeterMic')),
+      h('span', { class: 'faint meter-label' }, icon('mic', 15), t('audioMeterMic')),
       meter(audioLevels ? shownLevels.mic : null, 'mic')
     ),
     h('p', { class: `hint audio-live-note ${silent ? 'error' : ''}`, style: 'margin:0' }, audioLiveNote()),
@@ -2353,7 +2492,8 @@ function audioPanel(win: boolean) {
                     render();
                   }),
               },
-              '↻ ' + t('audioRetry')
+              icon('refresh', 14),
+              t('audioRetry')
             ),
             h('button', { class: 'small quiet', onclick: () => void kine.openSoundSettings() }, t('audioOpenWindowsSound'))
           ),
@@ -2361,13 +2501,11 @@ function audioPanel(win: boolean) {
         )
       : null,
     status.capture === 'on' && audioLevels?.bluetoothMicAvoided
-      ? h('p', { class: 'hint audio-bt-note', style: 'margin:0' }, '🎧 ' + (audioLevels.micDevice ? t('audioBluetoothMicSwitched', { mic: audioLevels.micDevice }) : t('audioBluetoothMicOff')))
+      ? h('p', { class: 'hint audio-bt-note', style: 'margin:0' }, icon('headphones', 14), ' ', audioLevels.micDevice ? t('audioBluetoothMicSwitched', { mic: audioLevels.micDevice }) : t('audioBluetoothMicOff'))
       : null,
-    checkbox('systemAudio', t('systemAudio'), win ? undefined : t('windowsOnly'), !win),
+    checkbox('systemAudio', t('systemAudio'), { note: win ? undefined : t('windowsOnly'), disabled: !win, icon: 'volume' }),
     settings.systemAudio && win
-      ? h(
-          'label',
-          {},
+      ? field(
           t('systemAudioDevice'),
           h(
             'select',
@@ -2385,14 +2523,12 @@ function audioPanel(win: boolean) {
               ? h('option', { value: settings.systemAudioDevice, selected: true }, t('audioMissingDevice'))
               : null
           ),
-          h('span', { class: 'sub hint', style: 'margin-top:4px;display:block' }, t('systemAudioDeviceHint'))
+          { id: 'systemAudioDevice', help: t('systemAudioDeviceHint') }
         )
       : null,
-    checkbox('microphone', t('microphone'), t('microphoneHint')),
+    checkbox('microphone', t('microphone'), { help: t('microphoneHint'), icon: 'mic' }),
     settings.microphone
-      ? h(
-          'label',
-          {},
+      ? field(
           t('microphoneDevice'),
           h(
             'select',
@@ -2403,14 +2539,25 @@ function audioPanel(win: boolean) {
               ? h('option', { value: settings.microphoneDevice, selected: true }, t('audioMissingDevice'))
               : null
           ),
-          isBluetooth(inputs.find((d) => d.id === settings.microphoneDevice)?.label ?? '')
-            ? h('span', { class: 'sub hint warn-text', style: 'margin-top:4px;display:block' }, '⚠ ' + t('audioBluetoothMicChosen'))
-            : h('span', { class: 'sub hint', style: 'margin-top:4px;display:block' }, t('microphoneDeviceHint'))
+          {
+            id: 'microphoneDevice',
+            help: t('microphoneDeviceHint'),
+            extra: [
+              isBluetooth(inputs.find((d) => d.id === settings.microphoneDevice)?.label ?? '')
+                ? h('span', { class: 'sub hint warn-text', style: 'margin-top:2px;display:block' }, icon('warning', 14), ' ', t('audioBluetoothMicChosen'))
+                : null,
+            ],
+          }
         )
       : null,
-    h('div', { class: 'stack', style: 'gap:6px' }, settings.systemAudio ? gainSlider('systemGain', t('systemGain')) : null, settings.microphone ? gainSlider('micGain', t('micGain')) : null),
-    h('p', { class: 'hint', style: 'margin:0' }, t('audioGainHint')),
-    settings.microphone && settings.systemAudio ? checkbox('separateMicTrack', t('separateMicTrack'), t('separateMicTrackHint')) : null,
+    settings.systemAudio || settings.microphone
+      ? field(
+          t('audioVolumeTitle'),
+          h('div', { class: 'stack', style: 'gap:6px' }, settings.systemAudio ? gainSlider('systemGain', t('audioMeterSystem'), 'volume') : null, settings.microphone ? gainSlider('micGain', t('audioMeterMic'), 'mic') : null),
+          { id: 'gain', help: t('audioGainHint') }
+        )
+      : null,
+    settings.microphone && settings.systemAudio ? checkbox('separateMicTrack', t('separateMicTrack'), { help: t('separateMicTrackHint'), icon: 'sliders' }) : null,
     offsetSlider()
   );
 }
@@ -2446,10 +2593,13 @@ function usageRow() {
     'div',
     { class: 'usage-now stack', style: 'gap:2px' },
     h('p', { style: 'margin:0' }, h('b', {}, t('usageNow', { cpu: num(usage.cpuPercentOfTotal), mb: usage.memoryMb }))),
-    h('p', { class: 'faint', style: 'margin:0;font-size:12px' }, usage.parts.map((part) => `${part.label}: ${part.memoryMb} MB${part.cpuPercent >= 0.1 ? `, ${num(part.cpuPercent)} %` : ''}`).join(' · ')),
-    h('p', { class: 'faint', style: 'margin:0;font-size:12px' }, status.capture === 'on' ? t('usageCapturing') : t('usageIdle'))
+    h('p', { class: 'faint', style: 'margin:0;font-size:12px' }, status.capture === 'on' ? t('usageCapturing') : t('usageIdle')),
+    // Rozpis po částech appky jen pod otazníčkem (technické).
+    openHelp.has(PERF_HELP) ? h('p', { class: 'faint usage-parts', style: 'margin:0;font-size:12px' }, usage.parts.map((part) => `${part.label}: ${part.memoryMb} MB${part.cpuPercent >= 0.1 ? `, ${num(part.cpuPercent)} %` : ''}`).join(' · ')) : null
   );
 }
+
+const PERF_HELP = 'panel:performance';
 
 /**
  * Kolik výkonu smí appka brát (shared/performance.ts): jak často hlídá
@@ -2462,43 +2612,89 @@ function performancePanel() {
   return h(
     'div',
     { class: 'panel stack performance' },
-    h('h2', { style: 'margin:0' }, '⚙ ' + t('performanceTitle')),
+    ...panelTitle('gauge', t('performanceTitle'), { id: 'performance', help: t('performanceHint') }),
+    // Technické údaje (jak často se co hlídá) k vysvětlení pod otazníčkem.
+    openHelp.has(PERF_HELP)
+      ? h('p', { class: 'faint perf-now', style: 'margin:0' }, t('performanceNow', { game: seconds(p.gamePollMs), pad: `${p.helperFastMs} ms`, lol: seconds(p.lolPollMs) }))
+      : null,
     // Kolik appka právě bere - na rovinu, ať je vidět, že hru nebrzdí.
     usageRow(),
-    h('p', { class: 'hint', style: 'margin:0' }, t('performanceHint')),
     h(
       'div',
       { class: 'radio-group' },
-      radio('performance', 'low', '🍃 ' + t('performanceLow'), t('performanceLowHint')),
-      radio('performance', 'balanced', t('performanceBalanced'), t('performanceBalancedHint')),
-      radio('performance', 'high', '⚡ ' + t('performanceHigh'), t('performanceHighHint'))
-    ),
-    h(
-      'p',
-      { class: 'faint perf-now', style: 'margin:0' },
-      t('performanceNow', { game: seconds(p.gamePollMs), pad: `${p.helperFastMs} ms`, lol: seconds(p.lolPollMs) })
+      radio('performance', 'low', t('performanceLow'), { help: t('performanceLowHint'), icon: 'leaf' }),
+      radio('performance', 'balanced', t('performanceBalanced'), { help: t('performanceBalancedHint'), icon: 'gauge' }),
+      radio('performance', 'high', t('performanceHigh'), { help: t('performanceHighHint'), icon: 'bolt' })
     ),
     settings.performance === 'low' && !lowLoadActive()
-      ? h('div', {}, h('button', { class: 'small', onclick: () => update({ maxHeight: 720, fps: 30, videoMbps: 5 }) }, '🍃 ' + t('lowLoadPreset')))
+      ? h('div', {}, h('button', { class: 'small', onclick: () => update({ maxHeight: 720, fps: 30, videoMbps: 5 }) }, icon('leaf', 15), t('lowLoadPreset')))
       : null
   );
 }
 
-function checkbox(field: keyof Settings, label: string, hint?: string, disabled = false) {
+/**
+ * Volba v nastavení: krátký popisek (volitelně s ikonou), vysvětlení až pod
+ * otazníčkem vedle (help) a krátká poznámka, která je vidět pořád (note -
+ * jen varování typu "jen na Windows").
+ */
+type OptionExtra = { help?: string; note?: string; disabled?: boolean; icon?: IconName };
+
+function optionRow(control: HTMLElement, label: string, extra: OptionExtra, helpId: string) {
   return h(
-    'label',
-    { class: 'check' },
-    h('input', { type: 'checkbox', checked: Boolean(settings[field]), disabled, onchange: (e: Event) => update({ [field]: (e.target as HTMLInputElement).checked } as Partial<Settings>) }),
-    h('span', {}, label, hint ? h('span', { class: 'sub' }, hint) : null)
+    'div',
+    { class: 'opt' },
+    h(
+      'div',
+      { class: 'opt-row' },
+      h(
+        'label',
+        { class: `check ${extra.disabled ? 'disabled' : ''}` },
+        control,
+        h('span', {}, extra.icon ? icon(extra.icon, 16, 'opt-icon') : null, label, extra.note ? h('span', { class: 'sub' }, extra.note) : null)
+      ),
+      extra.help ? helpButton(helpId) : null
+    ),
+    extra.help ? helpText(helpId, extra.help) : null
   );
 }
 
-function radio<K extends keyof Settings>(field: K, value: Settings[K], label: string, hint?: string) {
+function checkbox(field: keyof Settings, label: string, extra: OptionExtra = {}) {
+  const input = h('input', {
+    type: 'checkbox',
+    checked: Boolean(settings[field]),
+    disabled: !!extra.disabled,
+    onchange: (e: Event) => update({ [field]: (e.target as HTMLInputElement).checked } as Partial<Settings>),
+  });
+  return optionRow(input, label, extra, `opt:${String(field)}`);
+}
+
+function radio<K extends keyof Settings>(field: K, value: Settings[K], label: string, extra: OptionExtra = {}) {
+  const input = h('input', {
+    type: 'radio',
+    name: String(field),
+    value: String(value),
+    checked: settings[field] === value,
+    disabled: !!extra.disabled,
+    onchange: () => update({ [field]: value } as Partial<Settings>),
+  });
+  return optionRow(input, label, extra, `opt:${String(field)}:${String(value)}`);
+}
+
+/**
+ * Pole s popiskem nad sebou (výběr, číslo, text): popisek, otazníček,
+ * ovládání, pod ním poznámky a rozbalené vysvětlení. Popisek je mimo
+ * <label> - tlačítko s otazníčkem v <label> by si prohlížeč spletl s polem.
+ */
+function field(text: string, control: HTMLElement, opts: { help?: string; id?: string; icon?: IconName; extra?: (Node | string | null)[]; cls?: string; style?: string } = {}) {
+  const helpId = `field:${opts.id ?? text}`;
+  if (!control.getAttribute('aria-label') && !control.querySelector('select, input')) control.setAttribute('aria-label', text);
   return h(
-    'label',
-    { class: 'check' },
-    h('input', { type: 'radio', name: String(field), value: String(value), checked: settings[field] === value, onchange: () => update({ [field]: value } as Partial<Settings>) }),
-    h('span', {}, label, hint ? h('span', { class: 'sub' }, hint) : null)
+    'div',
+    { class: `field ${opts.cls ?? ''}`, style: opts.style ?? '' },
+    h('div', { class: 'field-head' }, h('span', { class: 'field-label' }, opts.icon ? icon(opts.icon, 15) : null, text), opts.help ? helpButton(helpId) : null),
+    control,
+    ...(opts.extra ?? []),
+    opts.help ? helpText(helpId, opts.help) : null
   );
 }
 
@@ -2509,9 +2705,8 @@ function autoClipsPanel() {
   const live = status.autoClipsLive;
   return h(
     'div',
-    { class: 'panel stack' },
-    h('h2', { style: 'margin:0' }, '⚡ ' + t('autoClipsTitle')),
-    h('p', { class: 'hint', style: 'margin:0' }, t('autoClipsHint')),
+    { class: 'panel stack auto-clips' },
+    ...panelTitle('bolt', t('autoClipsTitle'), { id: 'autoClips', help: t('autoClipsHint') + ' ' + t('autoClipsCs2Note') }),
     h(
       'div',
       { class: 'radio-group' },
@@ -2519,8 +2714,7 @@ function autoClipsPanel() {
       radio('autoClips', 'every', t('autoClipsEvery')),
       radio('autoClips', 'off', t('autoClipsOff'))
     ),
-    settings.autoClips !== 'off' ? h('p', { class: 'hint' }, t('autoClipsCs2Note')) : null,
-    live ? h('p', { class: 'ok', style: 'margin:0' }, '● ' + t('autoClipsLive', { game: { cs2: 'Counter-Strike 2', lol: 'League of Legends', dota2: 'Dota 2', minecraft: 'Minecraft' }[live] })) : null
+    live ? h('p', { class: 'ok', style: 'margin:0' }, icon('dot', 12), ' ', t('autoClipsLive', { game: { cs2: 'Counter-Strike 2', lol: 'League of Legends', dota2: 'Dota 2', minecraft: 'Minecraft' }[live] })) : null
   );
 }
 
@@ -2623,39 +2817,39 @@ function renderGames() {
   return h(
     'div',
     { class: 'stack' },
-    h('h1', {}, t('gamesTitle')),
+    h('h1', {}, t('tabGames')),
     h(
       'div',
-      { class: 'panel radio-group' },
-      radio('detection', 'games', t('detectionGames'), t('detectionGamesHint')),
-      radio('detection', 'always', t('detectionAlways'), t('detectionAlwaysHint')),
-      radio('detection', 'manual', t('detectionManual'), t('detectionManualHint', { hotkey: hotkeyLabel(settings.toggleHotkey) }))
-    ),
-    h(
-      'div',
-      { class: 'panel stack' },
-      checkbox('detectFullscreen', t('detectFullscreen'), t('detectFullscreenHint'), !win),
-      win && !status.chordsSupported ? h('p', { class: 'hint warn' }, t('gamesHelperMissing')) : null
+      { class: 'panel stack detection-panel' },
+      ...panelTitle('record', t('gamesTitle'), { id: 'detection' }),
+      h(
+        'div',
+        { class: 'radio-group' },
+        radio('detection', 'games', t('detectionGames'), { help: t('detectionGamesHint') }),
+        radio('detection', 'always', t('detectionAlways'), { help: t('detectionAlwaysHint') }),
+        radio('detection', 'manual', t('detectionManual'), { help: t('detectionManualHint', { hotkey: hotkeyLabel(settings.toggleHotkey) }) })
+      ),
+      checkbox('detectFullscreen', t('detectFullscreen'), { help: t('detectFullscreenHint'), disabled: !win, icon: 'expand' }),
+      win && !status.chordsSupported ? h('p', { class: 'hint warn' }, icon('warning', 14), ' ', t('gamesHelperMissing')) : null
     ),
     autoClipsPanel(),
     h(
       'div',
       { class: 'panel stack' },
-      h('h2', { style: 'margin:0' }, t('customGamesTitle')),
+      ...panelTitle('gamepad', t('customGamesTitle'), { id: 'customGames', help: t('customGamesHint') }),
       nowRunning,
-      h('p', { class: 'hint' }, t('customGamesHint')),
       custom.length === 0
-        ? h('p', { class: 'faint' }, t('customGamesEmpty'))
+        ? h('p', { class: 'faint', style: 'margin:0' }, t('customGamesEmpty'))
         : h(
             'div',
             { class: 'row' },
             ...custom.map(([exe, name]) =>
-              h('span', { class: 'pill' }, `${name} (${exe})`, h('button', { class: 'quiet', onclick: () => void kine.removeGame(exe) }, '✕'))
+              h('span', { class: 'pill' }, `${name} (${exe})`, h('button', { class: 'quiet', title: t('close'), 'aria-label': t('close'), onclick: () => void kine.removeGame(exe) }, icon('close', 12)))
             )
           ),
       addGameOpen
         ? addForm
-        : h('div', {}, h('button', { class: 'small', onclick: () => { addGameOpen = true; render(); } }, '+ ' + t('addGame')))
+        : h('div', {}, h('button', { class: 'small', onclick: () => { addGameOpen = true; render(); } }, icon('plus', 15), t('addGame')))
     )
   );
 }
@@ -2688,61 +2882,67 @@ function startUpload(list: Clip[], force = false) {
 
 function renderUpload() {
   const price = status.account?.prices.clips ?? status.account?.prices.all ?? null;
+  const visHint = t(settings.visibility === 'public' ? 'visibilityPublicHint' : settings.visibility === 'subscribers' ? 'visibilitySubscribersHint' : 'visibilityPrivateHint');
   return h(
     'div',
     { class: 'stack' },
-    h('h1', {}, t('uploadTitle')),
+    h('h1', {}, t('tabUpload')),
     h(
       'div',
-      { class: 'panel radio-group' },
-      radio('afterGame', 'review', t('afterGameReview')),
-      clipsPlus()
-        ? radio('afterGame', 'auto', t('afterGameAuto'), t('afterGameAutoHint'))
-        : h(
-            'label',
-            { class: 'check locked' },
-            h('input', { type: 'radio', name: 'afterGame', disabled: true }),
-            h('span', {}, t('afterGameAutoLocked'), h('span', { class: 'sub' }, price ? t('plusOnlyPrice', { price }) : t('plusOnly')))
-          ),
-      radio('afterGame', 'none', t('afterGameNone')),
+      { class: 'panel stack after-game' },
+      ...panelTitle('upload', t('uploadTitle'), { id: 'afterGame' }),
+      h(
+        'div',
+        { class: 'radio-group' },
+        radio('afterGame', 'review', t('afterGameReview'), { icon: 'check' }),
+        clipsPlus()
+          ? radio('afterGame', 'auto', t('afterGameAuto'), { help: t('afterGameAutoHint'), icon: 'upload' })
+          : h(
+              'div',
+              { class: 'opt' },
+              h(
+                'label',
+                { class: 'check locked' },
+                h('input', { type: 'radio', name: 'afterGame', disabled: true }),
+                h('span', {}, icon('upload', 16, 'opt-icon'), t('afterGameAuto'), h('span', { class: 'sub' }, price ? t('plusOnlyPrice', { price }) : t('plusOnly')))
+              )
+            ),
+        radio('afterGame', 'none', t('afterGameNone'), { icon: 'drive' })
+      ),
       clipsPlus() ? null : h('div', { class: 'row' }, h('span', { class: 'plan-pill' }, 'PLUS'), plusLink())
     ),
     h(
       'div',
-      { class: 'panel stack' },
+      { class: 'panel stack upload-defaults' },
+      ...panelTitle('sliders', t('uploadDefaultsTitle'), { id: 'uploadDefaults' }),
       h(
         'div',
-        { class: 'row' },
-        h(
-          'label',
-          { class: 'grow' },
+        { class: 'row field-row' },
+        field(
           t('visibility'),
           h(
             'select',
             { class: 'visibility-select', onchange: (e: Event) => update({ visibility: (e.target as HTMLSelectElement).value as Settings['visibility'] }) },
             ...VISIBILITIES.map((v) => h('option', { value: v, selected: settings.visibility === v }, t(v === 'public' ? 'visibilityPublic' : v === 'subscribers' ? 'visibilitySubscribers' : 'visibilityPrivate')))
-          )
+          ),
+          { id: 'visibility', help: visHint, icon: settings.visibility === 'public' ? 'globe' : settings.visibility === 'subscribers' ? 'users' : 'lock', cls: 'grow' }
         ),
-        h(
-          'label',
-          { style: 'min-width:180px' },
+        field(
           t('videoLanguage'),
           h(
             'select',
             { onchange: (e: Event) => update({ videoLanguage: (e.target as HTMLSelectElement).value }) },
             ...VIDEO_LANGS.map(([code, name]) => h('option', { value: code, selected: settings.videoLanguage === code }, name))
-          )
+          ),
+          { style: 'min-width:180px' }
         )
       ),
-      h('p', { class: 'hint', style: 'margin:0' }, t(settings.visibility === 'public' ? 'visibilityPublicHint' : settings.visibility === 'subscribers' ? 'visibilitySubscribersHint' : 'visibilityPrivateHint')),
       // Nastavení nahrání: ptát se / nahrát rovnou, hashtagy ke všemu, kategorie, náhled.
-      checkbox('uploadAsk', t('uploadAskSetting'), t('uploadAskSettingHint')),
+      checkbox('uploadAsk', t('uploadAskSetting'), { help: t('uploadAskSettingHint'), icon: 'sliders' }),
       h(
         'div',
-        { class: 'row', style: 'gap:12px;align-items:flex-end' },
-        h(
-          'label',
-          { class: 'grow' },
+        { class: 'row field-row' },
+        field(
           t('uploadHashtagsSetting'),
           h('input', {
             type: 'text',
@@ -2751,23 +2951,22 @@ function renderUpload() {
             placeholder: 'kine cz',
             maxlength: '300',
             onchange: (e: Event) => update({ uploadHashtags: (e.target as HTMLInputElement).value.trim() }),
-          })
+          }),
+          { id: 'uploadHashtags', help: t('uploadHashtagsSettingHint'), cls: 'grow' }
         ),
-        h(
-          'label',
-          { style: 'min-width:220px' },
+        field(
           t('uploadCategorySetting'),
           h(
             'select',
             { class: 'upload-category-setting', onchange: (e: Event) => update({ uploadCategory: (e.target as HTMLSelectElement).value }) },
             ...CATEGORY_KEYS.map((key) => h('option', { value: key, selected: settings.uploadCategory === key }, t(key)))
-          )
+          ),
+          { style: 'min-width:220px' }
         )
       ),
-      h('p', { class: 'hint', style: 'margin:0' }, t('uploadHashtagsSettingHint')),
-      checkbox('uploadThumbnail', t('uploadThumbnailSetting'), t('uploadThumbnailSettingHint'))
+      checkbox('uploadThumbnail', t('uploadThumbnailSetting'), { help: t('uploadThumbnailSettingHint'), icon: 'image' })
     ),
-    h('div', { class: 'panel' }, h('h2', {}, t('onlyWhenNotPlayingTitle')), h('p', { class: 'dim', style: 'margin:0' }, t('onlyWhenNotPlayingHint'))),
+    h('div', { class: 'panel stack' }, ...panelTitle('gamepad', t('onlyWhenNotPlayingTitle'), { id: 'notPlaying', help: t('onlyWhenNotPlayingHint') })),
     discordPanel()
   );
 }
@@ -2803,10 +3002,10 @@ function discordPanel() {
   });
   return h(
     'div',
-    { class: 'panel stack' },
-    h('label', {}, t('discordWebhookLabel'), input),
-    discordInvalid ? h('p', { class: 'error', style: 'margin:0' }, t('discordWebhookInvalid')) : null,
-    h('p', { class: 'hint', style: 'margin:0' }, t('discordWebhookHint'))
+    { class: 'panel stack discord-panel' },
+    ...panelTitle('send', 'Discord', { id: 'discord', help: t('discordWebhookLabel') + '. ' + t('discordWebhookHint') }),
+    field(t('discordWebhookShort'), input),
+    discordInvalid ? h('p', { class: 'error', style: 'margin:0' }, t('discordWebhookInvalid')) : null
   );
 }
 
@@ -2819,7 +3018,7 @@ function uploadState(clip: Clip) {
   if (u.state === 'uploading') return h('div', {}, h('div', { class: 'progress' }, h('span', { style: `width:${u.percent}%` })), h('div', { class: 'state' }, t('uploadUploading', { percent: u.percent })));
   if (u.state === 'paused') return h('div', {}, h('div', { class: 'progress' }, h('span', { style: `width:${u.percent}%` })), h('div', { class: 'state' }, t(u.reason === 'game' ? 'uploadPausedGame' : 'uploadPausedOffline', { percent: u.percent })));
   if (u.state === 'done' && u.ready === false) return h('div', { class: 'state processing', title: t('uploadProcessingHint') }, h('span', { class: 'spin' }), ' ' + t('uploadProcessing'));
-  if (u.state === 'done') return h('div', { class: 'state done' }, '✓ ' + t('uploadDone'));
+  if (u.state === 'done') return h('div', { class: 'state done' }, icon('check', 14), ' ', t('uploadDone'));
   // Nepřihlášený (kód z uploaderu): přeložená hláška místo české odpovědi serveru.
   return h('div', { class: 'state error' }, u.message === 'login-required' ? t('uploadErrorLogin') : t('uploadError', { message: u.message }));
 }
@@ -2895,14 +3094,18 @@ function showMergeNote(text: string, kind: 'ok' | 'error') {
 /** Přehrávač jako vrstva přes okno (player.ts); mřížka pod ním zůstává, jak je. */
 function showClip(clip: Clip, edit = false) {
   stopPreview();
+  void kine.setPlayerClip(clip.id);
   player = openPlayer({
     clip,
     t,
     startEditing: edit,
     onOpenExternal: (c) => void kine.openClip(c.id),
     onLog: (m) => void kine.log(m),
+    setWindowFullscreen: (on) => void kine.setWindowFullscreen(on),
+    onClipChange: (c) => void kine.setPlayerClip(c.id),
     onClose: () => {
       player = null;
+      void kine.setPlayerClip(null);
     },
     neighbors: neighborsOf,
     onCopyLink: (c) => {
@@ -3017,7 +3220,7 @@ function selectionBar(shown: Clip[]) {
         : h(
             'div',
             { class: 'row', style: 'gap:6px' },
-            h('button', { class: 'small primary sel-merge', disabled: picked.length < 2, onclick: () => void mergeSelectedClips() }, '🎬 ' + t('selectionMerge')),
+            h('button', { class: 'small primary sel-merge', disabled: picked.length < 2, onclick: () => void mergeSelectedClips() }, icon('film', 14), t('selectionMerge')),
             uploadable.length > 0
               ? h(
                   'button',
@@ -3027,6 +3230,7 @@ function selectionBar(shown: Clip[]) {
                     title: status.account ? '' : t('uploadNeedsLogin'),
                     onclick: () => startUpload(uploadable),
                   },
+                  icon('upload', 14),
                   t('selectionUpload')
                 )
               : null,
@@ -3045,6 +3249,7 @@ function selectionBar(shown: Clip[]) {
                       render();
                     },
                   },
+                  icon('trash', 14),
                   t('selectionDeleteConfirm', { count: picked.length })
                 )
               : h(
@@ -3061,12 +3266,13 @@ function selectionBar(shown: Clip[]) {
                       }, 4000);
                     },
                   },
+                  icon('trash', 14),
                   t('selectionDelete')
                 ),
             !allShownSelected
               ? h('button', { class: 'small quiet', onclick: () => { for (const c of shown) selected.add(c.id); render(); } }, t('selectionAll'))
               : null,
-            h('button', { class: 'small quiet', onclick: clearSelection }, t('selectionClear'))
+            h('button', { class: 'small quiet', onclick: clearSelection }, icon('close', 14), t('selectionClear'))
           )
     );
   }
@@ -3100,11 +3306,198 @@ function gameChip(clip: Clip) {
   }
   return h(
     'button',
-    { class: 'chip', title: t('clipGameChange'), onclick: () => { editingGame = clip.id; render(); } },
-    '🎮 ',
-    clip.game ?? t('clipsNoGame'),
-    h('span', { class: 'faint' }, ' ▾')
+    { class: 'chip game-chip', title: t('clipGameChange'), onclick: () => { editingGame = clip.id; render(); } },
+    icon('gamepad', 14),
+    h('span', { class: 'chip-text' }, clip.game ?? t('clipsNoGame')),
+    icon('chevronDown', 12, 'faint')
   );
+}
+
+// ---- nápověda pod otazníčkem ----------------------------------------------------------
+
+/** Otevřené nápovědy (otazníčky) - drží se přes překreslení okna. */
+const openHelp = new Set<string>();
+
+/** Otazníček u položky: klik ukáže / schová vysvětlení (helpText pod položkou). */
+function helpButton(id: string): HTMLElement {
+  const open = openHelp.has(id);
+  return h(
+    'button',
+    {
+      type: 'button',
+      class: `help-btn ${open ? 'open' : ''}`,
+      'aria-expanded': String(open),
+      'aria-label': t('helpMore'),
+      title: t('helpMore'),
+      'data-help': id,
+      onclick: (e: Event) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (open) openHelp.delete(id);
+        else openHelp.add(id);
+        render();
+      },
+    },
+    icon('help', 15)
+  );
+}
+
+/** Vysvětlení k otazníčku (null, dokud ho hráč nerozklikne). */
+function helpText(id: string, text: string): HTMLElement | null {
+  return openHelp.has(id) ? h('p', { class: 'help-text' }, text) : null;
+}
+
+/** Nadpis panelu s ikonou, (volitelně) otazníčkem a tlačítky vpravo. */
+function panelTitle(name: IconName, text: string, opts: { help?: string; id?: string; right?: Node | null } = {}): HTMLElement[] {
+  const helpId = `panel:${opts.id ?? name}`;
+  const title = h(
+    'div',
+    { class: 'panel-title' },
+    h('h2', {}, icon(name, 18), h('span', {}, text)),
+    opts.help ? helpButton(helpId) : null,
+    opts.right ? h('div', { class: 'panel-title-right' }, opts.right) : null
+  );
+  const extra = opts.help ? helpText(helpId, opts.help) : null;
+  return extra ? [title, extra] : [title];
+}
+
+/** Nadpis stránky (h1) s otazníčkem a věcmi vpravo. */
+function pageTitle(text: string, opts: { help?: string; id?: string; after?: (Node | null)[]; right?: Node | null } = {}): HTMLElement[] {
+  const helpId = `page:${opts.id ?? text}`;
+  const title = h(
+    'div',
+    { class: 'page-title' },
+    h('div', { class: 'row page-title-main' }, h('h1', {}, text), ...(opts.after ?? []), opts.help ? helpButton(helpId) : null),
+    opts.right ?? null
+  );
+  const extra = opts.help ? helpText(helpId, opts.help) : null;
+  return extra ? [title, extra] : [title];
+}
+
+// ---- zmenšování klipů (úložiště v hlavičce Klipů) ------------------------------------------
+
+let compressOpen = false;
+let compressLevel: CompressLevel = 'medium';
+
+/** Kolik zabírají klipy v knihovně (bez koše). */
+function libraryBytes(): number {
+  return clips.reduce((sum, c) => sum + (c.sizeBytes > 0 ? c.sizeBytes : 0), 0);
+}
+
+/**
+ * Úložiště v hlavičce Klipů: kolik klipy zabírají; když jde ušetřit hodně
+ * (aspoň 500 MB), barevně "ušetři ≈ X" - všimneš si, ale nic nevyskakuje.
+ * Klik rozbalí zmenšování; během něj průběh, potom "Ušetřeno X".
+ */
+function storagePill(): HTMLElement {
+  const c = status.compress;
+  const toggle = () => {
+    compressOpen = !compressOpen;
+    render();
+  };
+  if (c?.running) {
+    return h(
+      'button',
+      { class: 'small quiet storage-pill running', onclick: toggle },
+      h('span', { class: 'spin' }),
+      c.paused ? t('compressPaused') : t('compressRunning', { done: Math.min(c.done + 1, c.total), total: c.total })
+    );
+  }
+  if (c?.finishedAt) {
+    return h(
+      'button',
+      { class: 'small quiet storage-pill done', title: t('close'), onclick: () => void kine.compressDismiss() },
+      icon('check', 15),
+      t('compressSaved', { saved: formatBytes(c.savedBytes) })
+    );
+  }
+  const saving = compressSummary(clips, 'medium').savingBytes;
+  const worth = saving >= 500 * 1024 * 1024;
+  return h(
+    'button',
+    { class: `small quiet storage-pill ${worth ? 'worth' : ''} ${compressOpen ? 'active' : ''}`, title: t('compressTitle'), 'aria-expanded': String(compressOpen), onclick: toggle },
+    icon('drive', 15),
+    formatBytes(libraryBytes()),
+    worth ? h('span', { class: 'storage-save' }, t('storageSaveHint', { saving: formatBytes(saving) })) : null
+  );
+}
+
+const COMPRESS_LABELS: Record<CompressLevel, { name: Key; hint: Key }> = {
+  light: { name: 'compressLight', hint: 'compressLightHint' },
+  medium: { name: 'compressMedium', hint: 'compressMediumHint' },
+  strong: { name: 'compressStrong', hint: 'compressStrongHint' },
+};
+
+/** Rozbalené zmenšování: tři úrovně s odhadem úspory, spuštění; během zmenšování průběh a Zrušit. */
+function compressPanel(): HTMLElement | null {
+  if (!compressOpen) return null;
+  const c = status.compress;
+  const box = h('div', { class: 'panel stack compress-panel' }, ...panelTitle('compress', t('compressTitle'), { help: t('compressHelp') }));
+  if (c?.running) {
+    const overall = c.total > 0 ? Math.min(100, ((c.done + c.percent / 100) / c.total) * 100) : 0;
+    box.append(
+      h('p', { style: 'margin:0' }, c.paused ? t('compressPaused') : t('compressRunning', { done: Math.min(c.done + 1, c.total), total: c.total })),
+      h('div', { class: 'progress compress-bar', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.round(overall)) }, h('span', { style: `width:${overall.toFixed(1)}%` })),
+      h('p', { class: 'faint', style: 'margin:0' }, t('compressSaved', { saved: formatBytes(c.savedBytes) })),
+      h('div', { class: 'row' }, h('button', { class: 'small quiet danger', onclick: () => void kine.compressCancel() }, icon('close', 15), t('compressCancel')))
+    );
+    return box;
+  }
+  const options = COMPRESS_LEVELS.map((level) => {
+    const sum = compressSummary(clips, level);
+    const labels = COMPRESS_LABELS[level];
+    return h(
+      'label',
+      { class: `compress-level ${compressLevel === level ? 'active' : ''}`, 'data-level': level },
+      h('input', {
+        type: 'radio',
+        name: 'compress-level',
+        checked: compressLevel === level,
+        onchange: () => {
+          compressLevel = level;
+          render();
+        },
+      }),
+      h('span', { class: 'compress-level-name' }, t(labels.name)),
+      h('span', { class: 'compress-level-hint' }, t(labels.hint)),
+      h('span', { class: 'compress-level-saving' }, sum.count > 0 ? t('compressSaving', { saving: formatBytes(sum.savingBytes) }) : '—')
+    );
+  });
+  const chosen = compressSummary(clips, compressLevel);
+  box.append(
+    h('div', { class: 'compress-levels' }, ...options),
+    h(
+      'div',
+      { class: 'row', style: 'align-items:center' },
+      chosen.count > 0
+        ? h(
+            'button',
+            {
+              class: 'primary compress-start',
+              onclick: () =>
+                void kine.compressClips(compressLevel).then(() => {
+                  compressOpen = false;
+                  render();
+                }),
+            },
+            icon('compress', 16),
+            t('compressStart', { count: chosen.count })
+          )
+        : h('p', { class: 'hint', style: 'margin:0' }, t('compressNothing')),
+      h(
+        'button',
+        {
+          class: 'small quiet',
+          onclick: () => {
+            compressOpen = false;
+            render();
+          },
+        },
+        t('close')
+      )
+    )
+  );
+  return box;
 }
 
 function renderClips() {
@@ -3119,17 +3512,18 @@ function renderClips() {
   const container = h(
     'div',
     { class: 'stack' },
-    h(
-      'div',
-      { class: 'spread' },
-      h('div', { class: 'row' }, h('h1', { style: 'margin:0' }, t('clipsTitle')), h('span', { class: 'faint' }, t('clipsCount', { count: list.length }))),
-      h(
+    ...pageTitle(t('clipsTitle'), {
+      id: 'clips',
+      help: t('selectionHint') + ' ' + t('libraryDragHint'),
+      after: [h('span', { class: 'faint' }, t('clipsCount', { count: list.length }))],
+      right: h(
         'div',
         { class: 'row' },
-        h('button', { class: 'small quiet', onclick: () => void kine.openScreenshotsDir() }, '📷 ' + t('screenshotsOpen')),
-        h('button', { class: 'small', onclick: () => void kine.openClipsDir() }, t('clipsDirOpen'))
-      )
-    ),
+        storagePill(),
+        h('button', { class: 'small quiet', onclick: () => void kine.openClipsDir() }, icon('folder', 15), t('clipsDirOpen'))
+      ),
+    }),
+    compressPanel(),
     h('datalist', { id: 'game-names' }, ...gameNames.map((name) => h('option', { value: name })))
   );
 
@@ -3153,7 +3547,8 @@ function renderClips() {
               render();
             },
           },
-          '🗑 ' + t('clipsFilterTrash'),
+          icon('trash', 15),
+          t('clipsFilterTrash'),
           h('span', { class: 'count' }, String(trashClips.length))
         )
       : null;
@@ -3167,7 +3562,8 @@ function renderClips() {
         render();
       },
     },
-    (filters.favorites ? '★ ' : '☆ ') + t('clipsFilterFavorites'),
+    filters.favorites ? icon('starFilled', 15) : icon('star', 15),
+    t('clipsFilterFavorites'),
     favoritesCount > 0 ? h('span', { class: 'count' }, String(favoritesCount)) : null
   );
 
@@ -3232,7 +3628,7 @@ function renderClips() {
       favoritesBtn,
       trashBtn,
       filtersActive
-        ? h('button', { class: 'small quiet', style: 'align-self:flex-end', onclick: () => { filters.game = 'all'; filters.date = 'all'; filters.query = ''; filters.favorites = false; filters.trash = false; render(); } }, t('clipsClearFilters'))
+        ? h('button', { class: 'small quiet', style: 'align-self:flex-end', onclick: () => { filters.game = 'all'; filters.date = 'all'; filters.query = ''; filters.favorites = false; filters.trash = false; render(); } }, icon('close', 14), t('clipsClearFilters'))
         : null
     )
   );
@@ -3253,7 +3649,6 @@ function renderClips() {
   } else {
     const bar = selectionBar(list);
     if (bar) container.append(bar);
-    else container.append(h('p', { class: 'hint sel-hint', style: 'margin:0' }, t('selectionHint')));
   }
 
   if (list.length === 0) {
@@ -3266,17 +3661,20 @@ function renderClips() {
     const canUpload = !clip.upload || clip.upload.state === 'error';
     const isSelected = selected.has(clip.id);
     const actions = h('div', { class: 'actions' });
-    actions.append(h('button', { class: 'small', onclick: () => showClip(clip) }, '▶ ' + t('libraryOpen')));
+    // Ikonky bez textu (složka, přejmenovat, smazat…) mají název v bublině a pro čtečky.
+    const iconBtn = (name: IconName, label: string, onclick: () => void, cls = '', disabled = false) =>
+      h('button', { class: `small quiet icon-btn ${cls}`, title: label, 'aria-label': label, disabled, onclick }, icon(name, 16));
+    actions.append(h('button', { class: 'small', onclick: () => showClip(clip) }, icon('play', 14), t('libraryOpen')));
     if (clip.deletedAt) {
       // V koši: vrátit, nebo smazat nadobro. Nic jiného (úpravy, nahrání) nedává smysl.
       actions.append(
-        h('button', { class: 'small primary trash-restore', onclick: () => void kine.restoreClip(clip.id) }, '↩ ' + t('trashRestore')),
+        h('button', { class: 'small primary trash-restore', onclick: () => void kine.restoreClip(clip.id) }, icon('undo', 14), t('trashRestore')),
         confirmDelete === clip.id
           ? h('button', { class: 'small danger', onclick: () => { confirmDelete = null; if (openPlayerId() === clip.id) closePlayer(); void kine.deleteClip(clip.id); } }, t('trashDeleteForeverConfirm'))
           : h('button', { class: 'small quiet danger', onclick: () => { confirmDelete = clip.id; render(); setTimeout(() => { if (confirmDelete === clip.id) { confirmDelete = null; render(); } }, 4000); } }, t('trashDeleteForever'))
       );
     } else {
-    actions.append(h('button', { class: 'small quiet', onclick: () => showClip(clip, true) }, '✂ ' + t('libraryEdit')));
+    actions.append(h('button', { class: 'small quiet card-edit', onclick: () => showClip(clip, true) }, icon('scissors', 14), t('libraryEdit')));
     if (canUpload) {
       actions.append(
         h(
@@ -3284,62 +3682,69 @@ function renderClips() {
           {
             class: 'small primary upload-btn',
             disabled: !status.account,
-            title: status.account ? '' : t('uploadNeedsLogin'),
+            title: status.account ? t('libraryUpload') : t('uploadNeedsLogin'),
             onclick: () => startUpload([clip]),
           },
-          clip.upload?.state === 'error' ? t('libraryRetry') : t('libraryUpload')
+          icon(clip.upload?.state === 'error' ? 'refresh' : 'upload', 14),
+          clip.upload?.state === 'error' ? t('libraryRetry') : t('libraryUploadShort')
         ),
         // Nastavení nahrání (název, popis, hashtagy, viditelnost…) - vždycky, i když se appka jinak neptá.
-        h('button', { class: 'small quiet upload-options', disabled: !status.account, title: t('uploadOptionsButton'), onclick: () => startUpload([clip], true) }, '⚙')
+        h('button', { class: 'small quiet upload-options icon-btn', disabled: !status.account, title: t('uploadOptionsButton'), 'aria-label': t('uploadOptionsButton'), onclick: () => startUpload([clip], true) }, icon('sliders', 16))
       );
     }
+    // Vedlejší akce vpravo jen ikonkami: odkaz, Kine, Discord, složka, přejmenovat, smazat.
+    const tools = h('div', { class: 'card-tools' });
     if (clip.upload?.state === 'done') {
       const url = clip.upload.url;
-      actions.append(
-        h('button', { class: 'small', onclick: () => void kine.openOnKine(clip.id) }, t('libraryOpenOnKine')),
-        h(
-          'button',
-          {
-            class: 'small quiet',
-            onclick: () => {
-              void kine.copyText(url);
-              showShareNote(clip.id, t('linkCopied'), 'ok');
-            },
-          },
-          '🔗 ' + t('libraryCopyLink')
-        )
+      tools.append(
+        iconBtn('external', t('libraryOpenOnKine'), () => void kine.openOnKine(clip.id), 'open-on-kine'),
+        iconBtn('link', t('libraryCopyLink'), () => {
+          void kine.copyText(url);
+          showShareNote(clip.id, t('linkCopied'), 'ok');
+        }, 'copy-link')
       );
     }
     // Discord: nahraný klip jako odkaz, nenahraný rovnou jako soubor (do 10 MB); větší nejdřív na Kine.
     if (settings.discordWebhook) {
       const asLink = clip.upload?.state === 'done';
       const tooLarge = !asLink && clip.sizeBytes > DISCORD_FILE_MAX_BYTES;
-      actions.append(
-        h(
-          'button',
-          {
-            class: 'small quiet',
-            disabled: tooLarge,
-            title: tooLarge ? t('discordTooLarge', { size: formatBytes(clip.sizeBytes), max: formatBytes(DISCORD_FILE_MAX_BYTES) }) : asLink ? t('discordAsLink') : t('discordAsFile'),
-            onclick: () => {
-              showShareNote(clip.id, t('discordSending'), 'ok');
-              void kine
-                .shareToDiscord(clip.id)
-                .then(() => showShareNote(clip.id, t('discordSent'), 'ok'))
-                .catch((e: unknown) => showShareNote(clip.id, /too-large/.test(String((e as Error)?.message ?? e)) ? t('discordTooLarge', { size: formatBytes(clip.sizeBytes), max: formatBytes(DISCORD_FILE_MAX_BYTES) }) : t('discordFailed', { message: errorText(e, t) }), 'error'));
-            },
+      const discordTitle = tooLarge ? t('discordTooLarge', { size: formatBytes(clip.sizeBytes), max: formatBytes(DISCORD_FILE_MAX_BYTES) }) : `${t('libraryDiscord')} · ${asLink ? t('discordAsLink') : t('discordAsFile')}`;
+      tools.append(
+        iconBtn(
+          'send',
+          discordTitle,
+          () => {
+            showShareNote(clip.id, t('discordSending'), 'ok');
+            void kine
+              .shareToDiscord(clip.id)
+              .then(() => showShareNote(clip.id, t('discordSent'), 'ok'))
+              .catch((e: unknown) => showShareNote(clip.id, /too-large/.test(String((e as Error)?.message ?? e)) ? t('discordTooLarge', { size: formatBytes(clip.sizeBytes), max: formatBytes(DISCORD_FILE_MAX_BYTES) }) : t('discordFailed', { message: errorText(e, t) }), 'error'));
           },
-          t('libraryDiscord')
+          'discord-share',
+          tooLarge
         )
       );
     }
-    actions.append(h('button', { class: 'small quiet', onclick: () => void kine.revealClip(clip.id) }, t('libraryReveal')));
-    actions.append(
-      h('button', { class: 'small quiet', onclick: () => { renaming = clip.id; render(); } }, t('libraryRename')),
+    tools.append(
+      iconBtn('folder', t('libraryReveal'), () => void kine.revealClip(clip.id), 'reveal'),
+      iconBtn('pencil', t('libraryRename'), () => {
+        renaming = clip.id;
+        render();
+      }, 'rename'),
       confirmDelete === clip.id
-        ? h('button', { class: 'small danger', title: t('trashHint', { days: TRASH_DAYS }), onclick: () => { confirmDelete = null; if (openPlayerId() === clip.id) closePlayer(); void kine.deleteClip(clip.id); } }, t('libraryDeleteConfirm', { days: TRASH_DAYS }))
-        : h('button', { class: 'small quiet danger', title: t('trashHint', { days: TRASH_DAYS }), onclick: () => { confirmDelete = clip.id; render(); setTimeout(() => { if (confirmDelete === clip.id) { confirmDelete = null; render(); } }, 4000); } }, t('libraryDelete'))
+        ? h('button', { class: 'small danger delete-confirm', title: t('trashHint', { days: TRASH_DAYS }), onclick: () => { confirmDelete = null; if (openPlayerId() === clip.id) closePlayer(); void kine.deleteClip(clip.id); } }, icon('trash', 14), t('libraryDeleteConfirm', { days: TRASH_DAYS }))
+        : iconBtn('trash', `${t('libraryDelete')} · ${t('trashHint', { days: TRASH_DAYS })}`, () => {
+            confirmDelete = clip.id;
+            render();
+            setTimeout(() => {
+              if (confirmDelete === clip.id) {
+                confirmDelete = null;
+                render();
+              }
+            }, 4000);
+          }, 'danger delete')
     );
+    actions.append(tools);
     }
 
     const titleEl =
@@ -3384,12 +3789,14 @@ function renderClips() {
       { class: `thumb ${isPortrait(clip) ? 'portrait' : ''}`, onclick: () => showClip(clip) },
       // Náhledy se načítají, až když se karta dostane na obrazovku - u stovek klipů to šetří paměť i disk.
       ...thumbImages(clip),
-      h('span', { class: 'play-badge' }, '▶'),
+      h('span', { class: 'play-badge' }, icon('play', 18)),
       clip.kind === 'recording'
         ? h(
             'span',
             { class: 'kind-badge', title: clip.markers?.length ? t('libraryMoments', { count: clip.markers.length }) : '' },
-            '⏺ ' + t('libraryRecordingBadge') + (clip.markers?.length ? ` · 🚩 ${clip.markers.length}` : '')
+            icon('record', 11),
+            t('libraryRecordingBadge'),
+            clip.markers?.length ? h('span', { class: 'kind-moments' }, ' · ', icon('flag', 11), String(clip.markers.length)) : null
           )
         : null,
       h('span', { class: 'dur' }, formatDuration(clip.durationSeconds))
@@ -3421,7 +3828,7 @@ function renderClips() {
           void kine.setFavorite(clip.id, !clip.favorite);
         },
       },
-      clip.favorite ? '★' : '☆'
+      clip.favorite ? icon('starFilled', 15) : icon('star', 15)
     );
     if (!clip.deletedAt) thumb.append(pick, star);
 
@@ -3500,25 +3907,25 @@ function updateProgressBox() {
     }
   } else if (u.phase === 'ready') {
     box.append(
-      h('p', { class: 'ok', style: 'margin:0' }, '✓ ' + t('aboutUpdateReady', { version })),
+      h('p', { class: 'ok', style: 'margin:0' }, icon('check', 14), ' ', t('aboutUpdateReady', { version })),
       h(
         'div',
         { class: 'row', style: 'align-items:center' },
         h(
           'button',
           { class: 'primary update-now', disabled: updateInstalling, onclick: installUpdateClick },
-          updateInstalling ? h('span', { class: 'spin' }) : '⬆ ',
+          updateInstalling ? h('span', { class: 'spin' }) : icon('refresh', 15),
           updateInstalling ? t('aboutUpdateInstalling') : t('aboutUpdateNow')
         )
       ),
       updateBusy ? h('p', { class: 'hint warn-text', style: 'margin:0' }, t('aboutUpdateBusy')) : h('p', { class: 'faint', style: 'margin:0' }, t('aboutUpdateRestartHint'))
     );
     // Smart App Control (Windows 11) blokuje nepodepsané soubory - i kus instalátoru. Říct to dopředu.
-    if (status.smartAppControl === 'on') box.append(h('p', { class: 'hint warn-text update-sac-hint', style: 'margin:0' }, '⚠ ' + t('aboutUpdateSacHint')));
+    if (status.smartAppControl === 'on') box.append(h('p', { class: 'hint warn-text update-sac-hint', style: 'margin:0' }, icon('warning', 14), ' ', t('aboutUpdateSacHint')));
   } else if (u.phase === 'waiting-game') {
     box.append(
       h('p', { style: 'margin:0' }, t('aboutUpdateWaitsGame', { version })),
-      h('div', {}, h('button', { class: 'small', onclick: () => void kine.downloadUpdate() }, '⬇ ' + t('aboutUpdateDownloadNow')))
+      h('div', {}, h('button', { class: 'small', onclick: () => void kine.downloadUpdate() }, icon('download', 14), t('aboutUpdateDownloadNow')))
     );
   } else if (u.phase === 'error') {
     box.append(h('p', { class: 'error', style: 'margin:0' }, t('aboutUpdateFailed', { message: u.error ?? '' })));
@@ -3547,7 +3954,7 @@ function updateIssueBox() {
   return h(
     'div',
     { class: 'panel stack update-issue', role: 'alert' },
-    h('p', { class: 'update-issue-title', style: 'margin:0' }, '⚠ ' + t('aboutIssueTitle', { version: issue.version })),
+    h('p', { class: 'update-issue-title', style: 'margin:0' }, icon('warning', 15), ' ', t('aboutIssueTitle', { version: issue.version })),
     h('p', { style: 'margin:0' }, why),
     h('p', { class: 'hint', style: 'margin:0' }, what),
     h(
@@ -3572,7 +3979,7 @@ function updateStatus(r: NonNullable<typeof updateResult>) {
   } else if (r.status === 'available-manual') {
     box.append(
       h('p', { class: 'ok', style: 'margin:0' }, t('aboutUpdateManual', { version })),
-      h('div', {}, h('button', { class: 'small primary', onclick: () => void kine.openExternal(r.url ?? settings.siteUrl + '/download') }, '⬇ ' + t('aboutDownloadUpdate', { version })))
+      h('div', {}, h('button', { class: 'small primary', onclick: () => void kine.openExternal(r.url ?? settings.siteUrl + '/download') }, icon('download', 14), t('aboutDownloadUpdate', { version })))
     );
   } else if (r.status === 'error') {
     box.append(h('p', { class: 'error', style: 'margin:0' }, t('aboutUpdateErrorReason', { message: r.message ?? '' })));
@@ -3620,10 +4027,11 @@ function renderAbout() {
               });
             },
           },
+          icon('refresh', 14),
           t('aboutCheckUpdate')
         ),
-        h('button', { class: 'small quiet', onclick: () => void kine.openLogs() }, t('aboutLogs')),
-        h('button', { class: 'small quiet', onclick: () => void kine.openKine() }, t('trayOpenKine'))
+        h('button', { class: 'small quiet', onclick: () => void kine.openLogs() }, icon('folder', 14), t('aboutLogs')),
+        h('button', { class: 'small quiet', onclick: () => void kine.openKine() }, icon('external', 14), t('trayOpenKine'))
       ),
       progressBox,
       showResult && updateResult ? updateStatus(updateResult) : null
@@ -3650,12 +4058,13 @@ function renderAbout() {
                 }, 5200);
               }),
           },
-          '📋 ' + t('aboutDiagnostics')
+          icon('clipboard', 14),
+          t('aboutDiagnostics')
         ),
         copied ? h('span', { class: 'ok diagnostics-copied' }, t('aboutDiagnosticsCopied')) : null
       )
     ),
-    h('div', { class: 'row' }, h('button', { class: 'quiet danger', onclick: () => void kine.quit() }, t('trayQuit')))
+    h('div', { class: 'row' }, h('button', { class: 'quiet danger', onclick: () => void kine.quit() }, icon('power', 15), t('trayQuit')))
   );
 }
 

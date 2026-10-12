@@ -77,6 +77,8 @@ import {
 } from './updater';
 import { runTestDriver } from './testDriver';
 import { WinHelper } from './winHelper';
+import { ClipCompressor } from './compress';
+import { compressSummary, COMPRESS_LEVELS, type CompressLevel } from '../shared/compress';
 import { makeGif, makeThumbnail, mergeClips, trimClip } from './edit';
 import { runFfmpeg, spawnFfmpeg } from './ffmpeg';
 import { LiveController } from './live';
@@ -181,6 +183,10 @@ if (!app.isDefaultProtocolClient('kine')) {
 class KineApp {
   settings!: SettingsStore;
   library!: ClipLibrary;
+  /** Zmenšování klipů na pozadí (Klipy -> úložiště). */
+  compressor!: ClipCompressor;
+  /** Klip otevřený v přehrávači (okno drží soubor) - zmenšování ho přeskočí. */
+  private playerClipId: string | null = null;
   capture!: CaptureManager;
   /** Živé vysílání z appky na Kine (tlačítko Vysílat). */
   live!: LiveController;
@@ -295,6 +301,15 @@ class KineApp {
     if (this.settings.get().appMode !== mode || !this.settings.get().appModeChosen) this.settings.update({ appMode: mode, appModeChosen: true });
     this.library = new ClipLibrary(this.settings.clipsDir(), log);
     this.library.load();
+    this.compressor = new ClipCompressor({
+      list: () => this.library.list(),
+      get: (id) => this.library.get(id),
+      update: (id, patch) => void this.library.update(id, patch),
+      // Při hře, nahrávání zápasu a vysílání se nezmenšuje (bralo by výkon).
+      gameRunning: () => !!this.games?.current() || !!this.capture?.recordingInfo() || !!this.live?.active(),
+      inUse: (id) => id === this.playerClipId,
+      onChange: () => this.pushStatusSoon(),
+    });
 
     this.auth = new Auth(() => this.settings.get().siteUrl);
     const api = createKineApi({ siteUrl: () => this.settings.get().siteUrl, getToken: () => this.auth.getToken() });
@@ -341,25 +356,25 @@ class KineApp {
         if (kind === 'bluetoothMic') {
           // Výchozí mikrofon jsou sluchátka Bluetooth: appka vzala jiný (message = jeho název), nebo žádný.
           const text = clean ? this.t('toastBluetoothMicSwitched', { mic: clean }) : this.t('toastBluetoothMicOff');
-          this.quietNotice(`capture:${kind}`, text, 'warn', 'settings');
+          this.quietNotice(`capture:${kind}`, text, 'warn', 'settings:audio');
           return;
         }
         if (kind === 'systemAudio') {
-          this.quietNotice(`capture:${kind}`, this.t('toastSystemAudioDevice', { message: clean }), 'warn', 'settings');
+          this.quietNotice(`capture:${kind}`, this.t('toastSystemAudioDevice', { message: clean }), 'warn', 'settings:audio');
           return;
         }
         if (kind === 'systemLoopback') {
           // Zvuk hry (výchozí výstup Windows) nejde otevřít - rada je v Nastavení -> Záznam.
           const device = message.split(' | ')[1]?.trim() || this.t('audioDefaultDevice');
-          this.quietNotice(`capture:${kind}`, this.t('toastAudioLoopbackFailed', { device }), 'warn', 'settings');
+          this.quietNotice(`capture:${kind}`, this.t('toastAudioLoopbackFailed', { device }), 'warn', 'settings:audio');
           return;
         }
         if (kind === 'systemAudioFallback') {
-          this.quietNotice(`capture:${kind}`, this.t('toastAudioFallback', { device: clean }), 'info', 'settings');
+          this.quietNotice(`capture:${kind}`, this.t('toastAudioFallback', { device: clean }), 'info', 'settings:audio');
           return;
         }
         if (kind === 'systemAudioRetry') return; // povedlo se na druhý pokus - jen do logu
-        this.quietNotice(`capture:${kind}`, this.t('toastMicUnavailable', { message: clean }), 'warn', 'settings');
+        this.quietNotice(`capture:${kind}`, this.t('toastMicUnavailable', { message: clean }), 'warn', 'settings:audio');
       },
       onLevels: (levels) => this.onAudioLevels(levels),
       onDefaultOutputChanged: (device) => {
@@ -609,6 +624,10 @@ class KineApp {
     const s = this.settings.get();
     const version = app.getVersion();
     if (s.lastVersion === version) return;
+    // První start po instalaci nebo aktualizaci: zástupce na ploše a v Startu, když chybí
+    // (po rozbité aktualizaci z 0.9.8 ikona na ploše chyběla). Instalátor ikonu na ploše
+    // vytváří vždycky - kdo ji v nastavení vypnul, tomu ji appka hned zase uklidí.
+    this.ensureShortcuts(false, true);
     if (s.lastVersion && s.onboarded) {
       log(`aktualizováno z ${s.lastVersion} na ${version}`);
       // Jen v okně (O aplikaci / panel) - žádné oznámení hned po startu.
@@ -693,7 +712,7 @@ class KineApp {
         id: 'helper-blocked',
         text: this.smartAppControl === 'on' ? this.t('helperBlockedSac') : this.t('helperBlocked'),
         kind: 'warn',
-        tab: 'settings',
+        tab: 'settings:hotkeys',
       });
       this.syncHotkeyNotices();
       this.pushStatusSoon();
@@ -762,61 +781,8 @@ class KineApp {
   private onHotkey(id: HotkeyId): void {
     if (id === 'clip') void this.onClipHotkey();
     else if (id === 'record') void this.toggleRecording();
-    else if (id === 'screenshot') void this.takeScreenshot();
     else if (id === 'brb') this.toggleLiveBrb();
     else void this.onToggleHotkey();
-  }
-
-  /**
-   * Snímek obrazovky (zkratka, výchozí Alt+F8): celá obrazovka, ze které se
-   * nahrává, v plném rozlišení (ne zmenšená jako klip) jako PNG do složky
-   * Screenshots vedle klipů - a rovnou do schránky, ať jde vložit do
-   * Discordu. Funguje i bez běžícího zásobníku.
-   */
-  async takeScreenshot(): Promise<string | null> {
-    const s = this.settings.get();
-    try {
-      const displays = screen.getAllDisplays();
-      const display = displays.find((d) => String(d.id) === s.displayId && s.displayId) ?? screen.getPrimaryDisplay();
-      const size = {
-        width: Math.round(display.size.width * display.scaleFactor),
-        height: Math.round(display.size.height * display.scaleFactor),
-      };
-      const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: size });
-      const source = sources.find((x) => x.display_id === String(display.id)) ?? sources[0];
-      if (!source || source.thumbnail.isEmpty()) throw new Error('no display');
-      const png = source.thumbnail.toPNG();
-      const dir = this.screenshotsDir();
-      mkdirSync(dir, { recursive: true });
-      const base = clipFileBase(new Date(), this.games.current()?.name ?? null);
-      let file = join(dir, `${base}.png`);
-      for (let n = 2; existsSync(file); n++) file = join(dir, `${base} (${n}).png`);
-      writeFileSync(file, png);
-      let copied = false;
-      try {
-        await clipboard.write([new ClipboardItem({ 'image/png': new Blob([new Uint8Array(png)], { type: 'image/png' }) })]);
-        copied = true;
-      } catch (e) {
-        log(`snímek do schránky: ${(e as Error).message}`);
-      }
-      const { width, height } = source.thumbnail.getSize();
-      log(`snímek obrazovky: ${file} (${width}x${height})`);
-      void this.toast.show(this.t(copied ? 'toastScreenshotCopied' : 'toastScreenshotSaved'), 'ok', {
-        notification: !s.toast,
-        sound: true,
-        onClick: () => shell.showItemInFolder(file),
-      });
-      return file;
-    } catch (e) {
-      log(`snímek obrazovky se nepovedl: ${(e as Error).message}`);
-      void this.toast.show(this.t('toastScreenshotFailed', { message: (e as Error).message }), 'error');
-      return null;
-    }
-  }
-
-  /** Složka se snímky obrazovky (vedle klipů). */
-  screenshotsDir(): string {
-    return join(this.settings.clipsDir(), 'Screenshots');
   }
 
   /** Značky do rozjeté nahrávky zápasu (klip, zabití) - čas podle hodin, na sekundy se přepočítá při uložení. */
@@ -1494,7 +1460,6 @@ class KineApp {
       s.clipHotkey !== prev.clipHotkey ||
       s.toggleHotkey !== prev.toggleHotkey ||
       s.recordHotkey !== prev.recordHotkey ||
-      s.screenshotHotkey !== prev.screenshotHotkey ||
       s.liveBrbHotkey !== prev.liveBrbHotkey
     )
       this.registerHotkeys();
@@ -1512,7 +1477,12 @@ class KineApp {
     const sceneKeys: (keyof Settings)[] = ['liveCamera', 'liveCameraDevice', 'liveCameraPosition', 'liveCameraSize', 'liveCameraShape', 'liveCameraMirror', 'liveBrbText', 'liveBrbMuteMic', 'lang'];
     if (this.live.active() && sceneKeys.some((k) => s[k] !== prev[k])) this.live.setScene(this.liveScene());
     if (s.startWithSystem !== prev.startWithSystem) this.applyLoginItem();
-    if (s.clipsDir !== prev.clipsDir) this.library.load(this.settings.clipsDir());
+    if (s.desktopShortcut !== prev.desktopShortcut) this.ensureShortcuts(true);
+    if (s.clipsDir !== prev.clipsDir) {
+      // Zmenšování patří ke staré složce - zastavit (rozdělaný klip zůstane, jak byl).
+      this.compressor.cancel();
+      this.library.load(this.settings.clipsDir());
+    }
     const captureKeys: (keyof Settings)[] = ['maxHeight', 'fps', 'codec', 'videoMbps', 'systemAudio', 'systemAudioDevice', 'microphone', 'microphoneDevice', 'systemGain', 'micGain', 'displayId'];
     if (captureKeys.some((k) => s[k] !== prev[k])) {
       // Změna kvality = nový start zásobníku; rozjetá nahrávka se nejdřív uloží.
@@ -1554,7 +1524,7 @@ class KineApp {
    */
   private registerHotkeys(): void {
     const s = this.settings.get();
-    this.hotkeys.apply({ clip: s.clipHotkey, toggle: s.toggleHotkey, record: s.recordHotkey, screenshot: s.screenshotHotkey, brb: s.liveBrbHotkey });
+    this.hotkeys.apply({ clip: s.clipHotkey, toggle: s.toggleHotkey, record: s.recordHotkey, brb: s.liveBrbHotkey });
     this.syncHotkeyNotices();
   }
 
@@ -1567,7 +1537,7 @@ class KineApp {
       const text = this.t('hotkeyProblem', { hotkey: hotkeyLabel(p.hotkey), reason: this.hotkeyReasonText(p.reason) });
       const existing = this.notices.find((n) => n.id === `hotkey:${p.id}`);
       if (existing) existing.text = text;
-      else this.notices.push({ id: `hotkey:${p.id}`, text, kind: 'warn', at: Date.now(), tab: 'settings' });
+      else this.notices.push({ id: `hotkey:${p.id}`, text, kind: 'warn', at: Date.now(), tab: 'settings:hotkeys' });
     }
   }
 
@@ -1595,7 +1565,7 @@ class KineApp {
     this.warnedOnce.add('clip-hotkey');
     void this.toast.show(this.t('hotkeyProblem', { hotkey: hotkeyLabel(problem.hotkey), reason: this.hotkeyReasonText(problem.reason) }), 'warn', {
       sound: true,
-      onClick: () => this.openSettings('settings'),
+      onClick: () => this.openSettings('settings:hotkeys'),
     });
   }
 
@@ -1673,7 +1643,7 @@ class KineApp {
     if (!limitGb) return;
     const plan = storageCleanupPlan(this.library.listAll(), limitGb * GB);
     if (plan.ids.length === 0) {
-      if (plan.stillOver) this.addNotice({ id: 'storage', text: this.t('storageLimitStillOver', { gb: limitGb }), kind: 'warn', tab: 'settings' });
+      if (plan.stillOver) this.addNotice({ id: 'storage', text: this.t('storageLimitStillOver', { gb: limitGb }), kind: 'warn', tab: 'settings:storage' });
       return;
     }
     for (const id of plan.ids) this.library.purge(id);
@@ -1692,6 +1662,42 @@ class KineApp {
         return this.helper?.isBlocked() ? this.t('hotkeyHelperBlocked') : this.t('hotkeyHelperDown');
       default:
         return reason;
+    }
+  }
+
+  /**
+   * Zástupci appky: na ploše (když ho hráč nevypnul - spouští se dvojklikem
+   * jako hra) a v nabídce Start (hledání, oznámení Windows). Chybějící se
+   * vytvoří (po instalaci a aktualizaci), vypnutý zástupce na ploše se smaže
+   * - jen ten, který opravdu vede na tuhle appku.
+   */
+  private ensureShortcuts(settingChanged = false, afterInstall = false): void {
+    if (process.platform !== 'win32' || !app.isPackaged || process.env.KINE_TEST) return;
+    const target = process.execPath;
+    const name = `${PRODUCT}.lnk`;
+    const options = { target, cwd: dirname(target), icon: target, iconIndex: 0, appUserModelId: APP_USER_MODEL_IDS[VARIANT], description: PRODUCT };
+    const desktop = join(app.getPath('desktop'), name);
+    const startMenu = join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', name);
+    const pointsHere = (file: string): boolean => {
+      try {
+        return shell.readShortcutLink(file).target.toLowerCase() === target.toLowerCase();
+      } catch {
+        return false;
+      }
+    };
+    const wantDesktop = this.settings.get().desktopShortcut;
+    try {
+      if (wantDesktop && !existsSync(desktop)) {
+        log(shell.writeShortcutLink(desktop, 'create', options) ? `zástupce na ploše vytvořen (${desktop})` : 'zástupce na ploše nejde vytvořit');
+      } else if (!wantDesktop && (settingChanged || afterInstall) && existsSync(desktop) && pointsHere(desktop)) {
+        rmSync(desktop, { force: true });
+        log('zástupce na ploše smazán (vypnutý v nastavení)');
+      }
+      if (!settingChanged && !existsSync(startMenu)) {
+        log(shell.writeShortcutLink(startMenu, 'create', options) ? 'zástupce v nabídce Start vytvořen' : 'zástupce v nabídce Start nejde vytvořit');
+      }
+    } catch (e) {
+      log(`zástupci: ${(e as Error).message}`);
     }
   }
 
@@ -1759,8 +1765,8 @@ class KineApp {
       const device = levels.systemDevice || this.t('audioDefaultDevice');
       const text = this.t('toastSystemAudioSilent', { game: game.name, device });
       // Okénko ve hře (klipy by byly bez zvuku hry - teď to hráče zajímá) + v okně; systémové oznámení ne.
-      this.addNotice({ id: 'audio-silent', text, kind: 'warn', tab: 'settings' });
-      void this.toast.show(text, 'warn', { onClick: () => this.openSettings('settings') });
+      this.addNotice({ id: 'audio-silent', text, kind: 'warn', tab: 'settings:audio' });
+      void this.toast.show(text, 'warn', { onClick: () => this.openSettings('settings:audio') });
     } else if (levels.system !== null && levels.systemSilentSeconds === 0 && this.notices.some((n) => n.id === 'audio-silent')) {
       this.dismissNotice('audio-silent');
     }
@@ -1795,7 +1801,7 @@ class KineApp {
     if (!this.auth.current()) items.push({ label: this.t('trayNotLoggedIn'), click: () => this.openSettings('account') });
     // Zkratka, která nejde (drží ji jiný program) - vidět i bez otevření okna, klik vede do nastavení.
     for (const p of this.hotkeys.currentProblems().filter((x) => x.reason !== 'helper-down')) {
-      items.push({ label: `⚠ ${this.t('hotkeyProblem', { hotkey: hotkeyLabel(p.hotkey), reason: this.hotkeyReasonText(p.reason) })}`, click: () => this.openSettings('settings') });
+      items.push({ label: `⚠ ${this.t('hotkeyProblem', { hotkey: hotkeyLabel(p.hotkey), reason: this.hotkeyReasonText(p.reason) })}`, click: () => this.openSettings('settings:hotkeys') });
     }
     const saving = this.capture.savingInfo();
     const liveState = this.live.current().state;
@@ -1810,7 +1816,6 @@ class KineApp {
             click: () => void this.toggleRecording(),
             enabled: this.capture.state === 'on',
           },
-      { label: this.t('trayScreenshot', { hotkey: s.screenshotHotkey ? hotkeyLabel(s.screenshotHotkey) : '' }).replace(/\s*\(\)$/, ''), click: () => void this.takeScreenshot() },
       liveState === 'idle'
         ? { label: this.t('trayLiveStart'), click: () => this.openLiveDialog() }
         : liveState === 'stopping'
@@ -2248,6 +2253,7 @@ class KineApp {
       updateIssue: this.updateIssue,
       smartAppControl: this.smartAppControl,
       helperBlocked: this.helper?.isBlocked() ?? false,
+      compress: this.compressor.current(),
       windowGlass: this.windowGlassOn(),
       windowGlassSupported: this.windowGlassSupported(),
     };
@@ -2713,12 +2719,6 @@ class KineApp {
     });
     ipcMain.handle('clips:clipNow', () => this.onClipHotkey());
     ipcMain.handle('clips:trim', (_e, id: string, opts: TrimIpcRequest) => this.trimClip(id, opts));
-    ipcMain.handle('screenshot:take', () => this.takeScreenshot());
-    ipcMain.handle('screenshot:openDir', () => {
-      const dir = this.screenshotsDir();
-      mkdirSync(dir, { recursive: true });
-      return shell.openPath(dir);
-    });
     ipcMain.handle('app:copy', (_e, text: string) => clipboard.writeText(String(text ?? '')));
     ipcMain.handle('clips:discord', (_e, id: string) => this.shareToDiscord(id));
     ipcMain.handle('clips:discordFile', (_e, file: string, title: string) => this.shareFileToDiscord(String(file ?? ''), String(title ?? '')));
@@ -2726,6 +2726,20 @@ class KineApp {
     ipcMain.handle('clips:merge', (_e, ids: string[]) => this.mergeSelected(Array.isArray(ids) ? ids.map(String) : []));
     ipcMain.handle('clips:gif', (_e, id: string, range: { start: number; end: number }) => this.gifFromClip(id, range ?? { start: 0, end: 0 }));
     ipcMain.handle('clips:revealFile', (_e, file: string) => this.revealFile(file));
+    // Zmenšování klipů (Klipy -> úložiště): odhad, spuštění, zrušení, zavření hlášení.
+    const level = (value: unknown): CompressLevel => (COMPRESS_LEVELS.includes(value as CompressLevel) ? (value as CompressLevel) : 'medium');
+    ipcMain.handle('clips:compressSummary', (_e, value: unknown) => {
+      const { count, bytes, estimatedBytes, savingBytes } = compressSummary(this.library.list(), level(value));
+      return { count, bytes, estimatedBytes, savingBytes };
+    });
+    ipcMain.handle('clips:compress', (_e, value: unknown, ids: unknown) =>
+      this.compressor.start(level(value), Array.isArray(ids) ? ids.map(String) : undefined)
+    );
+    ipcMain.handle('clips:compressCancel', () => this.compressor.cancel());
+    ipcMain.handle('clips:compressDismiss', () => this.compressor.dismiss());
+    ipcMain.handle('player:current', (_e, id: unknown) => {
+      this.playerClipId = typeof id === 'string' && id ? id : null;
+    });
     ipcMain.handle('clips:thumbFrame', (_e, id: string, atSeconds: number) => this.setThumbnailFrame(String(id), Number(atSeconds)));
     // Tažení karty klipu ven z okna: systémové drag & drop se souborem (Discord, prohlížeč, Průzkumník).
     ipcMain.on('clips:dragStart', (e, id: string) => {
@@ -2832,6 +2846,11 @@ class KineApp {
         void shell.openExternal('ms-settings:sound');
       }
     });
+    // Náhradní celá obrazovka přehrávače: okno, ze kterého přišla žádost, přes celou obrazovku.
+    ipcMain.handle('window:fullscreen', (e, on: unknown) => {
+      const win = BrowserWindow.fromWebContents(e.sender);
+      if (win && !win.isDestroyed()) win.setFullScreen(on === true);
+    });
     // Zabezpečení Windows: Smart App Control / Historie ochrany (jen tyhle dvě stránky -
     // windowsdefender:// umí i věci jako restart počítače, nic jiného se odsud neotevře).
     ipcMain.handle('app:openWindowsSecurity', (_e, page: unknown) => {
@@ -2903,6 +2922,7 @@ class KineApp {
     log('konec kvůli aktualizaci');
     const started = await installUpdateNow(async () => {
       this.helper?.stop();
+      this.compressor.cancel();
       this.uploader.stopWaiting();
       await Promise.race([this.gameEvents.stop(), new Promise((r) => setTimeout(r, 2000))]).catch(() => undefined);
       await Promise.race([this.stopCapture('quit'), new Promise((r) => setTimeout(r, 6000))]).catch(() => undefined);
@@ -2929,6 +2949,7 @@ class KineApp {
     this.quitting = true;
     log('konec');
     this.helper?.stop();
+    this.compressor.cancel();
     this.uploader.stopWaiting();
     void this.gameEvents.stop();
     // Rozjetá (nebo právě ukládaná) nahrávka se před koncem uloží (dlouhá může chvíli trvat - proto delší strop).

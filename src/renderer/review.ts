@@ -6,6 +6,7 @@ import { clear, clipMeta, formatDuration, h, isPortrait, thumbImages } from './u
 import { applyBrandColor } from '../shared/plan';
 import { openPlayer, type PlayerHandle } from './player';
 import { openUploadDialog } from './uploadDialog';
+import { icon } from './icons';
 
 /**
  * Okýnko po hře: klipy z posledního hraní, každý s náhledem a
@@ -61,6 +62,7 @@ function showClip(clip: Clip, edit = false) {
     startEditing: edit,
     onOpenExternal: (c) => void kine.openClip(c.id),
     onLog: (m) => void kine.log(m),
+    setWindowFullscreen: (on) => void kine.setWindowFullscreen(on),
     onClose: () => {
       player = null;
     },
@@ -155,8 +157,8 @@ function render() {
       h(
         'div',
         { class: 'actions' },
-        h('button', { class: 'small quiet', onclick: () => showClip(clip) }, '▶ ' + t('libraryOpen')),
-        h('button', { class: 'small quiet', onclick: () => showClip(clip, true) }, '✂ ' + t('libraryEdit'))
+        h('button', { class: 'small quiet', onclick: () => showClip(clip) }, icon('play', 13), t('libraryOpen')),
+        h('button', { class: 'small quiet', onclick: () => showClip(clip, true) }, icon('scissors', 14), t('libraryEdit'))
       )
     );
     const thumb = h(
@@ -164,8 +166,8 @@ function render() {
       { class: `thumb ${isPortrait(clip) ? 'portrait' : ''}`, onclick: () => showClip(clip) },
       ...thumbImages(clip, false),
       check,
-      h('span', { class: 'play-badge' }, '▶'),
-      clip.kind === 'recording' ? h('span', { class: 'kind-badge' }, '⏺ ' + t('libraryRecordingBadge')) : null,
+      h('span', { class: 'play-badge' }, icon('play', 18)),
+      clip.kind === 'recording' ? h('span', { class: 'kind-badge' }, icon('record', 11), t('libraryRecordingBadge')) : null,
       h('span', { class: 'dur' }, formatDuration(clip.durationSeconds))
     );
     grid.append(h('div', { class: `clip ${isSelected ? 'selected' : ''}` }, thumb, body));
@@ -184,6 +186,7 @@ function render() {
       class: 'quiet review-upload-options',
       disabled: selectedCount === 0,
       title: t('uploadOptionsButton'),
+      'aria-label': t('uploadOptionsButton'),
       onclick: () =>
         openUploadDialog({
           clips: picked(),
@@ -193,7 +196,7 @@ function render() {
           onConfirm: (requests) => void kine.reviewDone(requests),
         }),
     },
-    '⚙'
+    icon('sliders', 16)
   );
 
   app.append(
@@ -208,7 +211,7 @@ function render() {
         h('button', { class: 'small quiet', onclick: () => { selected = new Set(); render(); } }, t('reviewSelectNone')),
         merging
           ? h('span', { class: 'row', style: 'gap:8px' }, h('span', { class: 'progress trim-progress merge-progress' }, h('span', { style: `width:${merging.percent}%` })), h('span', { class: 'faint merge-text' }, t('mergeWorking', { percent: merging.percent })))
-          : h('button', { class: 'small review-merge', disabled: selectedCount < 2, title: t('reviewMergeHint'), onclick: () => void mergeSelected() }, '🎬 ' + t('reviewMerge'))
+          : h('button', { class: 'small review-merge', disabled: selectedCount < 2, title: t('reviewMergeHint'), onclick: () => void mergeSelected() }, icon('film', 14), t('reviewMerge'))
       )
     ),
     ...(mergeNote ? [h('p', { class: `state ${mergeNote.kind === 'ok' ? 'done' : 'error'}`, style: 'margin:-6px 0 0' }, mergeNote.text)] : []),

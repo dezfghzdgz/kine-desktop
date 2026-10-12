@@ -40,7 +40,9 @@ nsis:
   oneClick: true
   perMachine: false
   allowToChangeInstallationDirectory: false
-  createDesktopShortcut: true
+  # always = i při přeinstalování se ikona na ploše vytvoří znovu, když chybí
+  # (po aktualizaci ji doplní appka sama - src/main/main.ts ensureShortcuts).
+  createDesktopShortcut: always
   createStartMenuShortcut: true
   runAfterFinish: true
   deleteAppDataOnUninstall: false

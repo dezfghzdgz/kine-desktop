@@ -1,6 +1,7 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import { TRASH_DAYS, type Clip, type ClipUpload } from '../shared/types';
+import { compressTempPath } from '../shared/compress';
 
 /**
  * Knihovna klipů: soubory ve složce s klipy + index.json vedle nich.
@@ -47,6 +48,23 @@ export class ClipLibrary {
       parsed = [];
     }
     const list = Array.isArray(parsed) ? (parsed as Clip[]) : [];
+    // Zmenšování klipu přerušené uprostřed výměny (pád, vypnutí PC): původní soubor zpátky,
+    // nedokončený zmenšený pryč (src/main/compress.ts).
+    for (const c of list) {
+      if (!c || typeof c.file !== 'string') continue;
+      try {
+        const backup = `${c.file}.kine-orig`;
+        if (existsSync(backup)) {
+          // Chybí klip = výměna nedoběhla, původní zpátky. Klip je = zmenšený už je na místě, záloha pryč.
+          if (!existsSync(c.file)) renameSync(backup, c.file);
+          else rmSync(backup, { force: true });
+        }
+        const tmp = compressTempPath(c.file);
+        if (existsSync(tmp)) rmSync(tmp, { force: true });
+      } catch {
+        // nevadí - zkusí se příště
+      }
+    }
     this.clips = list.filter((c) => c && typeof c.id === 'string' && typeof c.file === 'string' && existsSync(c.file));
     this.purgeExpired();
     // Rozjeté nahrávání z minula nemá kdo dokončit - vrátí se do fronty,

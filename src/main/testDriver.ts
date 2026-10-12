@@ -1,4 +1,4 @@
-import { appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { request as httpRequest } from 'node:http';
 import { basename, dirname, join } from 'node:path';
@@ -237,9 +237,29 @@ export async function runTestDriver(kine: {
       }
     }
     for (const tab of ['clips', 'settings', 'games', 'upload', 'account', 'about']) {
-      kine.openSettings(tab);
+      kine.openSettings(tab === 'settings' ? 'settings:hotkeys' : tab);
       await sleep(900);
       await shot(kine.settingsWindow, `settings-${tab}`);
+    }
+    // Nastavení po oddílech: sedm ikon nahoře, každá ukáže jen svůj oddíl; vysvětlení až pod otazníčkem.
+    kine.openSettings('settings:hotkeys');
+    await sleep(700);
+    if (kine.settingsWindow && !kine.settingsWindow.isDestroyed()) {
+      const sw = kine.settingsWindow;
+      const nav = await sw.webContents.executeJavaScript(
+        `(() => { const chips = [...document.querySelectorAll('.section-nav .section-chip')]; return { count: chips.length, icons: chips.every((c) => c.querySelector('svg.icon')), active: (document.querySelector('.section-chip.active') || {}).dataset?.section, panels: document.querySelectorAll('.settings-page > .panel').length, hints: document.querySelectorAll('.settings-page .help-text').length, helpBtns: document.querySelectorAll('.settings-page .help-btn').length }; })()`
+      );
+      await sw.webContents.executeJavaScript(`(() => { const c = document.querySelector('.section-chip[data-section="general"]'); if (c) c.click(); return !!c; })()`);
+      await sleep(400);
+      const general = await sw.webContents.executeJavaScript(`(() => ({ active: (document.querySelector('.section-chip.active') || {}).dataset?.section, lang: !!document.querySelector('.general-panel select'), hotkeys: document.querySelectorAll('.hotkey').length }))()`);
+      await sw.webContents.executeJavaScript(`(() => { const b = document.querySelector('.general-panel .help-btn'); if (b) b.click(); return !!b; })()`);
+      await sleep(300);
+      const helpOpen = await sw.webContents.executeJavaScript(`document.querySelectorAll('.general-panel .help-text').length === 1 && !!document.querySelector('.general-panel .help-btn.open')`);
+      await shot(sw, 'settings-general');
+      // Emoji v okně nikde (ikony jsou SVG) - text bez znaků z rozsahu emoji / dingbatů.
+      const emoji = await sw.webContents.executeJavaScript(`(() => { const t = document.body.innerText; return (t.match(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}]/gu) || []).join(''); })()`);
+      result.settingsSections = { nav, general, helpOpen, emoji };
+      result.settingsSectionsOk = nav.count === 7 && nav.icons && nav.active === 'hotkeys' && nav.panels === 1 && nav.hints === 0 && nav.helpBtns >= 3 && general.active === 'general' && general.lang && general.hotkeys === 0 && helpOpen && emoji === '';
     }
 
     // Nahrání a sdílení: viditelnost má tři volby (i "jen odběratelé"), k tomu hashtagy ke všemu a kategorie.
@@ -274,7 +294,7 @@ export async function runTestDriver(kine: {
       // Úpravy: tlačítko Upravit rozbalí osu, I/O nastaví začátek a konec
       // podle přehrávání, "Uložit jako nový klip" vyrobí další klip.
       const countBefore = kine.library.list().length;
-      await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head button')].find((x) => !x.disabled && x.textContent && !x.classList.contains('player-close') && !x.classList.contains('hidden')); if (b) b.click(); return !!b; })()`);
+      await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head .player-edit')].find((x) => !x.disabled); if (b) b.click(); return !!b; })()`);
       await sleep(400);
       result.trimPanel = await win.webContents.executeJavaScript(`!!document.querySelector('.player-box.editing .trim:not(.hidden) .tl-handle.start')`);
       await win.webContents.executeJavaScript(
@@ -334,7 +354,7 @@ export async function runTestDriver(kine: {
           await sleep(300);
           ready = await win.webContents.executeJavaScript(`(() => { const v = document.querySelector('.overlay .player-box video'); return !!v && v.readyState >= 1 && v.videoWidth > 0; })()`);
         }
-        await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head button')].find((x) => !x.disabled && x.textContent && !x.classList.contains('player-close') && !x.classList.contains('hidden')); if (b) b.click(); return !!b; })()`);
+        await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head .player-edit')].find((x) => !x.disabled); if (b) b.click(); return !!b; })()`);
         await sleep(400);
         const speedSet: boolean = await win.webContents.executeJavaScript(
           `(() => { const b = [...document.querySelectorAll('.trim-speed button.seg')].find((x) => x.textContent.trim() === '2×'); if (b) b.click(); return !!b && b.classList.contains('active'); })()`
@@ -499,8 +519,9 @@ export async function runTestDriver(kine: {
         const secondClip = kine.library.list().find((c) => c.id === shown[1]);
         result.playerNav = first.next && first.prevDisabled && first.pos === `1 / ${shown.length}` && second.pos === `2 / ${shown.length}` && second.overlay === 1 && !!secondClip && second.title === secondClip.title && back === `1 / ${shown.length}`;
         result.playerNavDebug = { first, second, back };
-        // Celá obrazovka (⛶ / F / dvojklik): celá scéna se šipkami na další klip, ne holé video.
-        await win.webContents.executeJavaScript(`(() => { const b = document.querySelector('.player-stage .stage-fullscreen'); if (b) b.click(); return !!b; })()`, true);
+        // Celá obrazovka (tlačítko v hlavičce / na scéně / F / dvojklik): celá scéna se šipkami na další klip, ne holé video.
+        const headFull = await win.webContents.executeJavaScript(`(() => { const b = document.querySelector('.player-head .player-full'); return !!b && !!b.querySelector('svg') && getComputedStyle(b).display !== 'none'; })()`);
+        await win.webContents.executeJavaScript(`(() => { const b = document.querySelector('.player-head .player-full'); if (b) b.click(); return !!b; })()`, true);
         let fsOn = false;
         for (let i = 0; i < 20 && !fsOn; i++) {
           await sleep(150);
@@ -515,11 +536,16 @@ export async function runTestDriver(kine: {
         const fsSecond = await win.webContents.executeJavaScript(
           `({ still: !!document.fullscreenElement, pos: document.querySelector('.player-stage.fullscreen .stage-pos')?.textContent, video: !!document.querySelector('.player-stage.fullscreen video') })`
         );
+        // Šipka ← na klávesnici v celé obrazovce = předchozí klip - i když má fokus samotné video.
+        await win.webContents.executeJavaScript(`(() => { const v = document.querySelector('.player-stage.fullscreen video'); if (v) { v.setAttribute('tabindex', '-1'); v.focus(); } (v || document).dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true })); return true; })()`, true);
+        await sleep(600);
+        const fsKey = await win.webContents.executeJavaScript(`({ still: !!document.fullscreenElement, pos: document.querySelector('.player-stage.fullscreen .stage-pos')?.textContent })`);
         await win.webContents.executeJavaScript(`document.exitFullscreen ? document.exitFullscreen().then(() => true).catch(() => false) : false`, true);
         await sleep(500);
         const fsOff = await win.webContents.executeJavaScript(`!document.fullscreenElement && !document.querySelector('.player-stage.fullscreen')`);
-        result.playerFullscreen = { fsOn, fsFirst, fsSecond, fsOff };
-        result.playerFullscreenOk = fsOn && fsFirst.next && fsFirst.pos === `1 / ${shown.length}` && fsSecond.still && fsSecond.pos === `2 / ${shown.length}` && fsSecond.video && fsOff;
+        result.playerFullscreen = { headFull, fsOn, fsFirst, fsSecond, fsKey, fsOff };
+        result.playerFullscreenOk =
+          headFull && fsOn && fsFirst.next && fsFirst.pos === `1 / ${shown.length}` && fsSecond.still && fsSecond.pos === `2 / ${shown.length}` && fsSecond.video && fsKey.still && fsKey.pos === `1 / ${shown.length}` && fsOff;
         await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
         await sleep(300);
       }
@@ -614,7 +640,7 @@ export async function runTestDriver(kine: {
         result.gifLimit = guarded;
         await win.webContents.executeJavaScript(`(() => { const t = document.querySelector('.clip[data-id="${clip1.id}"] .thumb'); if (t) t.click(); return !!t; })()`);
         await sleep(600);
-        await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head button')].find((x) => !x.disabled && x.textContent && !x.classList.contains('player-close') && !x.classList.contains('hidden')); if (b) b.click(); return !!b; })()`);
+        await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head .player-edit')].find((x) => !x.disabled); if (b) b.click(); return !!b; })()`);
         await sleep(400);
         await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.trim button.seg')].find((x) => /GIF/.test(x.textContent)); if (b) b.click(); return !!b; })()`);
         await sleep(300);
@@ -634,7 +660,7 @@ export async function runTestDriver(kine: {
         pausedOk = (kine as any).paused === true && kine.capture.state === 'off';
       }
       await sleep(300);
-      const pausedUi = await win.webContents.executeJavaScript(`!!document.querySelector('.side-status .side-clip:disabled') && /▶/.test(document.querySelector('.side-status .side-pause').textContent)`);
+      const pausedUi = await win.webContents.executeJavaScript(`!!document.querySelector('.side-status .side-clip:disabled') && !!document.querySelector('.side-status .side-pause[data-paused="1"] svg.icon')`);
       await shot(win, 'settings-sidebar-paused');
       await win.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-status .side-pause'); if (b) b.click(); return !!b; })()`);
       let resumed = false;
@@ -679,7 +705,7 @@ export async function runTestDriver(kine: {
         result.clipperSide = await w.webContents.executeJavaScript(
           `(() => { const tabs = [...document.querySelectorAll('.side .tab')].map((b) => b.textContent.trim()); return !tabs.some((x) => x === 'Kine') && !!document.querySelector('.brand-tag') && document.querySelectorAll('.brand .mark svg path').length === 3; })()`
         );
-        kine.openSettings('settings');
+        kine.openSettings('settings:general');
         await sleep(700);
         result.clipperPanel = await w.webContents.executeJavaScript(`document.querySelectorAll('.app-icon svg path').length === 3 && !document.querySelector('.kine-host')`);
         await shot(w, 'settings-settings-clipper');
@@ -710,11 +736,15 @@ export async function runTestDriver(kine: {
     }
 
     // Výkon appky: tři volby v Záznamu; "Úsporný" vypne náhledy při najetí, uloží se do nastavení.
-    kine.openSettings('settings');
+    kine.openSettings('settings:performance');
     await sleep(700);
     const perfWin = kine.settingsWindow;
     if (perfWin && !perfWin.isDestroyed()) {
-      const panel = await perfWin.webContents.executeJavaScript(`(() => { const p = document.querySelector('.panel.performance'); return !!p && p.querySelectorAll('input[type=radio][name=performance]').length === 3 && !!p.querySelector('.perf-now'); })()`);
+      // Technické údaje (jak často se hlídá hra…) až po kliknutí na otazníček.
+      const hiddenFirst = await perfWin.webContents.executeJavaScript(`!document.querySelector('.panel.performance .perf-now')`);
+      await perfWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.panel.performance .panel-title .help-btn'); if (b) b.click(); return !!b; })()`);
+      await sleep(300);
+      const panel = hiddenFirst && (await perfWin.webContents.executeJavaScript(`(() => { const p = document.querySelector('.panel.performance'); return !!p && p.querySelectorAll('input[type=radio][name=performance]').length === 3 && !!p.querySelector('.perf-now') && !!p.querySelector('.help-text'); })()`));
       await perfWin.webContents.executeJavaScript(`(() => { const r = document.querySelector('.panel.performance input[value=low]'); r.click(); return true; })()`);
       let low = false;
       for (let i = 0; i < 10 && !low; i++) {
@@ -800,7 +830,7 @@ export async function runTestDriver(kine: {
       // Moment z klipu během nahrávání: v knihovně, na kartě (🚩 1) a v přehrávači jako tlačítko.
       if (rec) {
         const recCard = await recWin.webContents.executeJavaScript(
-          `(() => { const c = document.querySelector('.clip[data-id="${rec.id}"]'); const b = c && c.querySelector('.kind-badge'); const t = c && c.querySelector('.thumb'); if (t) t.click(); return !!b && b.textContent.includes('🚩 1'); })()`
+          `(() => { const c = document.querySelector('.clip[data-id="${rec.id}"]'); const b = c && c.querySelector('.kind-badge'); const m = b && b.querySelector('.kind-moments'); const t = c && c.querySelector('.thumb'); if (t) t.click(); return !!m && !!m.querySelector('svg.icon') && m.textContent.includes('1'); })()`
         );
         let chips = 0;
         for (let i = 0; i < 20 && chips === 0; i++) {
@@ -862,16 +892,10 @@ export async function runTestDriver(kine: {
       result.errorStopRecovery = { finished: !!finishedAfterError, recovered: !!errorRec, duration: errorRec?.durationSeconds, backOn: errorBackOn };
       result.errorStopRecoveryOk = !finishedAfterError && !!errorRec && errorRec.durationSeconds >= 2 && errorBackOn && !(kine as any).capture.recordingInfo();
       await sleep(waitMs);
-      kine.openSettings('settings');
+      kine.openSettings('settings:hotkeys');
       await sleep(700);
-      result.recordHotkeyField = await recWin.webContents.executeJavaScript(`document.querySelectorAll('.panel .field .hotkey').length === 4`);
-      // Snímek obrazovky: PNG v plném rozlišení do složky Screenshots vedle klipů (a do schránky).
-      const shotFile: string | null = await (kine as any).takeScreenshot();
-      const shotImage = shotFile ? nativeImage.createFromPath(shotFile) : null;
-      const shotSize = shotImage?.getSize();
-      const clipboardImage = await clipboard.has('image/png').catch(() => false);
-      result.screenshot = { file: shotFile, size: shotSize, clipboardImage };
-      result.screenshotOk = !!shotFile && existsSync(shotFile) && !!shotSize && shotSize.width >= 640 && shotSize.height >= 360 && /[\\/]Screenshots$/.test(dirname(shotFile)) && clipboardImage;
+      // Zkratky v nastavení: klip, zapnout/vypnout, nahrávka zápasu (snímek obrazovky už v appce není).
+      result.recordHotkeyField = await recWin.webContents.executeJavaScript(`document.querySelectorAll('.panel .field .hotkey').length === 3 && !document.querySelector('.side-shot')`);
 
       // Živé vysílání: tlačítko Vysílat -> dialog -> vysílá se na místní RTMP server (místo Cloudflare),
       // ten proud uloží; musí mít obraz v kvalitě vysílání (720p) i zvuk. Klip během vysílání jde dál.
@@ -988,15 +1012,19 @@ export async function runTestDriver(kine: {
     }
 
     // Kvalita: předvolba "Doporučené (1080p60)", řádek o tom, kdo kóduje (grafika / procesor), a posun zvuku ±300 ms.
-    kine.openSettings('settings');
+    kine.openSettings('settings:quality');
     await sleep(700);
     const qWin = kine.settingsWindow;
     if (qWin && !qWin.isDestroyed()) {
-      result.qualityPanel = await qWin.webContents.executeJavaScript(
-        `(() => { const r = document.querySelector('.quality-recommended'); const e = document.querySelector('.encoder-status'); const o = document.querySelector('input.audio-offset'); if (e) e.closest('.panel').scrollIntoView({ block: 'start' }); return !!r && !!e && e.textContent.trim().length > 10 && !!o && o.min === '-300' && o.max === '300'; })()`
+      const quality = await qWin.webContents.executeJavaScript(
+        `(() => { const r = document.querySelector('.quality-recommended'); const e = document.querySelector('.encoder-status'); return !!r && !!e && e.textContent.trim().length > 10 && !!e.querySelector('svg.icon'); })()`
       );
       await sleep(200);
       await shot(qWin, 'settings-quality');
+      kine.openSettings('settings:audio');
+      await sleep(600);
+      const offset = await qWin.webContents.executeJavaScript(`(() => { const o = document.querySelector('input.audio-offset'); return !!o && o.min === '-300' && o.max === '300'; })()`);
+      result.qualityPanel = quality && offset;
     }
 
     // Diagnostika pro podporu: verze, snímání, zvuk, konec protokolu - bez domovské složky; tlačítko v O aplikaci ji dá do schránky.
@@ -1040,7 +1068,7 @@ export async function runTestDriver(kine: {
       if (multiClipId) {
         const opened = await gridWin.webContents.executeJavaScript(`(() => { const c = document.querySelector('.clips .clip[data-id="${multiClipId}"] .thumb'); if (c) { c.scrollIntoView({ block: 'center' }); c.click(); } return !!c; })()`);
         await sleep(1200);
-        await gridWin.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head button')].find((x) => !x.disabled && x.textContent && !x.classList.contains('player-close') && !x.classList.contains('hidden')); if (b) b.click(); return !!b; })()`);
+        await gridWin.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head .player-edit')].find((x) => !x.disabled); if (b) b.click(); return !!b; })()`);
         await sleep(600);
         const trimAudio = await gridWin.webContents.executeJavaScript(`(() => { const r = document.querySelector('.player-box.editing .trim-audio-row'); const m = document.querySelector('.player-box.editing .trim input[type=checkbox]'); return { row: !!r && !r.classList.contains('hidden'), options: r ? r.querySelector('select').options.length : 0 }; })()`);
         await shot(gridWin, 'settings-clips-trim-audio');
@@ -1095,7 +1123,7 @@ export async function runTestDriver(kine: {
     await sleep(600);
     if (trashWin && !trashWin.isDestroyed() && clip1) {
       const beforeThumb = kine.library.list().find((c) => c.id === clip1.id)?.thumb ?? null;
-      await trashWin.webContents.executeJavaScript(`(() => { const card = document.querySelector('.clip[data-id="${clip1.id}"]'); const b = card && [...card.querySelectorAll('.actions button')].find((x) => /✂/.test(x.textContent)); if (b) b.click(); return !!b; })()`);
+      await trashWin.webContents.executeJavaScript(`(() => { const card = document.querySelector('.clip[data-id="${clip1.id}"]'); const b = card && card.querySelector('.actions .card-edit'); if (b) b.click(); return !!b; })()`);
       await sleep(900);
       await trashWin.webContents.executeJavaScript(`(() => { const v = document.querySelector('.overlay video'); if (v) { v.pause(); v.currentTime = 2; } return !!v; })()`);
       await sleep(500);
@@ -1114,7 +1142,7 @@ export async function runTestDriver(kine: {
     }
 
     // Úložiště: v Záznamu je přehled místa (klipy, koš, zásobník, volno).
-    kine.openSettings('settings');
+    kine.openSettings('settings:storage');
     await sleep(900);
     const storageWin = kine.settingsWindow;
     if (storageWin && !storageWin.isDestroyed()) {
@@ -1131,7 +1159,7 @@ export async function runTestDriver(kine: {
     }
 
     // Zvuk: měřáky hry a mikrofonu v Záznamu; hladiny ze snímací stránky se propíšou do proužků a do věty "odkud jde zvuk".
-    kine.openSettings('settings');
+    kine.openSettings('settings:audio');
     await sleep(800);
     const audioWin = kine.settingsWindow;
     if (audioWin && !audioWin.isDestroyed()) {
@@ -1221,7 +1249,7 @@ export async function runTestDriver(kine: {
     }
 
     // Vzhled: sklo (barvy Západ slunce, silné) -> <html> dostane atributy a pozadí; pak zpět klasický.
-    kine.openSettings('settings');
+    kine.openSettings('settings:look');
     await sleep(700);
     const lookWin = kine.settingsWindow;
     if (lookWin && !lookWin.isDestroyed()) {
@@ -1287,6 +1315,62 @@ export async function runTestDriver(kine: {
       result.lookOk = look.look === 'glass' && look.backdrop === 'sunset' && look.k === '0.8' && look.backdropShown && look.chips === 6 && look.panel && !!alpha && Number(alpha[1]) < 0.7 && back;
     }
 
+    // Zmenšování klipů: velký klip (1080p30, 20 Mb/s) v knihovně -> Klipy -> úložiště nahoře ->
+    // úrovně s odhadem -> Zmenšit; soubor se nahradí menším (stejná délka), knihovna to ví.
+    kine.openSettings('clips');
+    await sleep(700);
+    const cw = kine.settingsWindow;
+    if (cw && !cw.isDestroyed()) {
+      const bigFile = join((kine as any).settings.clipsDir(), 'E2E big clip.mp4');
+      try {
+        await runFfmpeg(
+          ['-f', 'lavfi', '-i', 'testsrc2=s=1920x1080:r=30:d=5,noise=alls=6:allf=t', '-f', 'lavfi', '-i', 'sine=f=440:d=5', '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'ultrafast', '-b:v', '20M', '-minrate', '20M', '-maxrate', '20M', '-bufsize', '40M', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', bigFile],
+          180000
+        );
+        const info = await probe(bigFile);
+        const before = statSync(bigFile).size;
+        (kine as any).library.add({ id: 'e2e-big', file: bigFile, thumb: null, title: 'E2E big clip', game: null, createdAt: new Date().toISOString(), durationSeconds: info.durationSeconds ?? 5, sizeBytes: before, width: 1920, height: 1080, sessionId: 'e2e-compress', upload: null });
+        // Hra by zmenšování pozdržela - tady se s žádnou nepočítá.
+        const games = (kine as any).games;
+        const realCurrent = games?.current;
+        if (games) games.current = () => null;
+        await sleep(800);
+        const pill = await cw.webContents.executeJavaScript(`(() => { const p = document.querySelector('.storage-pill'); const worth = !!p && p.classList.contains('worth'); if (p) p.click(); return { found: !!p, worth }; })()`);
+        await sleep(500);
+        const panelInfo = await cw.webContents.executeJavaScript(`(() => ({ levels: document.querySelectorAll('.compress-panel .compress-level').length, savings: [...document.querySelectorAll('.compress-panel .compress-level-saving')].map((x) => x.textContent), start: !!document.querySelector('.compress-panel .compress-start') }))()`);
+        await shot(cw, 'settings-clips-compress');
+        await cw.webContents.executeJavaScript(`(() => { const b = document.querySelector('.compress-panel .compress-start'); if (b) b.click(); return !!b; })()`);
+        let finished: any = null;
+        let sawRunning = false;
+        for (let i = 0; i < 360 && !finished; i++) {
+          await sleep(500);
+          const c = (kine as any).compressor.current();
+          if (c?.running) sawRunning = true;
+          if (c && !c.running && c.finishedAt) finished = c;
+          if (i === 2) await shot(cw, 'settings-clips-compressing');
+        }
+        if (games) games.current = realCurrent;
+        await sleep(700);
+        const after = kine.library.get('e2e-big');
+        const afterInfo = existsSync(bigFile) ? await probe(bigFile) : null;
+        const doneUi = await cw.webContents.executeJavaScript(`!!document.querySelector('.storage-pill.done')`);
+        await shot(cw, 'settings-clips-compressed');
+        const leftovers = readdirSync((kine as any).settings.clipsDir()).filter((n) => /kine-small|kine-orig/.test(n));
+        result.compress = { pill, panelInfo, sawRunning, finished, before, after: after?.sizeBytes, level: after?.compressed?.level, original: after?.compressed?.originalBytes, duration: afterInfo?.durationSeconds, doneUi, leftovers };
+        result.compressOk =
+          pill.found && pill.worth === false && panelInfo.levels === 3 && panelInfo.start && sawRunning && !!finished && finished.done === 1 && finished.skipped === 0 &&
+          !!after && after.compressed?.level === 'medium' && after.compressed.originalBytes === before && after.sizeBytes < before * 0.7 && statSync(bigFile).size === after.sizeBytes &&
+          !!afterInfo && Math.abs((afterInfo.durationSeconds ?? 0) - 5) < 0.3 && doneUi && leftovers.length === 0;
+        await cw.webContents.executeJavaScript(`(() => { const p = document.querySelector('.storage-pill.done'); if (p) p.click(); return true; })()`);
+        await sleep(300);
+      } catch (e) {
+        result.compress = { error: (e as Error).message };
+      } finally {
+        (kine as any).library.purge('e2e-big');
+        rmSync(bigFile, { force: true });
+      }
+    }
+
     // Průvodce: výběr jazyka a režimu.
     kine.openSettings('wizard');
     await sleep(800);
@@ -1302,8 +1386,8 @@ export async function runTestDriver(kine: {
       'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks', 'reviewMerge', 'updateUi',
       'playerNav', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
       'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
-      'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'screenshotOk', 'clipToastInstant', 'recordingStopOnceOk', 'updateProgressOk', 'playerFullscreenOk', 'lookOk', 'lookFollowOk',
-      'updateIssueOk',
+      'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'clipToastInstant', 'recordingStopOnceOk', 'updateProgressOk', 'playerFullscreenOk', 'lookOk', 'lookFollowOk',
+      'updateIssueOk', 'settingsSectionsOk', 'compressOk',
     ];
     if (process.env.KINE_TEST_LIVE_URL) common.push('liveOk');
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];

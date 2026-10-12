@@ -53,9 +53,6 @@ const kine = {
       text?: { png: Uint8Array; position: 'top' | 'center' | 'bottom' } | null;
     }
   ): Promise<Clip> => ipcRenderer.invoke('clips:trim', id, opts),
-  /** Snímek obrazovky (jako zkratka): PNG do složky Screenshots a do schránky. Vrací cestu, nebo null. */
-  takeScreenshot: (): Promise<string | null> => ipcRenderer.invoke('screenshot:take'),
-  openScreenshotsDir: (): Promise<string> => ipcRenderer.invoke('screenshot:openDir'),
   /** Text do schránky (odkaz na klip). */
   copyText: (text: string): Promise<void> => ipcRenderer.invoke('app:copy', text),
   /** Klip na Discord (webhook z nastavení): nahraný jako odkaz, jinak jako soubor do 10 MB. */
@@ -135,6 +132,16 @@ const kine = {
   restartCapture: (): Promise<'ok' | 'busy'> => ipcRenderer.invoke('capture:restart'),
   /** Zvuk ve Windows (výchozí zařízení, Stereo Mix, výhradní režim). */
   openSoundSettings: (): Promise<void> => ipcRenderer.invoke('app:openSoundSettings'),
+  /** Zmenšování klipů (Klipy -> úložiště): odhad, spuštění (bez ids = všechny vhodné), zrušení, zavření hlášení. */
+  compressSummary: (level: 'light' | 'medium' | 'strong'): Promise<{ count: number; bytes: number; estimatedBytes: number; savingBytes: number }> =>
+    ipcRenderer.invoke('clips:compressSummary', level),
+  compressClips: (level: 'light' | 'medium' | 'strong', ids?: string[]): Promise<number> => ipcRenderer.invoke('clips:compress', level, ids),
+  compressCancel: (): Promise<void> => ipcRenderer.invoke('clips:compressCancel'),
+  compressDismiss: (): Promise<void> => ipcRenderer.invoke('clips:compressDismiss'),
+  /** Který klip je otevřený v přehrávači (null = žádný) - zmenšování ho přeskočí. */
+  setPlayerClip: (id: string | null): Promise<void> => ipcRenderer.invoke('player:current', id),
+  /** Okno přes celou obrazovku (náhradní celá obrazovka přehrávače, když Fullscreen API nejde). */
+  setWindowFullscreen: (on: boolean): Promise<void> => ipcRenderer.invoke('window:fullscreen', on),
   /** Zabezpečení Windows: nastavení Smart App Control / Historie ochrany. */
   openWindowsSecurity: (page: 'smartapp' | 'history'): Promise<void> => ipcRenderer.invoke('app:openWindowsSecurity', page),
   copyDiagnostics: (): Promise<boolean> => ipcRenderer.invoke('app:copyDiagnostics'),

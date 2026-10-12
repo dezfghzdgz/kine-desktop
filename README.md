@@ -142,14 +142,10 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   po konci se zase vypne. V Kine do PC je nad webem čas vysílání
   a „Ukončit“, stránka vysílání s chatem se otevře v okně. Zkouška:
   `KINE_TEST_LIVE_URL` = místní RTMP server (ffmpeg `-listen 1`).
-- **Snímek obrazovky** (zkratka Alt+F8, tlačítko 📷 v panelu, položka
-  v liště): celá obrazovka, ze které se nahrává, v plném rozlišení jako
-  PNG do `Videa\Kine\Screenshots` a rovnou do schránky (vložit do
-  Discordu). Jde i bez hry a bez běžícího zásobníku (`desktopCapturer`).
 - **Momenty v nahrávce zápasu**: každý klip uložený během nahrávání
   (zkratkou i sám ze zabití) je značka v nahrávce. V přehrávači jsou pod
   videem jako tlačítka (skok 10 s před okamžik uložení), v úpravách
-  žluté značky na časové ose, na kartě „🚩 3“. Na Kine jdou jako
+  žluté značky na časové ose, na kartě vlaječka s počtem. Na Kine jdou jako
   **kapitoly** videa (i do popisu: „0:00 Začátek / 4:55 Triple kill“),
   po zkrácení se posunou (`editPlan.shiftMarkers`).
 - **Knihovna klipů** (`src/renderer/settings.ts`): řazení (nejnovější,
@@ -598,3 +594,38 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   možnosti: Microsoft Store (MSIX podepíše Microsoft), SignPath pro open
   source, nebo klasický certifikát (OV). Workflow podpis přes Azure umí,
   až bude k dispozici.
+
+## Novinky 0.10.0
+
+- **Přehlednější nastavení:** záložka Záznam má nahoře sedm ikon (Zkratky,
+  Kvalita, Zvuk, Výkon, Úložiště, Vzhled, Obecné) a ukazuje vždy jen jeden
+  oddíl. U voleb jsou krátké popisky a ikony; vysvětlení se ukáže až po
+  kliknutí na otazníček. Tečka na ikoně oddílu = tam je něco k vyřešení
+  (zvuk je ticho, zkratka nejde…). Upozornění v panelu vedou rovnou na
+  správný oddíl (`settings:audio` apod.).
+- **Ikony místo emoji** v celém okně (postranní panel, karty klipů,
+  přehrávač, Živě, okno po hře, nastavení nahrání) - jedna sada SVG ikon
+  (`src/renderer/icons.ts`), na Windows vypadají stejně jako všude.
+  Na kartě klipu jsou vedlejší akce (složka, přejmenovat, smazat, odkaz,
+  Discord) jen ikonkami s popiskem v bublině.
+- **Zmenšování klipů** (Klipy -> úložiště vpravo nahoře, nebo Úložiště ->
+  Zmenšit klipy): klipy se na pozadí překódují menším datovým tokem
+  (libx264; Jemně / Doporučeno do 1080p / Nejmenší 720p) s odhadem, kolik
+  to ušetří. Když jde ušetřit hodně, údaj o místě se zbarví - nic
+  nevyskakuje. Běží s nejnižší prioritou na polovině jader; když se zapne
+  hra, nahrávání nebo vysílání, rozdělaný klip se odloží a pokračuje se po
+  hře. Původní soubor se nahradí, až je zmenšený v pořádku (stejná délka,
+  má obraz, je opravdu menší); klip otevřený v přehrávači nebo změněný
+  mezitím se nechá. Výpadek uprostřed výměny opraví další start appky
+  (`.kine-orig` zpátky). `src/shared/compress.ts`, `src/main/compress.ts`.
+- **Snímek obrazovky odstraněn** (Windows to umí samo: Win+Shift+S).
+- **Přehrávač přes celou obrazovku:** tlačítko v hlavičce přehrávače
+  (i F a dvojklik), šipky ← → přepínají klipy i přes celou obrazovku; když
+  okno celou obrazovku odmítne, přehrávač vyplní okno roztažené přes
+  obrazovku.
+- **Ikona na ploše:** appka ji po instalaci i po každé aktualizaci vytvoří
+  znovu, když chybí (Nastavení -> Obecné -> Ikona na ploše; vypnutím se
+  smaže). Instalátor ji vytváří vždycky (`createDesktopShortcut: always`).
+- **Plynulejší světlo kolem přehrávače:** barvy z videa se přelévají
+  (desetkrát za sekundu, s prolínáním), neskáčou.
+

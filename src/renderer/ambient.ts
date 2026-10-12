@@ -115,9 +115,14 @@ export type PlayerAmbient = { stop: () => void; draw: () => void };
 
 /**
  * Světlo kolem přehrávače: malé plátno za scénou (ve vrstvě přehrávače),
- * kreslí se z videa pětkrát za sekundu, jen když video hraje a okno je
- * vidět. Přes celou obrazovku se nekreslí (není ho vidět).
+ * kreslí se z videa desetkrát za sekundu, jen když video hraje a okno je
+ * vidět. Barvy se přelévají plynule: každý snímek se do zásobního plátna
+ * přimíchá jen zčásti (exponenciální průměr), takže záře teče s obrazem,
+ * neskáče. Přes celou obrazovku se nekreslí (není ho vidět).
  */
+const AMB_INTERVAL_MS = 100;
+/** Časová konstanta přelévání: za ~0,9 s je nová barva skoro celá. */
+const AMB_TAU_MS = 300;
 export function playerAmbient(video: HTMLVideoElement, stage: HTMLElement, layer: HTMLElement): PlayerAmbient | null {
   if (!followOn()) return null;
   const canvas = document.createElement('canvas');
@@ -127,9 +132,16 @@ export function playerAmbient(video: HTMLVideoElement, stage: HTMLElement, layer
   canvas.setAttribute('aria-hidden', 'true');
   const ctx = canvas.getContext('2d');
   if (!ctx) return null;
+  // Zásobní plátno s průměrem posledních snímků (rozmazané, bez okrajové masky).
+  const acc = document.createElement('canvas');
+  acc.width = AMB_W;
+  acc.height = AMB_H;
+  const actx = acc.getContext('2d');
+  if (!actx) return null;
   layer.prepend(canvas);
   let frames = 0;
   let stopped = false;
+  let lastDraw = 0;
 
   const place = (): DOMRect | null => {
     const r = stage.getBoundingClientRect();
@@ -164,14 +176,22 @@ export function playerAmbient(video: HTMLVideoElement, stage: HTMLElement, layer
     }
     const sx = AMB_IW / r.width;
     const sy = AMB_IH / r.height;
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.clearRect(0, 0, AMB_W, AMB_H);
-    ctx.filter = 'blur(3px) saturate(1.6) brightness(1.15)';
+    // Nový snímek do průměru: první celý, další jen zčásti (podle času od minulého) - barvy tečou.
+    const now = performance.now();
+    const alpha = frames === 0 || !lastDraw ? 1 : 1 - Math.exp(-Math.min(1000, now - lastDraw) / AMB_TAU_MS);
+    lastDraw = now;
+    actx.globalAlpha = alpha;
+    actx.filter = 'blur(3px) saturate(1.6) brightness(1.15)';
     try {
-      ctx.drawImage(video, AMB_X + ((r.width - fw) / 2) * sx, AMB_Y + ((r.height - fh) / 2) * sy, fw * sx, fh * sy);
+      actx.drawImage(video, AMB_X + ((r.width - fw) / 2) * sx, AMB_Y + ((r.height - fh) / 2) * sy, fw * sx, fh * sy);
     } catch {
       return;
     }
+    actx.globalAlpha = 1;
+    actx.filter = 'none';
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0, 0, AMB_W, AMB_H);
+    ctx.drawImage(acc, 0, 0);
     // Záře do ztracena: elipsa podle tvaru plátna.
     ctx.filter = 'none';
     ctx.save();
@@ -191,7 +211,7 @@ export function playerAmbient(video: HTMLVideoElement, stage: HTMLElement, layer
 
   const timer = setInterval(() => {
     if (!video.paused && !document.hidden) draw();
-  }, 200);
+  }, AMB_INTERVAL_MS);
   const onReady = () => draw();
   video.addEventListener('loadeddata', onReady);
   video.addEventListener('seeked', onReady);

@@ -93,8 +93,6 @@ export type Settings = {
   toggleHotkey: string;
   /** Zkratka start/stop nahrávání celého zápasu (prázdné = vypnuto). */
   recordHotkey: string;
-  /** Zkratka na snímek obrazovky (PNG do složky Screenshots + do schránky; prázdné = vypnuto). */
-  screenshotHotkey: string;
   /** Kvalita živého vysílání na Kine (tlačítko Vysílat). */
   liveQuality: LiveQuality;
   /** Název posledního vysílání (předvyplní se příště). */
@@ -196,6 +194,11 @@ export type Settings = {
   /** Jazyk videí na Kine (kód jako v appce: cs, en, ...). */
   videoLanguage: string;
   startWithSystem: boolean;
+  /**
+   * Ikona (zástupce) na ploše: po instalaci a po každé aktualizaci se vytvoří
+   * znovu, když chybí; vypnutí ji smaže. Zástupce v nabídce Start je vždycky.
+   */
+  desktopShortcut: boolean;
   /** Malé okénko v rohu po uložení klipu. Když nejde (fullscreen), aspoň systémové oznámení. */
   toast: boolean;
   /** Složka s klipy; prázdné = Videa/Kine. */
@@ -301,6 +304,26 @@ export type Clip = {
    * jestli klip uložit jen se zvukem hry, jen s mikrofonem, nebo se vším.
    */
   audioTracks?: ('mix' | 'game' | 'mic')[];
+  /** Klip zmenšený (Klipy -> úložiště): jakou úrovní, kdy a kolik měl předtím. */
+  compressed?: { level: 'light' | 'medium' | 'strong'; at: string; originalBytes: number };
+};
+
+/**
+ * Zmenšování klipů na pozadí: kolik je hotovo, kolik se ušetřilo, jestli
+ * čeká na konec hry. finishedAt = doběhlo (okno ukáže "Ušetřeno X").
+ */
+export type CompressStatus = {
+  running: boolean;
+  level: 'light' | 'medium' | 'strong';
+  total: number;
+  done: number;
+  skipped: number;
+  savedBytes: number;
+  /** Průběh právě zmenšovaného klipu (0-100). */
+  percent: number;
+  /** Čeká, až hra skončí. */
+  paused: boolean;
+  finishedAt: number | null;
 };
 
 /** Jak dlouho klip leží v koši, než zmizí sám. */
@@ -386,6 +409,8 @@ export type Status = {
   smartAppControl: SmartAppControlState | null;
   /** Windows (Smart App Control / App Control) nepustí pomocníka - zkratky z více kláves a přesné poznání hry nejdou. */
   helperBlocked: boolean;
+  /** Zmenšování klipů (Klipy -> úložiště); null = neběží ani nedoběhlo. */
+  compress: CompressStatus | null;
   /** Průhledné okno je zapnuté (Windows 11, Acrylic) - pozadí okna prosvítá. */
   windowGlass: boolean;
   /** Umí tenhle systém průhledné okno (Windows 11 22H2+)? */

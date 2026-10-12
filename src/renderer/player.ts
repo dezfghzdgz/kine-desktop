@@ -3,6 +3,7 @@ import type { Key } from '../shared/i18n';
 import { chapterTime, MARKER_LEAD_SECONDS } from '../shared/upload';
 import { clear, errorText, fileUrl, formatBytes, h } from './ui';
 import { followImage, playerAmbient, type PlayerAmbient } from './ambient';
+import { icon } from './icons';
 
 /**
  * Přehrávač klipu jako vrstva přes celé okno (lightbox): mřížka klipů pod
@@ -70,6 +71,13 @@ export type PlayerOptions = {
   onCopyLink?: (clip: Clip) => void;
   /** Rovnou otevřít úpravy (tlačítko Upravit na kartě). */
   startEditing?: boolean;
+  /**
+   * Celá obrazovka bez Fullscreen API (když ho okno odmítne): okno se přepne
+   * přes celou obrazovku a scéna ho vyplní. Bez tohohle zůstane jen API.
+   */
+  setWindowFullscreen?: (on: boolean) => void;
+  /** Přepnuto na jiný klip (šipky) - okno ví, který soubor přehrávač drží. */
+  onClipChange?: (clip: Clip) => void;
   /** Bez tohohle se klip jen přehrává (žádné tlačítko Upravit). */
   edit?: {
     run: (clip: Clip, request: TrimRequest) => Promise<Clip>;
@@ -267,11 +275,11 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   // Náhled textu (v úpravách) - přesně ten obrázek, který se pak položí do videa.
   const textLayer = h('div', { class: 'text-preview hidden' });
   // Přes celou obrazovku: šipky po stranách (předchozí / další klip), nahoře název, pozice a zavření.
-  const stagePrev = h('button', { class: 'stage-nav prev', title: `${t('playerPrev')} (↑)`, 'aria-label': t('playerPrev'), onclick: () => go(-1) }, '‹');
-  const stageNext = h('button', { class: 'stage-nav next', title: `${t('playerNext')} (↓)`, 'aria-label': t('playerNext'), onclick: () => go(1) }, '›');
+  const stagePrev = h('button', { class: 'stage-nav prev', title: `${t('playerPrev')} (←)`, 'aria-label': t('playerPrev'), onclick: () => go(-1) }, icon('chevronLeft', 34));
+  const stageNext = h('button', { class: 'stage-nav next', title: `${t('playerNext')} (→)`, 'aria-label': t('playerNext'), onclick: () => go(1) }, icon('chevronRight', 34));
   const stageTitle = h('span', { class: 'stage-title' });
   const stagePos = h('span', { class: 'stage-pos' });
-  const fullscreenBtn = h('button', { class: 'stage-fullscreen', title: `${t('playerFullscreen')} (F)`, 'aria-label': t('playerFullscreen'), onclick: () => toggleFullscreen() }, '⛶');
+  const fullscreenBtn = h('button', { class: 'stage-fullscreen', title: `${t('playerFullscreen')} (F)`, 'aria-label': t('playerFullscreen'), onclick: () => toggleFullscreen() }, icon('expand', 18));
   const stageTop = h('div', { class: 'stage-top' }, stageTitle, stagePos);
   const stageChrome = [stagePrev, stageNext, stageTop, fullscreenBtn];
   const stage = h('div', { class: 'player-stage' }, video, shadeLeft, shadeRight, textLayer, ...stageChrome);
@@ -280,8 +288,10 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const titleEl = h('div', { class: 'title' });
   /** "3 / 24" - kde v seznamu klip je (jen se sousedy). */
   const positionEl = h('span', { class: 'player-pos faint hidden' });
-  const editBtn = h('button', { class: 'small quiet', onclick: () => toggleEdit() }, t('libraryEdit'));
-  const copyBtn = h('button', { class: 'small quiet player-copy hidden', onclick: () => { if (options.onCopyLink) { options.onCopyLink(clip); showNote(t('linkCopied'), 'ok'); } } }, '🔗 ' + t('libraryCopyLink'));
+  const editBtn = h('button', { class: 'small quiet player-edit', onclick: () => toggleEdit() }, icon('scissors', 15), t('libraryEdit'));
+  const copyBtn = h('button', { class: 'small quiet player-copy hidden', onclick: () => { if (options.onCopyLink) { options.onCopyLink(clip); showNote(t('linkCopied'), 'ok'); } } }, icon('link', 15), t('libraryCopyLink'));
+  // Celá obrazovka i v hlavičce - tlačítko na scéně se ukáže až po najetí myší.
+  const headFullBtn = h('button', { class: 'small quiet player-full', title: `${t('playerFullscreen')} (F)`, onclick: () => toggleFullscreen() }, icon('expand', 15), t('playerFullscreen'));
   const note = h('div', { class: 'player-note hidden' });
   const trim = h('div', { class: 'trim hidden' });
   const box = h(
@@ -295,9 +305,10 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
         'div',
         { class: 'row', style: 'flex-wrap:nowrap' },
         options.onCopyLink ? copyBtn : null,
+        headFullBtn,
         edit ? editBtn : null,
-        h('button', { class: 'small quiet', onclick: () => options.onOpenExternal(clip) }, t('playerOpenExternal')),
-        h('button', { class: 'small quiet player-close', title: t('playerClose'), onclick: () => close() }, '✕')
+        h('button', { class: 'small quiet', title: t('playerOpenExternal'), onclick: () => options.onOpenExternal(clip) }, icon('external', 15), t('playerOpenExternal')),
+        h('button', { class: 'small quiet player-close', title: t('playerClose'), 'aria-label': t('playerClose'), onclick: () => close() }, icon('close', 16))
       )
     ),
     stage,
@@ -306,8 +317,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     note
   );
   // Šipky po stranách: předchozí / další klip v seznamu (i klávesy ↑ ↓).
-  const prevBtn = h('button', { class: 'player-nav prev hidden', title: `${t('playerPrev')} (↑)`, onclick: () => go(-1) }, '‹');
-  const nextBtn = h('button', { class: 'player-nav next hidden', title: `${t('playerNext')} (↓)`, onclick: () => go(1) }, '›');
+  const prevBtn = h('button', { class: 'player-nav prev hidden', title: `${t('playerPrev')} (←)`, 'aria-label': t('playerPrev'), onclick: () => go(-1) }, icon('chevronLeft', 28));
+  const nextBtn = h('button', { class: 'player-nav next hidden', title: `${t('playerNext')} (→)`, 'aria-label': t('playerNext'), onclick: () => go(1) }, icon('chevronRight', 28));
   const overlay = h('div', { class: 'overlay' }, prevBtn, box, nextBtn);
   overlay.addEventListener('mousedown', (e) => {
     if (e.target === overlay) close();
@@ -331,10 +342,36 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   }
 
   // ---- celá obrazovka -------------------------------------------------------------------
-  /** Celá obrazovka = scéna (video + šipky), ne holé video - ať jde i tam přeskakovat mezi klipy. */
+  /**
+   * Celá obrazovka = scéna (video + šipky), ne holé video - ať jde i tam
+   * přeskakovat mezi klipy. Když okno Fullscreen API odmítne, přepne se
+   * přes celou obrazovku samo okno a scéna ho vyplní ("náhradní" režim).
+   */
+  function isFull(): boolean {
+    return document.fullscreenElement === stage || stage.classList.contains('pseudo-full');
+  }
   function toggleFullscreen() {
+    if (isFull()) {
+      exitFullscreen();
+      return;
+    }
+    stage.requestFullscreen().catch(() => enterPseudoFullscreen());
+  }
+  function enterPseudoFullscreen() {
+    if (closed || !options.setWindowFullscreen) return;
+    stage.classList.add('pseudo-full');
+    document.body.classList.add('player-pseudo-full');
+    options.setWindowFullscreen(true);
+    onFullscreenChange();
+  }
+  function exitFullscreen() {
     if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
-    else void stage.requestFullscreen().catch(() => undefined);
+    if (stage.classList.contains('pseudo-full')) {
+      stage.classList.remove('pseudo-full');
+      document.body.classList.remove('player-pseudo-full');
+      options.setWindowFullscreen?.(false);
+      onFullscreenChange();
+    }
   }
   // Ovládání v celé obrazovce se po chvíli bez pohybu myši schová (jako v přehrávačích).
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -342,7 +379,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     stage.classList.remove('idle');
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      if (document.fullscreenElement === stage) stage.classList.add('idle');
+      if (isFull()) stage.classList.add('idle');
     }, 2500);
   };
   stage.addEventListener('mousemove', wake);
@@ -353,9 +390,11 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       void document.exitFullscreen().then(() => stage.requestFullscreen()).catch(() => undefined);
       return;
     }
-    const full = document.fullscreenElement === stage;
+    const full = isFull();
     stage.classList.toggle('fullscreen', full);
     fullscreenBtn.title = `${full ? t('playerExitFullscreen') : t('playerFullscreen')} (F)`;
+    clear(fullscreenBtn);
+    fullscreenBtn.append(icon(full ? 'shrink' : 'expand', 18));
     if (full) wake();
     else stage.classList.remove('idle');
     onResize();
@@ -374,6 +413,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   function show(next: Clip) {
     if (closed) return;
     clip = { ...next };
+    options.onClipChange?.(clip);
     duration = clip.durationSeconds > 0 ? clip.durationSeconds : 0;
     start = 0;
     end = duration;
@@ -448,7 +488,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   // Formát: původní / na výšku (a kde výřez leží) / GIF.
   const formatBtns: Record<ExportFormat, HTMLButtonElement> = {
     original: h('button', { class: 'small quiet seg active', onclick: () => setFormat('original') }, t('exportOriginal')),
-    vertical: h('button', { class: 'small quiet seg', onclick: () => setFormat('vertical') }, '📱 ' + t('exportVertical')),
+    vertical: h('button', { class: 'small quiet seg', onclick: () => setFormat('vertical') }, icon('phone', 14), t('exportVertical')),
     gif: h('button', { class: 'small quiet seg', onclick: () => setFormat('gif') }, t('exportGif', { max: GIF_MAX_SECONDS })),
   };
   const anchorBtns: Record<CropAnchor, HTMLButtonElement> = {
@@ -525,10 +565,10 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       h('span', { class: 'grow' }),
       h('button', { class: 'small quiet', onclick: () => setStart(video.currentTime) }, t('trimSetStart')),
       h('button', { class: 'small quiet', onclick: () => setEnd(video.currentTime) }, t('trimSetEnd')),
-      h('button', { class: 'small quiet', onclick: () => playSelection() }, '▶ ' + t('trimPlaySelection')),
+      h('button', { class: 'small quiet', onclick: () => playSelection() }, icon('play', 13), t('trimPlaySelection')),
       muteLabel,
       audioLabel,
-      edit?.thumbnail ? h('button', { class: 'small quiet thumb-frame', title: t('thumbFrameHint'), onclick: () => void useFrameAsThumb() }, '📷 ' + t('thumbFrame')) : null
+      edit?.thumbnail ? h('button', { class: 'small quiet thumb-frame', title: t('thumbFrameHint'), onclick: () => void useFrameAsThumb() }, icon('image', 14), t('thumbFrame')) : null
     ),
     h('p', { class: 'hint' }, t('trimHint')),
     h('div', { class: 'row', style: 'gap:6px' }, h('span', { class: 'faint', style: 'margin-right:4px' }, t('exportFormat')), formatBtns.original, formatBtns.vertical, edit?.gif ? formatBtns.gif : null),
@@ -697,7 +737,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     const list = markerList();
     clear(markersRow);
     markersRow.classList.toggle('hidden', list.length === 0);
-    if (list.length > 0) markersRow.append(h('span', { class: 'faint', title: t('playerMarkersHint') }, '🚩 ' + t('playerMarkers')));
+    if (list.length > 0) markersRow.append(h('span', { class: 'faint', title: t('playerMarkersHint') }, icon('flag', 13), ' ', t('playerMarkers')));
     for (const m of list) {
       const at = Math.max(0, m.time - MARKER_LEAD_SECONDS);
       markersRow.append(
@@ -1027,23 +1067,32 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   // ---- klávesy ----------------------------------------------------------------------
   const onKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape') {
+      // Opravdovou celou obrazovku zavře Escape sám prohlížeč; náhradní (okno) tady.
       if (document.fullscreenElement) return;
       e.stopPropagation();
       e.preventDefault();
-      close();
+      if (stage.classList.contains('pseudo-full')) exitFullscreen();
+      else close();
       return;
     }
     const target = e.target as HTMLElement | null;
-    if (target && (target === video || /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(target.tagName))) return;
+    // Psaní do polí (název, text přes video) má své klávesy; tlačítko mezerníkem/Enterem zmáčkne samo sebe.
+    if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+    if (target && target.tagName === 'BUTTON' && (e.key === ' ' || e.key === 'Enter')) return;
     if (broken) return;
-    if (e.key === ' ') {
+    // Klávesy obsluhuje přehrávač vždycky sám - i když má fokus video (to by šipkami měnilo hlasitost).
+    const hasNeighbors = (options.neighbors?.(clip.id)?.total ?? 0) > 1;
+    if (e.key === ' ' || e.key === 'k' || e.key === 'K') {
       e.preventDefault();
       if (video.paused) void video.play().catch(() => undefined);
       else video.pause();
     } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       e.preventDefault();
-      const step = (e.shiftKey ? 5 : 1) * (e.key === 'ArrowLeft' ? -1 : 1);
-      video.currentTime = clamp(video.currentTime + step, 0, duration || video.duration || 0);
+      const dir = e.key === 'ArrowLeft' ? -1 : 1;
+      // Při prohlížení (i přes celou obrazovku) šipky přepínají klipy - jako šipky po stranách.
+      // S Shiftem, v úpravách a u jediného klipu se posouvá čas.
+      if (!editing && !e.shiftKey && hasNeighbors) go(dir);
+      else video.currentTime = clamp(video.currentTime + (e.shiftKey ? 5 : 1) * dir, 0, duration || video.duration || 0);
     } else if (e.key === 'ArrowUp' || e.key === 'PageUp') {
       e.preventDefault();
       go(-1);
@@ -1074,6 +1123,11 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     document.removeEventListener('fullscreenchange', onFullscreenChange);
     if (idleTimer) clearTimeout(idleTimer);
     if (document.fullscreenElement === stage) void document.exitFullscreen().catch(() => undefined);
+    if (stage.classList.contains('pseudo-full')) {
+      stage.classList.remove('pseudo-full');
+      document.body.classList.remove('player-pseudo-full');
+      options.setWindowFullscreen?.(false);
+    }
     window.removeEventListener('resize', onResize);
     if (raf) cancelAnimationFrame(raf);
     if (guard) clearTimeout(guard);

@@ -179,12 +179,9 @@ test('výkon appky: tři profily, neplatná hodnota = vyvážený, řazení knih
 
 import { parseHashtags, formatHashtags, markerChapters, chaptersText, chapterTime, MARKER_LEAD_SECONDS } from '../dist/esm/upload.js';
 
-test('snímek obrazovky: výchozí zkratka Alt+F8, jde vypnout, nesmysl = výchozí', () => {
-  assert.equal(DEFAULT_SETTINGS.screenshotHotkey, 'Alt+F8');
-  assert.equal(sanitizeSettings({ screenshotHotkey: '' }).screenshotHotkey, '');
-  assert.equal(sanitizeSettings({ screenshotHotkey: 'Ctrl+F9' }).screenshotHotkey, 'Ctrl+F9');
-  assert.equal(sanitizeSettings({ screenshotHotkey: 'Ctrl+' }).screenshotHotkey, 'Alt+F8');
-  assert.equal(sanitizeSettings({}).screenshotHotkey, 'Alt+F8');
+test('snímek obrazovky už v appce není: stará zkratka z nastavení zmizí', () => {
+  assert.equal('screenshotHotkey' in DEFAULT_SETTINGS, false);
+  assert.equal('screenshotHotkey' in sanitizeSettings({ screenshotHotkey: 'Alt+F8' }), false);
 });
 
 test('momenty nahrávky -> kapitoly: začátek, kousek před uložením, aspoň 10 s od sebe, jen uvnitř nahrávky', () => {

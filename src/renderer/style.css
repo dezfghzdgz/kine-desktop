@@ -138,6 +138,12 @@ button:active:not(:disabled) {
   transition-duration: 60ms;
 }
 button:disabled { opacity: 0.45; cursor: default; }
+/* Ikony (src/renderer/icons.ts): v tlačítku s textem kousek před textem. Tlačítko s ikonou je
+   řádek (ikona + text s mezerou); :where = nulová váha, vlastní rozložení tlačítka (záložky,
+   dlaždice oddílů, ikonková tlačítka) má vždycky přednost. */
+.icon { display: inline-block; flex: none; vertical-align: -0.2em; }
+:where(button:has(> .icon)) { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+button > .icon:only-child { vertical-align: middle; }
 button:focus-visible { outline: none; box-shadow: inset 0 1px 0 var(--glass-highlight), inset 0 0 0 1px var(--glass-line-strong), var(--focus-ring); }
 /* Hlavní akce: světlejší sklo, tučnější text - jako výchozí tlačítko na webu. */
 button.primary { font-weight: 600; background-color: var(--glass-fill-strong-hover); box-shadow: inset 0 1px 0 var(--glass-highlight), inset 0 0 0 1px var(--glass-line-strong); }
@@ -366,6 +372,9 @@ kbd {
 .player-close { width: 32px; padding: 0 !important; font-size: 14px; }
 .player-stage { position: relative; background: #000; min-height: 200px; display: flex; align-items: center; justify-content: center; }
 .player-video { display: block; width: 100%; max-height: 72vh; background: #000; outline: none; }
+/* Tlačítko celé obrazovky ve vestavěném ovládání videa je vypnuté (celá obrazovka je celá scéna
+   se šipkami) - schovat, ať nikdo neklikne na šedé tlačítko, které nic nedělá. */
+.player-video::-webkit-media-controls-fullscreen-button { display: none !important; }
 .player-box.editing .player-video { max-height: 50vh; }
 .player-error { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 200px; padding: 20px; color: var(--text-dim); text-align: center; }
 .player-error p { margin: 0; max-width: 520px; }
@@ -381,8 +390,8 @@ kbd {
 
 /* Šipky po stranách vrstvy: předchozí / další klip v seznamu (i ↑ ↓). */
 .player-nav {
-  flex: none; width: 52px; height: 52px; min-height: 0; padding: 0 0 4px; margin: 0 14px; border-radius: 50%;
-  display: grid; place-items: center; font-size: 34px; line-height: 1; color: var(--text);
+  flex: none; width: 52px; height: 52px; min-height: 0; padding: 0; margin: 0 14px; border-radius: 50%;
+  display: grid; place-items: center; line-height: 1; color: var(--text);
   background: var(--glass-bg-strong); background-image: none;
   box-shadow: inset 0 1px 0 var(--glass-highlight), inset 0 0 0 1px var(--glass-line), var(--shadow-md);
   animation: box-in var(--dur-2) var(--ease);
@@ -396,8 +405,10 @@ kbd {
   .player-nav.next { right: 8px; }
 }
 
-/* Celá obrazovka (F, dvojklik, ⛶): celá scéna - video, šipky na předchozí / další klip,
-   nahoře název a pozice. Ovládání se po chvíli bez pohybu myši schová. */
+/* Celá obrazovka (F, dvojklik, tlačítko v hlavičce i na scéně): celá scéna - video, šipky na
+   předchozí / další klip (i klávesy ← →), nahoře název a pozice. Ovládání se po chvíli bez
+   pohybu myši schová. "pseudo-full" = náhradní režim, když okno Fullscreen API odmítne: okno je
+   přes celou obrazovku a scéna ho vyplní. */
 .player-stage .stage-nav, .player-stage .stage-top { display: none; }
 .player-stage .stage-fullscreen {
   position: absolute; top: 10px; right: 10px; z-index: 4; width: 36px; height: 36px; min-height: 0; padding: 0;
@@ -407,11 +418,13 @@ kbd {
 }
 .player-stage:hover .stage-fullscreen, .player-stage .stage-fullscreen:focus-visible { opacity: 1; }
 .player-stage.fullscreen { width: 100vw; height: 100vh; background: #000; }
+.player-stage.pseudo-full { position: fixed; inset: 0; z-index: 1000; }
+body.player-pseudo-full .overlay, body.player-pseudo-full .player-box { transform: none !important; filter: none !important; backdrop-filter: none !important; animation: none !important; }
 .player-stage.fullscreen .player-video { width: 100%; height: 100%; max-height: none; object-fit: contain; }
 .player-stage.fullscreen .stage-fullscreen { opacity: 1; top: 16px; right: 16px; }
 .player-stage.fullscreen .stage-nav {
   display: grid; place-items: center; position: absolute; top: 50%; z-index: 4; width: 64px; height: 64px; min-height: 0;
-  margin-top: -32px; padding: 0 0 5px; border-radius: 50%; font-size: 44px; line-height: 1; color: #fff;
+  margin-top: -32px; padding: 0; border-radius: 50%; line-height: 1; color: #fff;
   background: rgba(10, 10, 14, 0.55); background-image: none; backdrop-filter: blur(10px);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), inset 0 0 0 1px rgba(255, 255, 255, 0.16), 0 10px 30px rgba(0, 0, 0, 0.5);
   transition: opacity var(--dur-2) var(--ease), background-color var(--dur-2) var(--ease), color var(--dur-2) var(--ease);
@@ -586,7 +599,6 @@ button.side-audio-warn:hover { text-decoration: underline; background: none; }
 .tl-ticks { position: absolute; left: 0; right: 0; top: 0; bottom: 0; pointer-events: none; }
 .tl-tick { position: absolute; top: 10px; width: 3px; height: 24px; margin-left: -1px; border-radius: 2px; background: #ffd23f; box-shadow: 0 0 3px rgba(0, 0, 0, 0.6); z-index: 2; }
 .trim-text { flex: 1 1 220px; min-width: 180px; width: auto; min-height: 32px; padding: 4px 10px; }
-.side-actions button.side-shot { flex: 0 0 auto; width: 40px; padding: 4px 0; }
 
 /* Živé vysílání: tlačítko v panelu, dialog */
 .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); margin-right: 6px; vertical-align: 1px; }
@@ -830,3 +842,115 @@ html[data-look="glass"] ::-webkit-scrollbar-track { background: transparent; }
 .color-row .swatch.active { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--text); }
 .color-row .swatch.custom { display: grid; place-items: center; position: relative; overflow: hidden; cursor: pointer; background: transparent; border: 1px dashed var(--border); color: var(--text-faint); font-size: 14px; }
 .color-row .swatch.custom .color-input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; min-height: 0; padding: 0; }
+
+/* ---- Nápověda pod otazníčkem, nadpisy panelů s ikonou ---- */
+.help-btn {
+  width: 26px; height: 26px; min-height: 0; padding: 0; border-radius: 50%; flex: none;
+  display: inline-grid; place-items: center; color: var(--text-faint);
+  background: transparent; background-image: none; box-shadow: none;
+}
+.help-btn:hover:not(:disabled), .help-btn.open { color: var(--brand); background-color: var(--glass-fill); }
+.help-text {
+  margin: 2px 0 0; padding: 8px 12px; border-radius: var(--radius-md);
+  font-size: var(--fs-sm); line-height: 1.5; color: var(--text-dim);
+  background: var(--glass-fill); box-shadow: inset 0 0 0 1px var(--glass-line);
+  animation: box-in var(--dur-2) var(--ease);
+}
+.panel-title { display: flex; align-items: center; gap: 6px; }
+.panel-title h2 { display: flex; align-items: center; gap: 10px; margin: 0; flex: 1; min-width: 0; }
+.panel-title h2 .icon { color: var(--brand); }
+
+/* ---- Úložiště v hlavičce Klipů a zmenšování ---- */
+.storage-pill { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.storage-pill.worth { color: var(--text); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.45); }
+.storage-pill.worth .storage-save { color: var(--brand); }
+.storage-pill.active { color: var(--brand); }
+.storage-pill.running { color: var(--text); }
+.storage-pill.done { color: var(--brand); }
+.compress-panel { animation: box-in var(--dur-2) var(--ease); }
+.compress-levels { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.compress-level {
+  position: relative; display: grid; gap: 2px; padding: 10px 12px; border-radius: var(--radius-md); cursor: pointer;
+  background: var(--glass-fill); box-shadow: inset 0 0 0 1px var(--glass-line);
+  transition: box-shadow var(--dur-2) var(--ease), background-color var(--dur-2) var(--ease);
+}
+.compress-level input { position: absolute; opacity: 0; pointer-events: none; }
+.compress-level.active { background: rgba(var(--brand-rgb), 0.1); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.6); }
+.compress-level-name { font-weight: 600; }
+.compress-level-hint { font-size: var(--fs-sm); color: var(--text-faint); }
+.compress-level-saving { font-size: var(--fs-sm); color: var(--brand); font-variant-numeric: tabular-nums; }
+.compress-bar { height: 6px; border-radius: 3px; }
+@media (max-width: 760px) { .compress-levels { grid-template-columns: 1fr; } }
+
+/* =====================================================================
+   PŘEHLEDNĚJŠÍ NASTAVENÍ (0.10): oddíly s ikonami, krátké popisky,
+   vysvětlení pod otazníčkem, ikonky místo emoji.
+   ===================================================================== */
+/* Řada oddílů nahoře v Nastavení: ikona nad krátkým názvem, vybraný v barvě Kine. */
+.section-nav { display: grid; grid-template-columns: repeat(auto-fit, minmax(78px, 1fr)); gap: 6px; }
+.section-chip {
+  position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
+  min-height: 62px; padding: 9px 6px 8px; border-radius: var(--radius-md);
+  font-size: var(--fs-xs); font-weight: 500; color: var(--text-dim); text-align: center;
+  background-color: var(--panel); background-image: none; box-shadow: inset 0 0 0 1px var(--border);
+}
+.section-chip .icon { color: var(--text-faint); transition: color var(--dur-2) var(--ease); }
+.section-chip .section-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.section-chip:hover:not(:disabled) { color: var(--text); background-color: var(--panel-raised); }
+.section-chip:hover .icon, .section-chip.active .icon { color: var(--brand); }
+.section-chip.active { color: var(--text); font-weight: 600; background-color: rgba(var(--brand-rgb), 0.1); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.6); }
+.section-warn { position: absolute; top: 7px; right: 8px; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 6px rgba(255, 200, 87, 0.7); }
+
+/* Volba: zaškrtávátko / přepínač, ikonka, krátký popisek a otazníček vedle. */
+.opt { display: flex; flex-direction: column; gap: 4px; }
+.opt-row { display: flex; align-items: flex-start; gap: 2px; }
+.opt-row .check { flex: 0 1 auto; min-width: 0; }
+.opt-row .help-btn { margin-top: -2px; }
+.check.disabled { cursor: default; }
+.check.disabled > span { color: var(--text-dim); }
+.opt-icon { color: var(--text-faint); margin-right: 7px; vertical-align: -3px; transition: color var(--dur-2) var(--ease); }
+.check input:checked + span > .opt-icon { color: var(--brand); }
+
+/* Pole s popiskem nahoře (výběr, číslo, text) a otazníčkem u popisku. */
+.field-head { display: flex; align-items: center; gap: 2px; min-height: 22px; }
+.field-label { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); color: var(--text-dim); }
+.field-label .icon { color: var(--text-faint); }
+.field-head .help-btn { width: 22px; height: 22px; }
+.field-row { align-items: flex-start; gap: 12px; }
+.field-row > .field { min-width: 150px; }
+.field textarea { width: 100%; }
+
+/* Nadpisy panelů a stránek s ikonou; věci vpravo (předvolby) se na úzkém okně zalomí. */
+.panel-title { flex-wrap: wrap; }
+.panel-title-right { margin-left: auto; }
+.page-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.page-title h1 { margin: 0; }
+.page-title-main { gap: 8px; align-items: center; }
+.icon-title { display: flex; align-items: center; gap: 8px; }
+.icon-title .icon { color: var(--brand); flex: none; }
+
+/* Karta klipu: hlavní akce s textem, vedlejší jen ikonkami vpravo. */
+.clip .actions { align-items: center; }
+.card-tools { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+button.icon-btn { width: 32px; padding: 0 !important; display: inline-grid; place-items: center; }
+button.icon-btn.danger:hover:not(:disabled) { background-color: rgba(255, 107, 107, 0.12); }
+.card-tools .delete-confirm { white-space: nowrap; }
+.game-chip { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; }
+.game-chip .chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+.clip .thumb .play-badge { padding-left: 0; }
+.clip .thumb .kind-badge { display: inline-flex; align-items: center; gap: 4px; }
+.kind-moments { display: inline-flex; align-items: center; gap: 3px; }
+
+/* Postranní panel: řádky s ikonkou (baterie, aktualizace, upozornění). */
+.side-sub.side-line { display: flex; align-items: center; justify-content: flex-start; gap: 6px; text-align: left; }
+.side-sub.side-line .icon { flex: none; }
+.side-notice .notice-icon { flex: none; margin-top: 2px; color: var(--warn); }
+.side-notice.info .notice-icon { color: var(--text-dim); }
+.side-actions .side-live .live-icon { color: var(--danger); }
+.side-actions button.small { gap: 5px; }
+
+/* Zvuk: měřáky a posuvníky s ikonkou. */
+.meter-label { display: inline-flex; align-items: center; gap: 6px; }
+.gain-row { display: flex; align-items: center; gap: 4px; }
+.gain-row .gain { flex: 1; min-width: 0; }
+.gain > span { display: inline-flex; align-items: center; gap: 4px; }

@@ -4,6 +4,7 @@ import type { Key } from '../shared/i18n';
 import { gameHashtag } from '../shared/clipNaming';
 import { chaptersText, formatHashtags, markerChapters, parseHashtags } from '../shared/upload';
 import { clear, h, isPortrait, thumbImages } from './ui';
+import { icon, type IconName } from './icons';
 
 /**
  * Nastavení nahrání na Kine - to samé, co má web ve formuláři nahrávání:
@@ -169,7 +170,7 @@ export function openUploadDialog(options: UploadDialogOptions): UploadDialogHand
   const visHint = h('p', { class: 'hint', style: 'margin:0' });
   const VIS_LABEL: Record<Visibility, Key> = { public: 'visibilityPublic', subscribers: 'visibilitySubscribers', private: 'visibilityPrivate' };
   const VIS_HINT: Record<Visibility, Key> = { public: 'visibilityPublicHint', subscribers: 'visibilitySubscribersHint', private: 'visibilityPrivateHint' };
-  const VIS_ICON: Record<Visibility, string> = { public: '🌍', subscribers: '👥', private: '🔒' };
+  const VIS_ICON: Record<Visibility, IconName> = { public: 'globe', subscribers: 'users', private: 'lock' };
   function setVisibility(v: Visibility) {
     visibility = v;
     for (const [key, btn] of visButtons) btn.classList.toggle('active', key === v);
@@ -179,7 +180,7 @@ export function openUploadDialog(options: UploadDialogOptions): UploadDialogHand
     'div',
     { class: 'row seg-row', role: 'radiogroup' },
     ...VISIBILITIES.map((v) => {
-      const btn = h('button', { type: 'button', class: 'small quiet seg', 'data-visibility': v, onclick: () => setVisibility(v) }, `${VIS_ICON[v]} ${t(VIS_LABEL[v])}`);
+      const btn = h('button', { type: 'button', class: 'small quiet seg', 'data-visibility': v, onclick: () => setVisibility(v) }, icon(VIS_ICON[v], 14), t(VIS_LABEL[v]));
       visButtons.set(v, btn);
       return btn;
     })
@@ -231,8 +232,8 @@ export function openUploadDialog(options: UploadDialogOptions): UploadDialogHand
     h(
       'div',
       { class: 'player-head' },
-      h('div', { class: 'title' }, '⬆ ' + (single ? t('uploadDialogTitle') : t('uploadDialogTitleMany', { count: clips.length }))),
-      h('button', { class: 'small quiet player-close', title: t('close'), onclick: () => { options.onCancel?.(); close(); } }, '✕')
+      h('div', { class: 'title icon-title' }, icon('upload', 16), h('span', {}, single ? t('uploadDialogTitle') : t('uploadDialogTitleMany', { count: clips.length }))),
+      h('button', { class: 'small quiet player-close', title: t('close'), 'aria-label': t('close'), onclick: () => { options.onCancel?.(); close(); } }, icon('close', 14))
     ),
     h(
       'div',

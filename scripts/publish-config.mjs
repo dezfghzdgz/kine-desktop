@@ -10,10 +10,21 @@
 //                          např. https://pub-xxxx.r2.dev nebo https://stahnout.kine.cz)
 //                          -> aktualizace se berou z <BASE>/full/ resp. <BASE>/clipper/
 //                          ("generic"), GitHub Releases zůstávají jako záloha
+//  KINE_SIGN=certum + KINE_SIGN_SHA1
+//                          -> podpis certifikátem Certum (SimplySign) z úložiště
+//                          Windows; obojí nastaví `node scripts/podpis.mjs priprav`
+//                          po přihlášení (tajemství CERTUM_USERNAME, CERTUM_TOTP).
+//                          Má přednost před Azure.
 //  AZURE_SIGN_ENDPOINT, AZURE_SIGN_ACCOUNT, AZURE_SIGN_PROFILE, AZURE_SIGN_PUBLISHER
 //                          -> podpis přes Azure Trusted Signing (k tomu
 //                          AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
 //                          bere electron-builder sám z prostředí)
+//  KINE_HELPER_EXE=1       -> přibalit podepsaného pomocníka dist/helper/kine-helper.exe
+//                          (taky z podpis.mjs; jen v podepsaném sestavení)
+//
+// S podpisem se podepisují i všechny .dll a .node (ffmpeg.dll, libEGL.dll…):
+// Inteligentní řízení aplikací (Smart App Control) ve Windows pustí jen
+// podepsaný kód, nestačí podepsat instalátor a Kine.exe.
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -53,12 +64,18 @@ export function buildConfig(env = process.env) {
     certificateProfileName: env.AZURE_SIGN_PROFILE?.trim(),
     publisherName: env.AZURE_SIGN_PUBLISHER?.trim(),
   };
-  const signing = Boolean(sign.endpoint && sign.codeSigningAccountName && sign.certificateProfileName);
+  const certumSha1 = (env.KINE_SIGN === 'certum' ? env.KINE_SIGN_SHA1 ?? '' : '').replace(/[^0-9a-f]/gi, '').toUpperCase();
+  const certum = certumSha1.length === 40;
+  const azure = !certum && Boolean(sign.endpoint && sign.codeSigningAccountName && sign.certificateProfileName);
+  const signing = azure || certum;
+  const helperExe = signing && env.KINE_HELPER_EXE === '1';
 
   const lines = [
     'extends: ./electron-builder.yml',
     `appId: ${v.appId}`,
     `productName: ${JSON.stringify(v.productName)}`,
+    // S podpisem: nepodepsaný soubor = chyba hned při sestavení, ne až při kontrole.
+    ...(signing ? ['forceCodeSigning: true'] : []),
     'directories:',
     `  output: ${v.output}`,
     '  buildResources: build',
@@ -73,8 +90,29 @@ export function buildConfig(env = process.env) {
     `  artifactName: ${JSON.stringify(v.artifact)}`,
   ];
   if (signing) {
+    // Kromě .exe i knihovny a nativní moduly (Smart App Control kontroluje každý načtený soubor).
+    lines.push('  signExts:', '    - ".dll"', '    - ".node"');
+  }
+  if (certum) {
+    // Aktualizace se podle jména v certifikátu neověřují: certifikát je na jméno
+    // ("Open Source Developer, …") a s jiným (např. firemním) by pak už žádná
+    // aktualizace neprošla. Stahuje se přes HTTPS a kontroluje sha512 z latest.yml.
+    lines.push(
+      '  verifyUpdateCodeSignature: false',
+      '  signtoolOptions:',
+      `    certificateSha1: ${JSON.stringify(certumSha1)}`,
+      '    rfc3161TimeStampServer: "http://time.certum.pl"',
+      '    signingHashAlgorithms:',
+      '      - sha256',
+      // Vlastní podpis s opakováním (cloud SimplySign občas zaváhá) - stejný signtool a parametry.
+      '    sign: "./scripts/podpisHook.mjs"'
+    );
+  } else if (azure) {
     lines.push('  verifyUpdateCodeSignature: true', '  azureSignOptions:');
     for (const [k, val] of Object.entries(sign)) if (val) lines.push(`    ${k}: ${JSON.stringify(val)}`);
+  }
+  if (helperExe) {
+    lines.push('extraResources:', '  - from: dist/helper', '    to: helper', '    filter:', '      - kine-helper.exe');
   }
   lines.push('nsis:', `  artifactName: ${JSON.stringify(v.artifact)}`, `  shortcutName: ${JSON.stringify(v.productName)}`);
   lines.push('publish:');
@@ -87,11 +125,14 @@ export function buildConfig(env = process.env) {
     // Na GitHubu leží obě appky v jednom vydání - ať si nepřepisují latest.yml.
     lines.push('    channel: clipper');
   }
-  return { file: v.file, variant: variantKey, base, signing, text: lines.join('\n') + '\n' };
+  const signer = certum ? `Certum (${certumSha1})` : azure ? 'Azure Trusted Signing' : null;
+  return { file: v.file, variant: variantKey, base, signing, signer, helperExe, text: lines.join('\n') + '\n' };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const cfg = buildConfig();
   writeFileSync(cfg.file, cfg.text);
-  console.log(`${cfg.file} (${cfg.variant}): aktualizace z ${cfg.base ? `${cfg.base}/${cfg.variant}` : 'GitHub Releases'}, podpis ${cfg.signing ? 'Azure Trusted Signing' : 'žádný'}`);
+  console.log(
+    `${cfg.file} (${cfg.variant}): aktualizace z ${cfg.base ? `${cfg.base}/${cfg.variant}` : 'GitHub Releases'}, podpis ${cfg.signer ?? 'žádný'}${cfg.helperExe ? ', s pomocníkem kine-helper.exe' : ''}`
+  );
 }

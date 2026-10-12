@@ -1,6 +1,6 @@
 import type { KineBridge } from '../preload/preload';
 import type { AppNotice, AudioDevice, AudioLevels, Clip, DisplayInfo, GameSource, GlassBackdrop, Lang, LiveAfterStream, LiveEnded, LiveQuality, ProcessInfo, ResourceUsage, Settings, Status, UploadRequest, Visibility } from '../shared/types';
-import { CATEGORY_KEYS, GLASS_BACKDROPS, LANGS, STORAGE_LIMITS_GB, TRASH_DAYS, VISIBILITIES } from '../shared/types';
+import { CATEGORY_KEYS, GLASS_BACKDROPS, LANGS, LOOK_CORNERS, LOOK_SIZES, STORAGE_LIMITS_GB, TRASH_DAYS, VISIBILITIES } from '../shared/types';
 import { LANG_NAMES, makeT, type Key } from '../shared/i18n';
 import { HotkeyRecorder, formatHotkey, hotkeyLabel } from '../shared/hotkeys';
 import { DISCORD_FILE_MAX_BYTES, isDiscordWebhook, suggestedMbps } from '../shared/settingsSchema';
@@ -12,7 +12,7 @@ import { attachBackdrop, followImage, hasFollowImage } from './ambient';
 import { icon, type IconName } from './icons';
 import { COMPRESS_LEVELS, compressSummary, type CompressLevel } from '../shared/compress';
 import { VIDEO_LANGS, openUploadDialog } from './uploadDialog';
-import { LIVE_BITRATES_KBPS, LIVE_QUALITIES, cleanLiveError, liveElapsed, liveErrorTextKey, livePresetFor, livePresetLabel, liveUploadMbps } from '../shared/live';
+import { LIVE_BITRATES_KBPS, LIVE_QUALITIES, LIVE_THUMBNAIL_HEIGHT, LIVE_THUMBNAIL_WIDTH, cleanLiveError, coverRect, liveElapsed, liveErrorTextKey, livePresetFor, livePresetLabel, liveUploadMbps } from '../shared/live';
 import { cameraRect } from '../shared/liveLayout';
 
 /**
@@ -81,8 +81,15 @@ const selected = new Set<string>();
 let merging: { percent: number } | null = null;
 let mergeNote: { text: string; kind: 'ok' | 'error' } | null = null;
 let mergeNoteTimer: ReturnType<typeof setTimeout> | null = null;
-let confirmBulkDelete = false;
-let bulkDeleteTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * Naposledy smazané klipy: smazání je hned přesun do koše (bez ptaní) a dole
+ * lišta "V koši · Vrátit" (jako Gmail). Nadobro se maže až z koše.
+ */
+let undoTrash: { ids: string[]; text: string } | null = null;
+let undoTrashTimer: ReturnType<typeof setTimeout> | null = null;
+const UNDO_TRASH_MS = 8000;
+/** Klipy, které se právě stěhují do koše (appka to ještě nepotvrdila) - druhé kliknutí je nepošle znovu. */
+const trashing = new Set<string>();
 /** Náhled klipu při najetí myší na kartu - vždy nejvýš jeden. */
 let preview: { host: HTMLElement; video: HTMLVideoElement } | null = null;
 /** Čtení ovladače (Gamepad API) během záznamu zkratky. */
@@ -345,7 +352,25 @@ function colorPicker() {
 
 // ---- zkratky ---------------------------------------------------------------------
 
+/**
+ * Je to klávesa Z? Podle písmene, ne podle polohy: na české (QWERTZ) klávesnici
+ * je Z tam, kde má americká Y (e.code 'KeyY'). Azbuka a jiná písma podle polohy.
+ */
+function isZKey(e: KeyboardEvent): boolean {
+  const key = e.key.length === 1 ? e.key.toLowerCase() : '';
+  return key === 'z' || (!/^[a-z]$/.test(key) && e.code === 'KeyZ');
+}
+
 function onKeyDown(e: KeyboardEvent) {
+  // Ctrl+Z hned po smazání vrátí klipy z koše (lišta dole), když se právě nepíše jinam.
+  if (!hotkeyRecording && undoTrash && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && isZKey(e)) {
+    const target = e.target as HTMLElement | null;
+    if (!target || !/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) {
+      e.preventDefault();
+      undoLastTrash();
+      return;
+    }
+  }
   // "/" v knihovně skočí do hledání (jako na webu), když se právě nepíše jinam.
   if (!hotkeyRecording && e.key === '/' && tab === 'clips' && wizardStep === null && !openPlayerId()) {
     const target = e.target as HTMLElement | null;
@@ -534,6 +559,12 @@ function applyLook() {
   else root.removeAttribute('data-follow');
   if (glass && settings.lookMotion) root.setAttribute('data-motion', '1');
   else root.removeAttribute('data-motion');
+  // Velikost písma, rohy, karty klipů, klidný režim - výchozí hodnoty bez atributu (CSS řeší jen odchylky).
+  const attr = (name: string, value: string | null) => (value === null ? root.removeAttribute(name) : root.setAttribute(name, value));
+  attr('data-text', settings.lookText === 'm' ? null : settings.lookText);
+  attr('data-corners', settings.lookCorners === 'normal' ? null : settings.lookCorners);
+  attr('data-cards', settings.lookCards === 'm' ? null : settings.lookCards);
+  attr('data-calm', settings.lookCalm ? '1' : null);
   if (!backdropEl) {
     backdropEl = h('div', { class: 'app-backdrop', 'aria-hidden': 'true' });
     document.body.prepend(backdropEl);
@@ -983,6 +1014,9 @@ let afterStreamSaving = false;
 let afterStreamFailed = false;
 /** Karta skončeného vysílání: název a viditelnost záznamu (předvyplněné, hráč je může změnit). */
 let endedForm: { at: number; title: string; visibility: Visibility } | null = null;
+/** Vlastní náhled přenosu: právě se nahrává / odebírá; chyba posledního pokusu. */
+let liveThumbBusy = false;
+let liveThumbError: string | null = null;
 
 /** Nastavení "Po skončení vysílání" z Kine - při otevření záložky, nejvýš jednou za minutu. */
 function loadAfterStream() {
@@ -1006,7 +1040,8 @@ function saveAfterStream(value: Visibility | null) {
   void kine
     .setLiveAfterStream(value)
     .then((r) => {
-      if (r) afterStream = r;
+      // Uložení vrací jen nastavení záznamu - náhled přenosu (thumbnailUrl) zůstane, jak byl.
+      if (r) afterStream = { ...(afterStream ?? {}), ...r };
       afterStreamLoadedAt = Date.now();
     })
     .catch(() => {
@@ -1016,6 +1051,110 @@ function saveAfterStream(value: Visibility | null) {
       afterStreamSaving = false;
       render();
     });
+}
+
+/** Obrázek z disku -> JPEG 1280×720 oříznutý na 16:9 (jako náhledy na Kine). null = nejde přečíst. */
+async function liveThumbnailJpeg(file: Blob): Promise<Uint8Array | null> {
+  let bitmap: ImageBitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    return null;
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = LIVE_THUMBNAIL_WIDTH;
+  canvas.height = LIVE_THUMBNAIL_HEIGHT;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  const r = coverRect(bitmap.width, bitmap.height, LIVE_THUMBNAIL_WIDTH, LIVE_THUMBNAIL_HEIGHT);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(bitmap, r.sx, r.sy, r.sw, r.sh, 0, 0, LIVE_THUMBNAIL_WIDTH, LIVE_THUMBNAIL_HEIGHT);
+  bitmap.close();
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.86));
+  return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+}
+
+async function uploadLiveThumbnail(file: File) {
+  liveThumbBusy = true;
+  liveThumbError = null;
+  render();
+  try {
+    const jpeg = await liveThumbnailJpeg(file);
+    if (!jpeg) throw new Error(t('liveThumbUnreadable'));
+    const result = await kine.setLiveThumbnail(jpeg);
+    afterStream = { ...(afterStream ?? { value: null, supported: true }), thumbnailUrl: result.thumbnailUrl };
+  } catch (e) {
+    liveThumbError = t('liveThumbFailed', { message: errorText(e, t) });
+  } finally {
+    liveThumbBusy = false;
+    render();
+  }
+}
+
+async function removeLiveThumbnail() {
+  liveThumbBusy = true;
+  liveThumbError = null;
+  render();
+  try {
+    await kine.removeLiveThumbnail();
+    afterStream = { ...(afterStream ?? { value: null, supported: true }), thumbnailUrl: null };
+  } catch (e) {
+    liveThumbError = t('liveThumbFailed', { message: errorText(e, t) });
+  } finally {
+    liveThumbBusy = false;
+    render();
+  }
+}
+
+/** Náhled přenosu na Kine: vlastní obrázek, jinak snímek z vysílání. */
+function liveThumbnailField() {
+  loadAfterStream();
+  const url = afterStream?.thumbnailUrl ?? null;
+  const input = h('input', {
+    type: 'file',
+    accept: 'image/*',
+    class: 'hidden live-thumb-input',
+    onchange: (e: Event) => {
+      const target = e.target as HTMLInputElement;
+      const file = target.files?.[0];
+      target.value = '';
+      if (file) void uploadLiveThumbnail(file);
+    },
+  }) as HTMLInputElement;
+  const preview = h(
+    'div',
+    { class: 'live-thumb-preview' },
+    url ? h('img', { src: url, alt: '', decoding: 'async' }) : h('span', { class: 'live-thumb-auto' }, icon('broadcast', 18), t('liveThumbAuto'))
+  );
+  return field(
+    t('liveThumbLabel'),
+    h(
+      'div',
+      { class: 'row live-thumb-row' },
+      preview,
+      h(
+        'div',
+        { class: 'stack live-thumb-actions' },
+        h(
+          'button',
+          { class: 'small live-thumb-pick', disabled: !status.account || liveThumbBusy || afterStream === undefined, onclick: () => input.click() },
+          liveThumbBusy ? h('span', { class: 'spin' }) : icon('image', 14),
+          url ? t('liveThumbChange') : t('liveThumbPick')
+        ),
+        url ? h('button', { class: 'small quiet live-thumb-remove', disabled: liveThumbBusy, onclick: () => void removeLiveThumbnail() }, t('liveThumbRemove')) : null,
+        input
+      )
+    ),
+    {
+      id: 'liveThumb',
+      icon: 'image',
+      help: t('liveThumbHint'),
+      extra: [
+        !status.account ? h('span', { class: 'hint' }, t('liveNeedLogin')) : null,
+        liveThumbError ? h('span', { class: 'hint warn-text live-thumb-error' }, liveThumbError) : null,
+      ],
+    }
+  );
 }
 
 /** Proč záznam nejde zveřejnit (podle odpovědi Kine). */
@@ -1313,7 +1452,9 @@ function renderLive() {
           { class: 'live-category', disabled: locked, onchange: (e: Event) => saveQuiet({ liveCategory: (e.target as HTMLSelectElement).value }) },
           ...CATEGORY_KEYS.map((key) => h('option', { value: key, selected: settings.liveCategory === key }, t(key)))
         )
-      )
+      ),
+      // Jde měnit i za běhu - Kine nový náhled ukáže hned.
+      liveThumbnailField()
     ),
 
     liveChatRecordingPanel(),
@@ -2132,6 +2273,22 @@ const GLASS_BACKDROP_LABELS: Record<GlassBackdrop, Key> = {
  * upravený Spotify), barvy pozadí, síla skla, na Windows 11 průhledné
  * okno (prosvítá plocha za appkou) a barva appky.
  */
+/** Řada tlačítek "jedno z" ve Vzhledu (velikost písma, rohy, karty). */
+function lookSegmented<T extends string>(label: Key, values: readonly T[], current: T, labels: Record<T, Key>, onPick: (value: T) => void, cls: string) {
+  return h(
+    'div',
+    {},
+    h('div', { class: 'faint', style: 'margin-bottom:8px' }, t(label)),
+    h(
+      'div',
+      { class: `look-segmented ${cls}`, role: 'radiogroup', 'aria-label': t(label) },
+      ...values.map((value) =>
+        h('button', { class: `small ${current === value ? 'active' : 'quiet'}`, role: 'radio', 'aria-checked': current === value ? 'true' : 'false', onclick: () => onPick(value) }, t(labels[value]))
+      )
+    )
+  );
+}
+
 function appearancePanel() {
   const glass = settings.look === 'glass';
   const lookCard = (look: Settings['look'], title: string, hint: string) =>
@@ -2205,6 +2362,11 @@ function appearancePanel() {
       : null,
     // Světlo kolem přehrávače funguje i v klasickém vzhledu; se sklem se podle klipu mění i pozadí.
     checkbox('lookFollow', t('lookFollow'), { help: t('lookFollowHint') }),
+    // Velikost a tvar: písmo, rohy, karty klipů - a klidný režim bez animací.
+    lookSegmented('lookTextLabel', LOOK_SIZES, settings.lookText, { s: 'lookTextS', m: 'lookTextM', l: 'lookTextL' }, (v) => update({ lookText: v }), 'look-text'),
+    lookSegmented('lookCornersLabel', LOOK_CORNERS, settings.lookCorners, { sharp: 'lookCornersSharp', normal: 'lookCornersNormal', round: 'lookCornersRound' }, (v) => update({ lookCorners: v }), 'look-corners'),
+    lookSegmented('lookCardsLabel', LOOK_SIZES, settings.lookCards, { s: 'lookCardsS', m: 'lookCardsM', l: 'lookCardsL' }, (v) => update({ lookCards: v }), 'look-cards'),
+    checkbox('lookCalm', t('lookCalm'), { help: t('lookCalmHint') }),
     h(
       'div',
       {},
@@ -3017,7 +3179,12 @@ function uploadState(clip: Clip) {
   if (u.state === 'queued') return h('div', { class: 'state' }, t('uploadQueued'));
   if (u.state === 'uploading') return h('div', {}, h('div', { class: 'progress' }, h('span', { style: `width:${u.percent}%` })), h('div', { class: 'state' }, t('uploadUploading', { percent: u.percent })));
   if (u.state === 'paused') return h('div', {}, h('div', { class: 'progress' }, h('span', { style: `width:${u.percent}%` })), h('div', { class: 'state' }, t(u.reason === 'game' ? 'uploadPausedGame' : 'uploadPausedOffline', { percent: u.percent })));
-  if (u.state === 'done' && u.ready === false) return h('div', { class: 'state processing', title: t('uploadProcessingHint') }, h('span', { class: 'spin' }), ' ' + t('uploadProcessing'));
+  if (u.state === 'done' && u.ready === false) {
+    // Dlouhé video Cloudflare zpracovává minuty - když Kine ví kolik, je to vidět (a proužek).
+    const pct = typeof u.processing === 'number' ? u.processing : null;
+    const text = h('div', { class: 'state processing', title: t('uploadProcessingHint') }, h('span', { class: 'spin' }), ' ' + t('uploadProcessing') + (pct !== null ? ` ${pct} %` : ''));
+    return pct !== null ? h('div', {}, h('div', { class: 'progress processing-progress' }, h('span', { style: `width:${pct}%` })), text) : text;
+  }
   if (u.state === 'done') return h('div', { class: 'state done' }, icon('check', 14), ' ', t('uploadDone'));
   // Nepřihlášený (kód z uploaderu): přeložená hláška místo české odpovědi serveru.
   return h('div', { class: 'state error' }, u.message === 'login-required' ? t('uploadErrorLogin') : t('uploadError', { message: u.message }));
@@ -3167,14 +3334,78 @@ function stopPreview() {
 function toggleSelected(id: string, on: boolean) {
   if (on) selected.add(id);
   else selected.delete(id);
-  confirmBulkDelete = false;
   render();
 }
 
 function clearSelection() {
   selected.clear();
-  confirmBulkDelete = false;
   render();
+}
+
+/**
+ * Smazat = do koše hned; dole lišta s Vrátit (i Ctrl+Z). Karta zmizí hned
+ * (nečeká se na appku) a druhé kliknutí dvojkliku se nepočítá - na stejném
+ * místě už je další klip. Co se smaže, dokud lišta svítí, vrátí Vrátit
+ * všechno najednou.
+ */
+function moveToTrash(list: Clip[], e?: MouseEvent) {
+  if (e && e.detail > 1) return;
+  const fresh = list.filter((c) => !c.deletedAt && !trashing.has(c.id));
+  if (fresh.length === 0) return;
+  const gone = new Set(fresh.map((c) => c.id));
+  for (const c of fresh) {
+    if (openPlayerId() === c.id) closePlayer();
+    selected.delete(c.id);
+    trashing.add(c.id);
+    void kine.trashClip(c.id).finally(() => trashing.delete(c.id));
+  }
+  clips = clips.filter((c) => !gone.has(c.id));
+  const ids = [...(undoTrash?.ids ?? []).filter((id) => !gone.has(id)), ...fresh.map((c) => c.id)];
+  undoTrash = {
+    ids,
+    text: ids.length === 1 ? t('trashMoved', { title: fresh[0].title }) : t('trashMovedMany', { count: ids.length }),
+  };
+  if (undoTrashTimer) clearTimeout(undoTrashTimer);
+  undoTrashTimer = setTimeout(() => {
+    undoTrash = null;
+    render();
+  }, UNDO_TRASH_MS);
+  render();
+}
+
+function undoLastTrash() {
+  const last = undoTrash;
+  if (!last) return;
+  undoTrash = null;
+  if (undoTrashTimer) clearTimeout(undoTrashTimer);
+  for (const id of last.ids) void kine.restoreClip(id);
+  render();
+}
+
+/** Lišta dole po smazání: co je v koši a Vrátit. */
+function undoTrashBar() {
+  if (!undoTrash) return null;
+  return h(
+    'div',
+    { class: 'undo-bar', role: 'status' },
+    icon('trash', 15),
+    h('span', { class: 'undo-text' }, undoTrash.text),
+    h('button', { class: 'small primary undo-restore', title: `${t('trashRestore')} (Ctrl+Z)`, onclick: undoLastTrash }, icon('undo', 14), t('trashRestore')),
+    h(
+      'button',
+      {
+        class: 'small quiet icon-btn',
+        title: t('close'),
+        'aria-label': t('close'),
+        onclick: () => {
+          undoTrash = null;
+          if (undoTrashTimer) clearTimeout(undoTrashTimer);
+          render();
+        },
+      },
+      icon('close', 14)
+    )
+  );
 }
 
 async function mergeSelectedClips() {
@@ -3234,41 +3465,12 @@ function selectionBar(shown: Clip[]) {
                   t('selectionUpload')
                 )
               : null,
-            confirmBulkDelete
-              ? h(
-                  'button',
-                  {
-                    class: 'small danger',
-                    onclick: () => {
-                      confirmBulkDelete = false;
-                      for (const c of picked) {
-                        if (openPlayerId() === c.id) closePlayer();
-                        void kine.deleteClip(c.id);
-                      }
-                      selected.clear();
-                      render();
-                    },
-                  },
-                  icon('trash', 14),
-                  t('selectionDeleteConfirm', { count: picked.length })
-                )
-              : h(
-                  'button',
-                  {
-                    class: 'small quiet danger',
-                    onclick: () => {
-                      confirmBulkDelete = true;
-                      render();
-                      if (bulkDeleteTimer) clearTimeout(bulkDeleteTimer);
-                      bulkDeleteTimer = setTimeout(() => {
-                        confirmBulkDelete = false;
-                        render();
-                      }, 4000);
-                    },
-                  },
-                  icon('trash', 14),
-                  t('selectionDelete')
-                ),
+            h(
+              'button',
+              { class: 'small quiet danger sel-delete', title: t('trashHint', { days: TRASH_DAYS }), onclick: (e: MouseEvent) => moveToTrash(picked, e) },
+              icon('trash', 14),
+              t('selectionDelete')
+            ),
             !allShownSelected
               ? h('button', { class: 'small quiet', onclick: () => { for (const c of shown) selected.add(c.id); render(); } }, t('selectionAll'))
               : null,
@@ -3501,6 +3703,13 @@ function compressPanel(): HTMLElement | null {
 }
 
 function renderClips() {
+  const view = renderClipsView();
+  const bar = undoTrashBar();
+  if (bar) view.append(bar);
+  return view;
+}
+
+function renderClipsView() {
   const games = [...new Set(clips.map((c) => c.game).filter((g): g is string => !!g))].sort((a, b) => a.localeCompare(b));
   const hasNoGame = clips.some((c) => !c.game);
   // Koš se vyprázdnil (vrácení, vysypání, týden uplynul) - zpátky do knihovny, ještě před výběrem karet.
@@ -3642,7 +3851,7 @@ function renderClips() {
         h('span', { class: 'faint' }, t('trashInfo', { count: trashClips.length, size: formatBytes(trashBytes), days: TRASH_DAYS })),
         h('span', { class: 'grow' }),
         confirmEmptyTrash
-          ? h('button', { class: 'small danger', onclick: () => { confirmEmptyTrash = false; if (openPlayerId() && trashClips.some((c) => c.id === openPlayerId())) closePlayer(); void kine.emptyTrash(); } }, t('trashEmptyConfirm', { count: trashClips.length }))
+          ? h('button', { class: 'small danger', onclick: (e: MouseEvent) => { if (e.detail > 1) return; confirmEmptyTrash = false; if (openPlayerId() && trashClips.some((c) => c.id === openPlayerId())) closePlayer(); void kine.emptyTrash(); } }, t('trashEmptyConfirm', { count: trashClips.length }))
           : h('button', { class: 'small quiet danger', onclick: () => { confirmEmptyTrash = true; render(); setTimeout(() => { if (confirmEmptyTrash) { confirmEmptyTrash = false; render(); } }, 4000); } }, t('trashEmpty'))
       )
     );
@@ -3662,7 +3871,7 @@ function renderClips() {
     const isSelected = selected.has(clip.id);
     const actions = h('div', { class: 'actions' });
     // Ikonky bez textu (složka, přejmenovat, smazat…) mají název v bublině a pro čtečky.
-    const iconBtn = (name: IconName, label: string, onclick: () => void, cls = '', disabled = false) =>
+    const iconBtn = (name: IconName, label: string, onclick: (e: MouseEvent) => void, cls = '', disabled = false) =>
       h('button', { class: `small quiet icon-btn ${cls}`, title: label, 'aria-label': label, disabled, onclick }, icon(name, 16));
     actions.append(h('button', { class: 'small', onclick: () => showClip(clip) }, icon('play', 14), t('libraryOpen')));
     if (clip.deletedAt) {
@@ -3670,8 +3879,8 @@ function renderClips() {
       actions.append(
         h('button', { class: 'small primary trash-restore', onclick: () => void kine.restoreClip(clip.id) }, icon('undo', 14), t('trashRestore')),
         confirmDelete === clip.id
-          ? h('button', { class: 'small danger', onclick: () => { confirmDelete = null; if (openPlayerId() === clip.id) closePlayer(); void kine.deleteClip(clip.id); } }, t('trashDeleteForeverConfirm'))
-          : h('button', { class: 'small quiet danger', onclick: () => { confirmDelete = clip.id; render(); setTimeout(() => { if (confirmDelete === clip.id) { confirmDelete = null; render(); } }, 4000); } }, t('trashDeleteForever'))
+          ? h('button', { class: 'small danger delete-forever-confirm', onclick: (e: MouseEvent) => { if (e.detail > 1) return; confirmDelete = null; if (openPlayerId() === clip.id) closePlayer(); void kine.deleteClip(clip.id); } }, icon('trash', 14), t('trashDeleteForeverConfirm'))
+          : h('button', { class: 'small quiet danger delete-forever', onclick: () => { confirmDelete = clip.id; render(); setTimeout(() => { if (confirmDelete === clip.id) { confirmDelete = null; render(); } }, 4000); } }, icon('trash', 14), t('trashDeleteForever'))
       );
     } else {
     actions.append(h('button', { class: 'small quiet card-edit', onclick: () => showClip(clip, true) }, icon('scissors', 14), t('libraryEdit')));
@@ -3731,18 +3940,7 @@ function renderClips() {
         renaming = clip.id;
         render();
       }, 'rename'),
-      confirmDelete === clip.id
-        ? h('button', { class: 'small danger delete-confirm', title: t('trashHint', { days: TRASH_DAYS }), onclick: () => { confirmDelete = null; if (openPlayerId() === clip.id) closePlayer(); void kine.deleteClip(clip.id); } }, icon('trash', 14), t('libraryDeleteConfirm', { days: TRASH_DAYS }))
-        : iconBtn('trash', `${t('libraryDelete')} · ${t('trashHint', { days: TRASH_DAYS })}`, () => {
-            confirmDelete = clip.id;
-            render();
-            setTimeout(() => {
-              if (confirmDelete === clip.id) {
-                confirmDelete = null;
-                render();
-              }
-            }, 4000);
-          }, 'danger delete')
+      iconBtn('trash', `${t('libraryDelete')} · ${t('trashHint', { days: TRASH_DAYS })}`, (e) => moveToTrash([clip], e), 'danger delete')
     );
     actions.append(tools);
     }

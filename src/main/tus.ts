@@ -10,7 +10,40 @@
  * Cloudflare chce kusy aspoň 5 MiB a dělitelné 256 KiB (kromě posledního).
  */
 
+/** První kus 8 MiB; další se přizpůsobí rychlosti připojení (nextChunkSize). */
 export const TUS_CHUNK_SIZE = 8 * 1024 * 1024;
+
+/**
+ * Velikost kusu podle rychlosti: každý kus čeká na potvrzení od Cloudflare
+ * (uložení), takže malé kusy na rychlém připojení zdržují - u dlouhé
+ * nahrávky (gigabajty) to bylo znát nejvíc. Cloudflare sám doporučuje
+ * kolem 50 MB. Cíl: jeden kus ~8 s (průběh na kartě se pořád hýbe),
+ * mezi 8 a 64 MiB, vždy dělitelné 256 KiB.
+ */
+export const TUS_MIN_CHUNK = 8 * 1024 * 1024;
+export const TUS_MAX_CHUNK = 64 * 1024 * 1024;
+const TUS_TARGET_CHUNK_MS = 8000;
+const TUS_QUANTUM = 256 * 1024;
+
+/** Další velikost kusu podle toho, jak rychle odešel ten poslední (nejvýš dvojnásobek / polovina). */
+export function nextChunkSize(current: number, bytes: number, ms: number): number {
+  if (!(bytes > 0) || !(ms >= 0)) return current;
+  if (ms < 500) {
+    // Celý kus za míň než půl vteřiny = rychlé připojení: dvojnásobek (měření je
+    // na výpočet moc krátké). Malý poslední kus nebo test nic neříká.
+    if (bytes < current) return current;
+    return Math.min(TUS_MAX_CHUNK, Math.max(TUS_MIN_CHUNK, Math.floor((current * 2) / TUS_QUANTUM) * TUS_QUANTUM));
+  }
+  const ideal = (bytes / ms) * TUS_TARGET_CHUNK_MS;
+  const next = Math.min(current * 2, Math.max(current / 2, ideal));
+  const clamped = Math.min(TUS_MAX_CHUNK, Math.max(TUS_MIN_CHUNK, next));
+  return Math.floor(clamped / TUS_QUANTUM) * TUS_QUANTUM;
+}
+
+/** Po výpadku menší kus (nestabilní připojení) - nejméně TUS_MIN_CHUNK. */
+export function smallerChunk(current: number): number {
+  return Math.max(TUS_MIN_CHUNK, Math.floor(current / 2 / TUS_QUANTUM) * TUS_QUANTUM);
+}
 
 export class TusError extends Error {
   constructor(message: string, readonly status?: number) {
@@ -34,6 +67,7 @@ export type TusOptions = {
   read: ChunkReader;
   /** Odkud začít (po pauze); 0 = od začátku. Skutečný stav se ještě ověří HEADem. */
   offset?: number;
+  /** Pevná velikost kusu (testy); bez ní se velikost přizpůsobuje rychlosti připojení. */
   chunkSize?: number;
   onProgress?: (uploaded: number) => void;
   signal?: AbortSignal;
@@ -60,7 +94,8 @@ export async function tusOffset(url: string, fetchImpl: typeof fetch = fetch, si
 export async function tusUpload(options: TusOptions): Promise<void> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const sleep = options.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
-  const chunkSize = options.chunkSize ?? TUS_CHUNK_SIZE;
+  const fixed = options.chunkSize !== undefined;
+  let chunkSize = options.chunkSize ?? TUS_CHUNK_SIZE;
   const maxRetries = options.maxRetries ?? 4;
   const signal = options.signal;
 
@@ -83,6 +118,7 @@ export async function tusUpload(options: TusOptions): Promise<void> {
     throwIfAborted();
     const length = Math.min(chunkSize, options.size - offset);
     const chunk = await options.read(offset, length);
+    const startedAt = Date.now();
 
     let attempt = 0;
     for (;;) {
@@ -108,6 +144,7 @@ export async function tusUpload(options: TusOptions): Promise<void> {
 
         const next = Number(res.headers.get('Upload-Offset'));
         offset = Number.isFinite(next) && next > 0 ? next : offset + length;
+        if (!fixed) chunkSize = nextChunkSize(chunkSize, length, Date.now() - startedAt);
         options.onProgress?.(offset);
         break;
       } catch (e) {
@@ -115,6 +152,8 @@ export async function tusUpload(options: TusOptions): Promise<void> {
         // Chyby 4xx kromě offsetu neopakovat - nezmizí samy.
         if (e instanceof TusError && e.status && e.status >= 400 && e.status < 500) throw e;
         attempt += 1;
+        // Nestabilní připojení: další kusy menší (míň toho přijde nazmar).
+        if (!fixed) chunkSize = smallerChunk(chunkSize);
         if (attempt > maxRetries) throw e instanceof Error ? e : new TusError(String(e));
         await sleep(Math.min(30000, 1000 * 2 ** (attempt - 1)));
         // Po výpadku se raději zeptat, kde jsme.

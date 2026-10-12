@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { tusUpload, tusOffset, TusAborted } from '../dist/esm/tus.js';
+import { tusUpload, tusOffset, TusAborted, nextChunkSize, smallerChunk, TUS_MIN_CHUNK, TUS_MAX_CHUNK } from '../dist/esm/tus.js';
 
 /** Napodobenina serveru Cloudflare: drží offset a umí "spadnout" na zavolání. */
 function fakeServer({ failPatches = 0 } = {}) {
@@ -66,4 +66,25 @@ test('přerušení hodí TusAborted a navázání pokračuje od offsetu serveru'
   assert.equal(state.offset, 25);
   assert.deepEqual(state.received, [10, 10, 5]);
   assert.equal(await tusOffset('http://x/u', fetchImpl), 25);
+});
+
+test('velikost kusu podle rychlosti: rychlé připojení větší kusy, vždy podle pravidel Cloudflare', () => {
+  const MiB = 1024 * 1024;
+  // 8 MiB za 1 s (≈ 67 Mb/s) -> dvojnásobek, pak dál až na strop 64 MiB
+  assert.equal(nextChunkSize(8 * MiB, 8 * MiB, 1000), 16 * MiB);
+  assert.equal(nextChunkSize(48 * MiB, 48 * MiB, 1000), TUS_MAX_CHUNK);
+  // pomalé připojení: ne pod 8 MiB
+  assert.equal(nextChunkSize(16 * MiB, 16 * MiB, 60000), TUS_MIN_CHUNK);
+  // krátké měření nic nemění (testy, malý kus)
+  assert.equal(nextChunkSize(8 * MiB, 100, 2), 8 * MiB);
+  // celý kus za míň než půl vteřiny (optika) -> roste i tak, až na strop
+  assert.equal(nextChunkSize(8 * MiB, 8 * MiB, 300), 16 * MiB);
+  assert.equal(nextChunkSize(TUS_MAX_CHUNK, TUS_MAX_CHUNK, 0), TUS_MAX_CHUNK);
+  assert.equal(smallerChunk(32 * MiB), 16 * MiB);
+  assert.equal(smallerChunk(8 * MiB), TUS_MIN_CHUNK);
+  for (const [c, b, ms] of [[8 * MiB, 8 * MiB, 1234], [16 * MiB, 3 * MiB, 7777], [64 * MiB, 64 * MiB, 555]]) {
+    const n = nextChunkSize(c, b, ms);
+    assert.equal(n % (256 * 1024), 0);
+    assert.ok(n >= 5 * MiB && n <= 200 * MiB);
+  }
 });

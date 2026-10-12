@@ -48,7 +48,14 @@ export type LiveSetup = {
   /** Proběhla na Kine migrace živého vysílání? */
   migrated: boolean;
   input: { rtmpsUrl: string; streamKey: string } | null;
-  stream: { ownerId: string; title: string; description: string; category: string | null } | null;
+  stream: {
+    ownerId: string;
+    title: string;
+    description: string;
+    category: string | null;
+    /** Vlastní náhled přenosu (null = snímek z vysílání; undefined = starší Kine to neumí). */
+    thumbnailUrl?: string | null;
+  } | null;
   /** Co se záznamem po skončení (null = nechat ve studiu). */
   recordingVisibility: Visibility | null;
   /** Umí Kine záznam zveřejnit sama (migrace supabase-migration-zive-2.sql)? */
@@ -67,7 +74,7 @@ export type KineApi = {
    * hotovo, přepne ho na "ready" - do té doby není v žádném seznamu na
    * Kine vidět. Volá se po nahrání dokola, dokud není hotovo.
    */
-  status(videoId: string): Promise<VideoStatus>;
+  status(videoId: string, onPercent?: (percent: number) => void): Promise<VideoStatus>;
   /** Klíč a stav živého vysílání přihlášeného hráče. */
   liveSetup(): Promise<LiveSetup>;
   /** Založí klíč pro vysílání (když ještě není) a vrátí ho. */
@@ -84,6 +91,10 @@ export type KineApi = {
    * `confirmed`: Cloudflare proud opravdu přijímá.
    */
   liveSignal(action: 'started' | 'ping' | 'stopped'): Promise<{ confirmed: boolean; viewers: number | null; recording: { videoId: string; status: 'ready' | 'processing' } | null }>;
+  /** Vlastní náhled přenosu (JPEG 1280×720) -> Kine; vrací jeho adresu. */
+  liveSetThumbnail(jpeg: Uint8Array): Promise<{ thumbnailUrl: string | null }>;
+  /** Náhled přenosu zase jako snímek z vysílání. */
+  liveRemoveThumbnail(): Promise<void>;
 };
 
 const VISIBILITY_VALUES: readonly Visibility[] = ['public', 'subscribers', 'private'];
@@ -98,7 +109,17 @@ function liveSetupFrom(data: any): LiveSetup {
     configured: data?.configured !== false,
     migrated: data?.migrated !== false,
     input,
-    stream: s && typeof s.ownerId === 'string' ? { ownerId: s.ownerId, title: String(s.title ?? ''), description: String(s.description ?? ''), category: typeof s.category === 'string' ? s.category : null } : null,
+    stream:
+      s && typeof s.ownerId === 'string'
+        ? {
+            ownerId: s.ownerId,
+            title: String(s.title ?? ''),
+            description: String(s.description ?? ''),
+            category: typeof s.category === 'string' ? s.category : null,
+            // Starší Kine pole vůbec nepošle (undefined) - appka pak náhled nenabízí jako uložený.
+            ...(s.thumbnailUrl === undefined ? {} : { thumbnailUrl: typeof s.thumbnailUrl === 'string' && /^https:\/\//.test(s.thumbnailUrl) ? s.thumbnailUrl : null }),
+          }
+        : null,
     recordingVisibility: visibilityFrom(data?.recordingVisibility),
     recordingAutoSupported: data?.recordingAutoSupported === true,
   };
@@ -163,7 +184,7 @@ export function createKineApi(deps: {
       if (!data?.video?.id) throw new KineApiError('Kine video neuložila.', 500);
       return { id: data.video.id as string };
     },
-    async status(videoId) {
+    async status(videoId, onPercent) {
       // Bez přihlášení to jde taky (stav videa není tajný), token se ale pošle, když je.
       const token = await deps.getToken();
       const res = await fetchImpl(`${deps.siteUrl()}/api/videos/status`, {
@@ -175,7 +196,10 @@ export function createKineApi(deps: {
       if (res.status === 404) return 'not-found';
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new KineApiError(typeof data?.error === 'string' ? data.error : `Kine odpověděla ${res.status}.`, res.status);
-      return data?.status === 'ready' ? 'ready' : 'processing';
+      if (data?.status === 'ready') return 'ready';
+      // Novější Kine řekne, kolik má Cloudflare zpracováno (dlouhá videa trvají minuty).
+      if (Number.isFinite(data?.percent) && data.percent >= 0 && data.percent <= 100) onPercent?.(Math.floor(data.percent));
+      return 'processing';
     },
     async liveSetup() {
       return liveSetupFrom(await get('/api/live/me'));
@@ -199,6 +223,27 @@ export function createKineApi(deps: {
       const data: any = await post('/api/live/me', { action: 'details', recordingVisibility: visibility }, 20000);
       // Starší Kine (bez migrace) hodnotu neuloží a pošle recordingAutoSupported: false.
       return { value: visibilityFrom(data?.recordingVisibility), supported: data?.recordingAutoSupported !== false };
+    },
+    async liveSetThumbnail(jpeg) {
+      const token = await deps.getToken();
+      if (!token) throw new KineApiError('Nejsi přihlášený.', 401);
+      const res = await fetchImpl(`${deps.siteUrl()}/api/live/thumbnail`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'image/jpeg', Authorization: `Bearer ${token}` },
+        body: jpeg as unknown as BodyInit,
+        signal: AbortSignal.timeout(45000),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new KineApiError(typeof data?.error === 'string' ? data.error : `Kine odpověděla ${res.status}.`, res.status);
+      // Jen https (jako u liveSetupFrom) - adresa jde do <img> v okně appky.
+      return { thumbnailUrl: typeof data?.thumbnailUrl === 'string' && /^https:\/\//.test(data.thumbnailUrl) ? data.thumbnailUrl : null };
+    },
+    async liveRemoveThumbnail() {
+      const token = await deps.getToken();
+      if (!token) throw new KineApiError('Nejsi přihlášený.', 401);
+      const res = await fetchImpl(`${deps.siteUrl()}/api/live/thumbnail`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20000) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new KineApiError(typeof data?.error === 'string' ? data.error : `Kine odpověděla ${res.status}.`, res.status);
     },
     async livePublishRecording(options) {
       const data: any = await post(

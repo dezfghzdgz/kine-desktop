@@ -16,6 +16,8 @@ directories:
   buildResources: build
 files:
   - dist/**/*
+  # Pomocník kine-helper.exe jde do resources/helper (extraResources), ne do app.asar.
+  - "!dist/helper/**"
   - build/icon.png
   - build/icon-clipper.png
   - build/tray.png
@@ -32,9 +34,11 @@ win:
       arch: [x64]
   icon: build/icon.png
   artifactName: Kine-Setup.${ext}
-  # Bez podpisu Windows ukáže "neznámý vydavatel" a SmartScreen varuje.
-  # Podpis (Azure Trusted Signing) přidává workflow přes
-  # scripts/publish-config.mjs, když jsou v GitHubu tajemství AZURE_*.
+  # Bez podpisu Windows ukáže "neznámý vydavatel", SmartScreen varuje a
+  # Inteligentní řízení aplikací (Smart App Control) instalaci zablokuje.
+  # Podpis (Certum SimplySign, nebo Azure) přidává workflow přes
+  # scripts/podpis.mjs a scripts/publish-config.mjs, když jsou v GitHubu
+  # tajemství (JAK-VYDAT.md, část C) - podepíše i všechny .dll a pluginy NSIS.
   verifyUpdateCodeSignature: false
 nsis:
   oneClick: true

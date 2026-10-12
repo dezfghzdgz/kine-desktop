@@ -1,4 +1,4 @@
-import { CATEGORY_KEYS, GLASS_BACKDROPS, LANGS, LAUNCH_CAPTURE, LIVE_CAMERA_POSITIONS, LIVE_CAMERA_SHAPES, LIVE_CAMERA_SIZES, LOOKS, STORAGE_LIMITS_GB, VISIBILITIES, type Settings } from './types';
+import { CATEGORY_KEYS, GLASS_BACKDROPS, LANGS, LAUNCH_CAPTURE, LIVE_CAMERA_POSITIONS, LIVE_CAMERA_SHAPES, LIVE_CAMERA_SIZES, LOOKS, LOOK_CORNERS, LOOK_SIZES, STORAGE_LIMITS_GB, VISIBILITIES, type Settings } from './types';
 import { isHotkey } from './hotkeys';
 import { LIVE_QUALITIES, liveBitrate } from './live';
 
@@ -33,6 +33,10 @@ export const DEFAULT_SETTINGS: Settings = {
   glassWindow: false,
   lookFollow: false,
   lookMotion: false,
+  lookText: 'm',
+  lookCorners: 'normal',
+  lookCards: 'm',
+  lookCalm: false,
   liveCamera: false,
   liveCameraDevice: '',
   liveCameraPosition: 'bottom-right',
@@ -167,6 +171,10 @@ export function sanitizeSettings(input: unknown): Settings {
     glassWindow: bool(raw.glassWindow, d.glassWindow),
     lookFollow: bool(raw.lookFollow, d.lookFollow),
     lookMotion: bool(raw.lookMotion, d.lookMotion),
+    lookText: oneOf(raw.lookText, LOOK_SIZES, d.lookText),
+    lookCorners: oneOf(raw.lookCorners, LOOK_CORNERS, d.lookCorners),
+    lookCards: oneOf(raw.lookCards, LOOK_SIZES, d.lookCards),
+    lookCalm: bool(raw.lookCalm, d.lookCalm),
     liveCamera: bool(raw.liveCamera, d.liveCamera),
     liveCameraDevice: text(raw.liveCameraDevice, d.liveCameraDevice, 300),
     liveCameraPosition: oneOf(raw.liveCameraPosition, LIVE_CAMERA_POSITIONS, d.liveCameraPosition),

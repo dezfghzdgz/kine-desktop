@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from './log';
 import { lowerPriority } from './ffmpeg';
@@ -307,8 +307,30 @@ while ($true) {
 }
 `;
 
+/**
+ * Podepsaný pomocník z instalátoru (resources/helper/kine-helper.exe,
+ * src/helper/KineHelper.cs) - přibalí se jen v podepsaném sestavení
+ * (scripts/podpis.mjs). Projde i přes Inteligentní řízení aplikací (Smart
+ * App Control), kde PowerShell běží v omezeném režimu a skript nejde. Umí
+ * totéž a mluví stejně (řádky JSON). Bez něj (nepodepsané sestavení, vývoj)
+ * jede PowerShell jako dřív.
+ */
+export function signedHelperPath(resourcesPath: string | undefined = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath): string | null {
+  if (!resourcesPath) return null;
+  const file = join(resourcesPath, 'helper', 'kine-helper.exe');
+  return existsSync(file) ? file : null;
+}
+
 export class WinHelper {
   private proc: ChildProcess | null = null;
+  /** Podepsaný kine-helper.exe; null = PowerShell (není přibalený, nebo se dvakrát nerozjel). */
+  private exe: string | null = WinHelper.supported() ? signedHelperPath() : null;
+  /** Co právě běží - podle toho se počítá, jestli exe startuje. */
+  private kind: 'exe' | 'ps' = 'ps';
+  /** Pomocník už poslal "ready" (rozjel se). */
+  private sawReady = false;
+  /** Kolikrát se exe po sobě nerozjelo (bez "ready"); po dvou se přejde na PowerShell. */
+  private exeFailures = 0;
   private running = false;
   private chords: number[][] = [];
   /** Časování smyčky (ms / s) podle nastavení výkonu; null = základ ve skriptu. */
@@ -418,41 +440,94 @@ export class WinHelper {
 
   private spawn(): void {
     if (this.proc || this.blockedReason !== null) return;
-    let file: string;
+    const env = {
+      ...process.env,
+      KINE_HOTKEYS: this.chords.map((c) => c.join(',')).join(';'),
+      ...(this.timing
+        ? { KINE_FAST_MS: String(this.timing.fastMs), KINE_FG_MS: String(this.timing.foregroundMs), KINE_PROC_S: String(this.timing.processesS) }
+        : {}),
+    };
+    const kind: 'exe' | 'ps' = this.exe ? 'exe' : 'ps';
+    let file = '';
+    if (kind === 'ps') {
+      try {
+        file = this.scriptPath();
+      } catch (e) {
+        log(`pomocník: skript se nepodařilo zapsat: ${(e as Error).message}`);
+        return;
+      }
+    }
+    this.kind = kind;
+    this.sawReady = false;
+    let proc: ChildProcess;
     try {
-      file = this.scriptPath();
+      proc =
+        kind === 'exe'
+          ? // Podepsaný kine-helper.exe. Stdin zůstane otevřený: když appka skončí
+            // (nebo spadne), zavře se a pomocník skončí sám.
+            spawn(this.exe as string, [], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env })
+          : spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', file], {
+              windowsHide: true,
+              stdio: ['ignore', 'pipe', 'pipe'],
+              env,
+            });
     } catch (e) {
-      log(`pomocník: skript se nepodařilo zapsat: ${(e as Error).message}`);
+      // Node hází rovnou (ne přes "error"), když Windows spuštění odmítne jinak
+      // než "nenalezeno" - typicky zablokování (Smart App Control, antivir):
+      // spawn EPERM / UNKNOWN. Zablokovaný exe hned pryč, zkusí se PowerShell.
+      log(`pomocník${kind === 'exe' ? ' (kine-helper.exe)' : ''} se nespustil: ${(e as Error).message}`);
+      if (kind === 'exe') {
+        log('pomocník kine-helper.exe nejde spustit - dál PowerShell');
+        this.exe = null;
+        this.failures = [];
+      }
+      this.onExit();
       return;
     }
-    const hotkeys = this.chords.map((c) => c.join(',')).join(';');
-    const proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', file], {
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        KINE_HOTKEYS: hotkeys,
-        ...(this.timing
-          ? { KINE_FAST_MS: String(this.timing.fastMs), KINE_FG_MS: String(this.timing.foregroundMs), KINE_PROC_S: String(this.timing.processesS) }
-          : {}),
-      },
-    });
     this.proc = proc;
+    if (kind === 'exe') {
+      proc.stdin?.on('error', () => {
+        // pomocník už neběží
+      });
+      // Spustil se, ale neozval se (visí): po 15 s pryč - počítá se jako nerozjetý.
+      const watchdog = setTimeout(() => {
+        if (this.proc !== proc || this.sawReady) return;
+        log('pomocník kine-helper.exe se za 15 s neozval - ukončuji ho');
+        try {
+          proc.kill();
+        } catch {
+          // už neběží
+        }
+      }, 15000);
+      proc.once('exit', () => clearTimeout(watchdog));
+      proc.once('error', () => clearTimeout(watchdog));
+    }
     // Bez složených zkratek pomocník jen jednou za sekundu kouká, co je v popředí - nižší priorita, hra má přednost.
     // Se zkratkami (kombinace, myš, ovladač) zůstává normální, ať stisk nečeká.
     if (this.chords.length === 0) lowerPriority(proc);
     this.buffer = '';
     proc.stdout?.setEncoding('utf8');
-    proc.stdout?.on('data', (chunk: string) => this.onData(chunk));
+    // Jen výstup právě běžícího pomocníka (zbytek z ukončeného by se nalepil na nový).
+    proc.stdout?.on('data', (chunk: string) => {
+      if (this.proc === proc) this.onData(chunk);
+    });
     proc.stderr?.setEncoding('utf8');
     proc.stderr?.on('data', (chunk: string) => log(`pomocník stderr: ${chunk.trim().slice(0, 300)}`));
-    proc.on('error', (e) => {
-      log(`pomocník se nespustil: ${e.message}`);
+    // "error" i "exit" můžou přijít obě - konec se počítá jednou.
+    let ended = false;
+    const end = () => {
+      if (ended || this.proc !== proc) return;
+      ended = true;
       this.onExit();
+    };
+    const what = this.kind === 'exe' ? 'pomocník (kine-helper.exe)' : 'pomocník';
+    proc.on('error', (e) => {
+      log(`${what} se nespustil: ${e.message}`);
+      end();
     });
     proc.on('exit', (code) => {
-      log(`pomocník skončil (${code})`);
-      this.onExit();
+      log(`${what} skončil (${code})`);
+      end();
     });
   }
 
@@ -474,6 +549,16 @@ export class WinHelper {
   private onExit(): void {
     this.proc = null;
     this.setRunning(false);
+    // Podepsaný pomocník, který se dvakrát po sobě nerozjel (chybí .NET, zablokoval
+    // ho antivirus…): dál PowerShell, ten skončí nejhůř jako dřív.
+    if (this.kind === 'exe' && !this.sawReady && this.exe) {
+      this.exeFailures++;
+      if (this.exeFailures >= 2) {
+        log('pomocník kine-helper.exe se nerozjel ani napodruhé - dál PowerShell');
+        this.exe = null;
+        this.failures = [];
+      }
+    }
     if (this.stopped || this.blockedReason !== null) return;
     const now = Date.now();
     this.failures = this.failures.filter((t) => now - t < 120000);
@@ -531,6 +616,11 @@ export class WinHelper {
     }
     switch (msg?.t) {
       case 'ready':
+        this.sawReady = true;
+        if (this.kind === 'exe') {
+          if (this.exeFailures > 0 || !this.running) log('pomocník běží (podepsaný kine-helper.exe)');
+          this.exeFailures = 0;
+        }
         this.setRunning(true);
         break;
       case 'hotkey': {

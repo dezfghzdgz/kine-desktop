@@ -1,4 +1,5 @@
-import { closeSync, openSync, readSync, statSync, openAsBlob } from 'node:fs';
+import { statSync, openAsBlob } from 'node:fs';
+import { open as openFile } from 'node:fs/promises';
 import type { Clip, Settings, UploadRequest } from '../shared/types';
 import { gameHashtag } from '../shared/clipNaming';
 import { parseHashtags } from '../shared/upload';
@@ -157,9 +158,17 @@ export class Uploader {
         });
         if (stopped) return finish();
         const clip = this.deps.library.get(clipId);
-        if (!clip || clip.deletedAt || clip.upload?.state !== 'done') return finish();
+        if (!clip || clip.upload?.state !== 'done') return finish();
+        // V koši se neptá, ale čeká se dál - Vrátit (i z lišty po smazání) ho vrátí i s čekáním.
+        if (clip.deletedAt) continue;
         try {
-          const status = await this.deps.api.status(videoId);
+          const status = await this.deps.api.status(videoId, (percent) => {
+            // Průběh zpracování na kartě klipu ("Kine ho zpracovává… 45 %").
+            const now = this.deps.library.get(clipId)?.upload;
+            if (now?.state === 'done' && now.ready === false && now.processing !== percent) {
+              this.deps.library.setUpload(clipId, { state: 'done', videoId, url, ready: false, processing: percent });
+            }
+          });
           if (status === 'ready') {
             this.deps.library.setUpload(clipId, { state: 'done', videoId, url, ready: true });
             this.deps.log(`Kine video zpracovala: ${clip.title}`);
@@ -301,15 +310,22 @@ export class Uploader {
     setProgress(Math.round((startPercent / 100) * size));
 
     if (mode === 'tus') {
-      const fd = openSync(file, 'r');
+      const handle = await openFile(file, 'r');
       try {
         await tusUpload({
           url: tusUrl,
           size,
           offset: Math.floor((startPercent / 100) * size),
+          // Čte se asynchronně: kus má až 64 MiB a synchronní čtení by na pomalém
+          // disku na chvíli zastavilo hlavní proces (okna, zkratky, oznámení).
           read: async (offset, length) => {
-            const buffer = Buffer.alloc(length);
-            const got = readSync(fd, buffer, 0, length, offset);
+            const buffer = Buffer.allocUnsafe(length);
+            let got = 0;
+            while (got < length) {
+              const { bytesRead } = await handle.read(buffer, got, length - got, offset + got);
+              if (bytesRead === 0) break;
+              got += bytesRead;
+            }
             return got === length ? buffer : buffer.subarray(0, got);
           },
           onProgress: setProgress,
@@ -317,7 +333,7 @@ export class Uploader {
           fetchImpl: this.deps.fetchImpl,
         });
       } finally {
-        closeSync(fd);
+        await handle.close().catch(() => undefined);
       }
     } else {
       await basicUpload(tusUrl, file, signal, this.deps.fetchImpl ?? fetch);

@@ -290,7 +290,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const positionEl = h('span', { class: 'player-pos faint hidden' });
   const editBtn = h('button', { class: 'small quiet player-edit', onclick: () => toggleEdit() }, icon('scissors', 15), t('libraryEdit'));
   const copyBtn = h('button', { class: 'small quiet player-copy hidden', onclick: () => { if (options.onCopyLink) { options.onCopyLink(clip); showNote(t('linkCopied'), 'ok'); } } }, icon('link', 15), t('libraryCopyLink'));
-  // Celá obrazovka i v hlavičce - tlačítko na scéně se ukáže až po najetí myší.
+  // Celá obrazovka: tlačítko v hlavičce (jediné mimo celou obrazovku); to na scéně je jen v ní - jak ven.
   const headFullBtn = h('button', { class: 'small quiet player-full', title: `${t('playerFullscreen')} (F)`, onclick: () => toggleFullscreen() }, icon('expand', 15), t('playerFullscreen'));
   const note = h('div', { class: 'player-note hidden' });
   const trim = h('div', { class: 'trim hidden' });

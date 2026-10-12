@@ -56,7 +56,8 @@ function startMockServer() {
       res.writeHead(200, { 'content-type': 'application/json' });
       if (processingLeft > 0) {
         processingLeft -= 1;
-        return res.end(JSON.stringify({ status: 'processing' }));
+        // Novější Kine posílá i průběh zpracování u Cloudflare.
+        return res.end(JSON.stringify({ status: 'processing', percent: 40 + processingLeft }));
       }
       return res.end(JSON.stringify({ status: 'ready' }));
     }
@@ -276,11 +277,19 @@ test('čekání na zpracování: "processing" se zkouší dál, po restartu appk
   const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${mock.port}`, getToken: async () => 'token-123' });
   const uploader = new Uploader({ library, api, blocked: () => null, settings: () => settings, log: () => {}, readySchedule: () => [20, 20, 20, 20, 20, 20] });
   const ready = new Promise((resolve) => uploader.on((e) => e.type === 'ready' && resolve(e)));
+  // Průběh zpracování z Kine se zapíše ke klipu (karta ukáže "… 41 %").
+  const seenPercent = [];
+  library.onChange(() => {
+    const u = library.get('c1')?.upload;
+    if (u?.state === 'done' && u.ready === false && typeof u.processing === 'number') seenPercent.push(u.processing);
+  });
   uploader.enqueue([{ clipId: 'c1', visibility: 'public' }]);
   await ready;
   // Dvakrát "processing", potřetí "ready".
   assert.equal(mock.statusCalls.length, 3);
   assert.equal(library.get('c1').upload.ready, true);
+  assert.deepEqual([...new Set(seenPercent)], [41, 40]);
+  assert.equal(library.get('c1').upload.processing, undefined, 'po zpracování se průběh nedrží');
   uploader.stopWaiting();
 
   // Restart: klip nahraný, ale Kine ho ještě nezpracovala - nový uploader se ptá dál.
@@ -352,4 +361,39 @@ test('nová kopie k nahrání = rozjeté nahrávání jiné kopie se nenaváže,
   assert.equal(library.get('c1').upload.state, 'done');
   uploader.stopWaiting();
   mock.server.close();
+});
+
+test('náhled přenosu: JPEG jde na Kine jako tělo s přihlášením; nastavení vrací adresu náhledu', async () => {
+  const seen = [];
+  const server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const body = Buffer.concat(chunks);
+    seen.push({ method: req.method, path: req.url, type: req.headers['content-type'], auth: req.headers.authorization, size: body.length, head: [...body.subarray(0, 3)] });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (req.url === '/api/live/thumbnail' && req.method === 'POST') {
+      // druhé nahrání: rozbitá / podvržená odpověď s adresou mimo https
+      const url = seen.filter((x) => x.method === 'POST').length > 1 ? 'file://evil/share/x.jpg' : 'https://x.supabase.co/storage/v1/object/public/thumbnails/live/u/0f8fad5b-d9cb-469f-a165-70867728950e.jpg';
+      return res.end(JSON.stringify({ thumbnailUrl: url }));
+    }
+    if (req.url === '/api/live/thumbnail' && req.method === 'DELETE') return res.end(JSON.stringify({ thumbnailUrl: null }));
+    if (req.url === '/api/live/me') {
+      return res.end(JSON.stringify({ configured: true, migrated: true, input: null, stream: { ownerId: 'u', title: 'T', description: '', category: null, thumbnailUrl: 'javascript:alert(1)' } }));
+    }
+    res.end('{}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${server.address().port}`, getToken: async () => 'token-123' });
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]);
+  const saved = await api.liveSetThumbnail(jpeg);
+  assert.equal(saved.thumbnailUrl, 'https://x.supabase.co/storage/v1/object/public/thumbnails/live/u/0f8fad5b-d9cb-469f-a165-70867728950e.jpg');
+  assert.deepEqual(seen[0], { method: 'POST', path: '/api/live/thumbnail', type: 'image/jpeg', auth: 'Bearer token-123', size: 8, head: [0xff, 0xd8, 0xff] });
+  await api.liveRemoveThumbnail();
+  assert.equal(seen[1].method, 'DELETE');
+  // adresa mimo https se do okna appky nedostane ani z odpovědi na nahrání
+  assert.equal((await api.liveSetThumbnail(jpeg)).thumbnailUrl, null);
+  // Jen https adresa - nic jiného se do okna appky nedostane.
+  const setup = await api.liveSetup();
+  assert.equal(setup.stream.thumbnailUrl, null);
+  server.close();
 });

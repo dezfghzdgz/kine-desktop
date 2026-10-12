@@ -123,6 +123,14 @@ export type Settings = {
   lookFollow: boolean;
   /** Pohyblivé barvy: barvy pozadí skla se pomalu přelévají. */
   lookMotion: boolean;
+  /** Velikost písma v okně appky. */
+  lookText: LookSize;
+  /** Zaoblení rohů ploch, tlačítek a karet. */
+  lookCorners: LookCorners;
+  /** Velikost karet klipů (kolik se jich vejde do řádku). */
+  lookCards: LookSize;
+  /** Klidný režim: bez animací a přechodů. */
+  lookCalm: boolean;
   /** Kamera ve vysílání (obraz z webkamery v rohu). Klipy kameru nemají. */
   liveCamera: boolean;
   /** Id kamery ('' = první / výchozí). */
@@ -239,6 +247,10 @@ export type Settings = {
 export type PerformanceMode = 'low' | 'balanced' | 'high';
 export type Look = 'classic' | 'glass';
 export const LOOKS: readonly Look[] = ['classic', 'glass'];
+export type LookSize = 's' | 'm' | 'l';
+export const LOOK_SIZES: readonly LookSize[] = ['s', 'm', 'l'];
+export type LookCorners = 'sharp' | 'normal' | 'round';
+export const LOOK_CORNERS: readonly LookCorners[] = ['sharp', 'normal', 'round'];
 export type GlassBackdrop = 'brand' | 'night' | 'sunset' | 'forest' | 'ocean' | 'neon';
 export const GLASS_BACKDROPS: readonly GlassBackdrop[] = ['brand', 'night', 'sunset', 'forest', 'ocean', 'neon'];
 export type LaunchCapture = 'auto' | 'game' | 'paused';
@@ -259,8 +271,11 @@ export type ClipUpload =
   | { state: 'queued' }
   | { state: 'uploading'; percent: number; tusUrl?: string; videoId?: string }
   | { state: 'paused'; percent: number; reason: 'game' | 'offline'; tusUrl?: string; videoId?: string }
-  /** ready: Kine video zpracovala a je vidět (false = nahrané, Kine ho ještě zpracovává; chybí = starší záznam, hotovo). */
-  | { state: 'done'; videoId: string; url: string; ready?: boolean }
+  /**
+   * ready: Kine video zpracovala a je vidět (false = nahrané, Kine ho ještě zpracovává; chybí = starší záznam, hotovo).
+   * processing: kolik procent má Cloudflare zpracováno (u dlouhých videí, když to ví).
+   */
+  | { state: 'done'; videoId: string; url: string; ready?: boolean; processing?: number }
   | { state: 'error'; message: string };
 
 export type Clip = {
@@ -608,7 +623,12 @@ export type LiveEnded = {
 };
 
 /** Co se záznamem po skončení vysílání (nastavení na Kine, sdílené se studiem): null = nechat ve studiu. */
-export type LiveAfterStream = { value: Visibility | null; supported: boolean };
+export type LiveAfterStream = {
+  value: Visibility | null;
+  supported: boolean;
+  /** Vlastní náhled přenosu na Kine (null = snímek z vysílání; undefined = starší Kine to neumí). */
+  thumbnailUrl?: string | null;
+};
 
 /** Co právě teče do zvuku klipu. */
 export type AudioLevels = {

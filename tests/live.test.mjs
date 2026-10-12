@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { LIVE_PRESETS, LIVE_QUALITIES, cleanLiveError, liveBitrate, liveElapsed, liveErrorKind, liveErrorTextKey, livePresetFor, livePresetLabel, liveUploadMbps } from '../dist/esm/live.js';
+import { LIVE_PRESETS, LIVE_QUALITIES, LIVE_THUMBNAIL_MAX_BYTES, cleanLiveError, coverRect, liveBitrate, liveElapsed, liveErrorKind, liveErrorTextKey, livePresetFor, livePresetLabel, liveUploadMbps, looksLikeLiveThumbnail } from '../dist/esm/live.js';
 import { LIVE_MAX_ATTEMPTS, liveFfmpegArgs, liveProgressSeconds, liveRetryDelay, maskLiveUrl, rtmpUrl } from '../dist/esm/livePlan.js';
 import { LiveController } from '../dist/esm/liveController.js';
 import { sanitizeSettings, DEFAULT_SETTINGS } from '../dist/esm/settingsSchema.js';
@@ -373,4 +373,20 @@ test('vysílání: záznam ještě není (404) -> chyba v kartě a jde to zkusit
   assert.equal(ended.video.status, 'ready');
   ctx.live.dismissEnded();
   assert.equal(ctx.live.current().ended, null);
+});
+
+test('náhled přenosu: ořez na 16:9 jako object-fit: cover a jen rozumný JPEG', () => {
+  // na výšku -> prostředek, širší než 16:9 -> boky pryč, přesně 16:9 -> celé
+  assert.deepEqual(coverRect(1080, 1920, 1280, 720), { sx: 0, sy: (1920 - 607.5) / 2, sw: 1080, sh: 607.5 });
+  const wide = coverRect(2560, 1080, 1280, 720);
+  assert.equal(Math.round(wide.sw), 1920);
+  assert.equal(Math.round(wide.sx), 320);
+  assert.deepEqual(coverRect(1920, 1080, 1280, 720), { sx: 0, sy: 0, sw: 1920, sh: 1080 });
+  assert.deepEqual(coverRect(0, 0, 1280, 720), { sx: 0, sy: 0, sw: 0, sh: 0 });
+  assert.equal(looksLikeLiveThumbnail(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16])), true);
+  assert.equal(looksLikeLiveThumbnail(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a])), false);
+  assert.equal(looksLikeLiveThumbnail(new Uint8Array()), false);
+  const big = new Uint8Array(LIVE_THUMBNAIL_MAX_BYTES + 1);
+  big.set([0xff, 0xd8, 0xff]);
+  assert.equal(looksLikeLiveThumbnail(big), false);
 });

@@ -25,6 +25,8 @@ const kine = {
   onClips: (cb: (clips: Clip[]) => void) => on<Clip[]>('clips', cb),
   /** Smazat = do koše (po týdnu zmizí samo); klip už v koši se smaže nadobro. */
   deleteClip: (id: string): Promise<void> => ipcRenderer.invoke('clips:delete', id),
+  /** Do koše (klip už v koši zůstane, kde je - na rozdíl od deleteClip ho nesmaže nadobro). */
+  trashClip: (id: string): Promise<void> => ipcRenderer.invoke('clips:trash', id),
   /** Vrátit klip z koše. */
   restoreClip: (id: string): Promise<Clip | null> => ipcRenderer.invoke('clips:restore', id),
   emptyTrash: (): Promise<void> => ipcRenderer.invoke('clips:emptyTrash'),
@@ -91,6 +93,9 @@ const kine = {
   /** Co se záznamem po skončení (nastavení na Kine, stejné jako ve studiu); null = nepřihlášený / Kine nejde. */
   liveAfterStream: (): Promise<LiveAfterStream | null> => ipcRenderer.invoke('live:afterStream'),
   setLiveAfterStream: (value: Visibility | null): Promise<LiveAfterStream | null> => ipcRenderer.invoke('live:setAfterStream', value),
+  /** Vlastní náhled přenosu (JPEG 1280×720, zmenšený v okně) -> Kine. */
+  setLiveThumbnail: (jpeg: Uint8Array): Promise<{ thumbnailUrl: string | null }> => ipcRenderer.invoke('live:setThumbnail', jpeg),
+  removeLiveThumbnail: (): Promise<void> => ipcRenderer.invoke('live:removeThumbnail'),
   /** Obrazovka "Hned jsem zpět" ve vysílání (bez argumentu = přepnout). Vrací, jestli je zapnutá. */
   liveBrb: (on?: boolean): Promise<boolean> => ipcRenderer.invoke('live:brb', on),
   /** Mikrofon jen ve vysílání ztlumit / zapnout. */

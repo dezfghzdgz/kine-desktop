@@ -98,3 +98,23 @@ export function liveErrorTextKey(message: string): Key {
 export function cleanLiveError(message: string): string {
   return message.replace(/^Error invoking remote method '[^']+':\s*/i, '').replace(/^Error:\s*/i, '').trim();
 }
+
+/** Vlastní náhled přenosu: appka obrázek zmenší na 1280×720 (JPEG, oříznutý na 16:9 jako karty na Kine). */
+export const LIVE_THUMBNAIL_WIDTH = 1280;
+export const LIVE_THUMBNAIL_HEIGHT = 720;
+/** Víc Kine nepřijme. */
+export const LIVE_THUMBNAIL_MAX_BYTES = 3 * 1024 * 1024;
+
+/** Výřez zdroje, který vyplní cíl beze změny poměru stran (jako object-fit: cover). */
+export function coverRect(srcW: number, srcH: number, dstW: number, dstH: number): { sx: number; sy: number; sw: number; sh: number } {
+  if (!(srcW > 0 && srcH > 0 && dstW > 0 && dstH > 0)) return { sx: 0, sy: 0, sw: Math.max(0, srcW), sh: Math.max(0, srcH) };
+  const scale = Math.max(dstW / srcW, dstH / srcH);
+  const sw = Math.min(srcW, dstW / scale);
+  const sh = Math.min(srcH, dstH / scale);
+  return { sx: (srcW - sw) / 2, sy: (srcH - sh) / 2, sw, sh };
+}
+
+/** Je to JPEG, který Kine jako náhled přijme (hlavička a velikost)? */
+export function looksLikeLiveThumbnail(bytes: Uint8Array): boolean {
+  return bytes.length > 4 && bytes.length <= LIVE_THUMBNAIL_MAX_BYTES && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+}

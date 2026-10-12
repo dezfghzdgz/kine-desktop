@@ -520,7 +520,8 @@ export async function runTestDriver(kine: {
         result.playerNav = first.next && first.prevDisabled && first.pos === `1 / ${shown.length}` && second.pos === `2 / ${shown.length}` && second.overlay === 1 && !!secondClip && second.title === secondClip.title && back === `1 / ${shown.length}`;
         result.playerNavDebug = { first, second, back };
         // Celá obrazovka (tlačítko v hlavičce / na scéně / F / dvojklik): celá scéna se šipkami na další klip, ne holé video.
-        const headFull = await win.webContents.executeJavaScript(`(() => { const b = document.querySelector('.player-head .player-full'); return !!b && !!b.querySelector('svg') && getComputedStyle(b).display !== 'none'; })()`);
+        // Mimo celou obrazovku jen jedno tlačítko (v hlavičce) - to na scéně je až v celé obrazovce (jak ven).
+        const headFull = await win.webContents.executeJavaScript(`(() => { const b = document.querySelector('.player-head .player-full'); const s = document.querySelector('.player-stage .stage-fullscreen'); return !!b && !!b.querySelector('svg') && getComputedStyle(b).display !== 'none' && !!s && getComputedStyle(s).display === 'none'; })()`);
         await win.webContents.executeJavaScript(`(() => { const b = document.querySelector('.player-head .player-full'); if (b) b.click(); return !!b; })()`, true);
         let fsOn = false;
         for (let i = 0; i < 20 && !fsOn; i++) {
@@ -528,7 +529,7 @@ export async function runTestDriver(kine: {
           fsOn = await win.webContents.executeJavaScript(`!!document.fullscreenElement && document.fullscreenElement.classList.contains('player-stage') && document.fullscreenElement.classList.contains('fullscreen')`);
         }
         const fsFirst = await win.webContents.executeJavaScript(
-          `(() => { const st = document.querySelector('.player-stage.fullscreen'); const n = st && st.querySelector('.stage-nav.next'); const r = n ? n.getBoundingClientRect() : null; return { next: !!n && !n.disabled && getComputedStyle(n).display !== 'none' && !!r && r.right > window.innerWidth - 120, pos: st ? st.querySelector('.stage-pos')?.textContent : null, title: st ? st.querySelector('.stage-title')?.textContent : null }; })()`
+          `(() => { const st = document.querySelector('.player-stage.fullscreen'); const n = st && st.querySelector('.stage-nav.next'); const r = n ? n.getBoundingClientRect() : null; const x = st && st.querySelector('.stage-fullscreen'); return { next: !!n && !n.disabled && getComputedStyle(n).display !== 'none' && !!r && r.right > window.innerWidth - 120, exit: !!x && getComputedStyle(x).display !== 'none', pos: st ? st.querySelector('.stage-pos')?.textContent : null, title: st ? st.querySelector('.stage-title')?.textContent : null }; })()`
         );
         await shot(win, 'settings-clips-player-fullscreen');
         await win.webContents.executeJavaScript(`(() => { const n = document.querySelector('.player-stage.fullscreen .stage-nav.next'); if (n) n.click(); return !!n; })()`, true);
@@ -545,7 +546,7 @@ export async function runTestDriver(kine: {
         const fsOff = await win.webContents.executeJavaScript(`!document.fullscreenElement && !document.querySelector('.player-stage.fullscreen')`);
         result.playerFullscreen = { headFull, fsOn, fsFirst, fsSecond, fsKey, fsOff };
         result.playerFullscreenOk =
-          headFull && fsOn && fsFirst.next && fsFirst.pos === `1 / ${shown.length}` && fsSecond.still && fsSecond.pos === `2 / ${shown.length}` && fsSecond.video && fsKey.still && fsKey.pos === `1 / ${shown.length}` && fsOff;
+          headFull && fsOn && fsFirst.next && fsFirst.exit && fsFirst.pos === `1 / ${shown.length}` && fsSecond.still && fsSecond.pos === `2 / ${shown.length}` && fsSecond.video && fsKey.still && fsKey.pos === `1 / ${shown.length}` && fsOff;
         await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
         await sleep(300);
       }
@@ -1078,16 +1079,76 @@ export async function runTestDriver(kine: {
       }
     }
 
-    // Koš: smazání z karty (dvojí klik = potvrzení) dá klip do koše, tlačítko Koš ho ukáže,
-    // "Vrátit" ho vrátí. Soubor se mezitím stěhuje do .trash a zpátky.
+    // Koš: smazání z karty dá klip hned do koše (bez potvrzování v kartě) a dole lišta "Vrátit";
+    // tlačítko Koš ho ukáže, "Vrátit" na kartě ho vrátí. Soubor se mezitím stěhuje do .trash a zpátky.
     kine.openSettings('clips');
     await sleep(700);
     const trashWin = kine.settingsWindow;
     if (trashWin && !trashWin.isDestroyed() && clip2) {
       const before = kine.library.list().length;
-      const clicked = await trashWin.webContents.executeJavaScript(`(() => { const card = document.querySelector('.clip[data-id="${clip2.id}"]'); if (!card) return false; const btns = [...card.querySelectorAll('.actions button.danger')]; const b = btns[btns.length - 1]; b.click(); return true; })()`);
+      const clickDelete = () =>
+        trashWin.webContents.executeJavaScript(`(() => { const card = document.querySelector('.clip[data-id="${clip2.id}"]'); if (!card) return false; const b = card.querySelector('.card-tools button.delete'); if (!b) return false; b.click(); return true; })()`);
+      // 1) smazat -> lišta dole -> Vrátit z lišty
+      const undoClicked = await clickDelete();
+      let undoBar: any = null;
+      for (let i = 0; i < 20 && !undoBar?.shown; i++) {
+        await sleep(150);
+        undoBar = await trashWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.undo-bar'); const r = b ? b.getBoundingClientRect() : null; return { shown: !!b, text: b ? b.querySelector('.undo-text')?.textContent : null, inView: !!r && r.bottom <= window.innerHeight && r.top >= 0, card: !!document.querySelector('.clip[data-id="${clip2.id}"]') }; })()`);
+      }
+      const trashedByUndoTest = !!(kine as any).library.trash().find((c: any) => c.id === clip2.id);
+      await shot(trashWin, 'settings-clips-undo');
+      await trashWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.undo-bar .undo-restore'); if (b) b.click(); return !!b; })()`);
+      let undone = false;
+      for (let i = 0; i < 20 && !undone; i++) {
+        await sleep(150);
+        const c = kine.library.list().find((x) => x.id === clip2.id);
+        undone = !!c && !c.deletedAt && (await trashWin.webContents.executeJavaScript(`!document.querySelector('.undo-bar') && !!document.querySelector('.clip[data-id="${clip2.id}"]')`));
+      }
+      result.trashUndo = { undoClicked, undoBar, trashedByUndoTest, undone };
+      result.trashUndoOk = undoClicked && !!undoBar?.shown && !!undoBar?.inView && !undoBar?.card && /„|"|“/.test(String(undoBar?.text)) && trashedByUndoTest && undone;
       await sleep(300);
-      await trashWin.webContents.executeJavaScript(`(() => { const card = document.querySelector('.clip[data-id="${clip2.id}"]'); const b = card && card.querySelector('.actions button.danger:not(.quiet)'); if (b) b.click(); return !!b; })()`);
+      // 1b) Dvojklik na koš: druhé kliknutí (na stejném místě už je jiný klip) se nepočítá a klip se
+      //     nesmaže nadobro, ani když appce přijde druhý požadavek "do koše". Ctrl+Z podle písmene
+      //     (česká klávesnice: Z má kód KeyY), Ctrl+Y (kód KeyZ) nic nevrací.
+      const trashBefore = (kine as any).library.trash().length;
+      const dbl = await trashWin.webContents.executeJavaScript(`(() => {
+        const card = document.querySelector('.clip[data-id="${clip2.id}"]');
+        const b = card && card.querySelector('.card-tools button.delete');
+        if (!b) return { clicked: false };
+        b.scrollIntoView({ block: 'center' });
+        const r = b.getBoundingClientRect();
+        const x = r.left + r.width / 2, y = r.top + r.height / 2;
+        b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, clientX: x, clientY: y }));
+        const under = document.elementFromPoint(x, y);
+        const second = under && under.closest('.card-tools button.delete') ? under.closest('.card-tools button.delete') : b;
+        second.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 2, clientX: x, clientY: y }));
+        void window.kine.trashClip(${JSON.stringify(clip2.id)});
+        return { clicked: true, secondOnOther: second !== b };
+      })()`);
+      await sleep(700);
+      const afterDbl = kine.library.get(clip2.id);
+      const dblState = {
+        ...dbl,
+        inTrash: !!afterDbl?.deletedAt,
+        fileKept: !!afterDbl && existsSync(afterDbl.file),
+        trashAdded: (kine as any).library.trash().length - trashBefore,
+        bar: await trashWin.webContents.executeJavaScript(`document.querySelector('.undo-bar .undo-text')?.textContent ?? null`),
+      };
+      await trashWin.webContents.executeJavaScript(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'y', code: 'KeyZ', ctrlKey: true, bubbles: true, cancelable: true })), true`);
+      await sleep(400);
+      const ctrlYIgnored = !!kine.library.get(clip2.id)?.deletedAt;
+      await trashWin.webContents.executeJavaScript(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', code: 'KeyY', ctrlKey: true, bubbles: true, cancelable: true })), true`);
+      let qwertzUndo = false;
+      for (let i = 0; i < 20 && !qwertzUndo; i++) {
+        await sleep(150);
+        const c = kine.library.get(clip2.id);
+        qwertzUndo = !!c && !c.deletedAt && (await trashWin.webContents.executeJavaScript(`!document.querySelector('.undo-bar') && !!document.querySelector('.clip[data-id="${clip2.id}"]')`));
+      }
+      result.trashDouble = { ...dblState, ctrlYIgnored, qwertzUndo };
+      result.trashDoubleOk = !!dbl?.clicked && dblState.inTrash && dblState.fileKept && dblState.trashAdded === 1 && /„|"|“/.test(String(dblState.bar)) && ctrlYIgnored && qwertzUndo;
+      await sleep(300);
+      // 2) smazat znovu a nechat v koši
+      const clicked = await clickDelete();
       let inTrash: any = null;
       for (let i = 0; i < 20 && !inTrash; i++) {
         await sleep(200);
@@ -1313,6 +1374,26 @@ export async function runTestDriver(kine: {
       // Průsvitný postranní panel = alfa < 1 v barvě pozadí.
       const alpha = /rgba\([^)]*,\s*([0-9.]+)\)/.exec(look.sideBg ?? '');
       result.lookOk = look.look === 'glass' && look.backdrop === 'sunset' && look.k === '0.8' && look.backdropShown && look.chips === 6 && look.panel && !!alpha && Number(alpha[1]) < 0.7 && back;
+
+      // Velikost písma, rohy, karty klipů, klidný režim (Vzhled): atributy na <html> a opravdu větší písmo / kulatější rohy.
+      kine.openSettings('settings:look');
+      await sleep(700);
+      const sw = kine.settingsWindow!;
+      const fontBefore = await sw.webContents.executeJavaScript(`parseFloat(getComputedStyle(document.body).fontSize)`);
+      const segments = await sw.webContents.executeJavaScript(`[...document.querySelectorAll('.look-segmented')].map((g) => g.querySelectorAll('button').length)`);
+      kine.settings.update({ lookText: 'l', lookCorners: 'round', lookCards: 's', lookCalm: true });
+      await sleep(600);
+      const sizes = await sw.webContents.executeJavaScript(
+        `(() => { const r = document.documentElement; const p = document.querySelector('.panel'); const btn = document.querySelector('.look-segmented.look-text button.active'); return { text: r.getAttribute('data-text'), corners: r.getAttribute('data-corners'), cards: r.getAttribute('data-cards'), calm: r.getAttribute('data-calm'), font: parseFloat(getComputedStyle(document.body).fontSize), radius: p ? parseFloat(getComputedStyle(p).borderTopLeftRadius) : 0, active: btn ? btn.getAttribute('aria-checked') : null, anim: p ? getComputedStyle(p).transitionDuration : '' }; })()`
+      );
+      await shot(sw, 'settings-look-sizes');
+      kine.settings.update({ lookText: 'm', lookCorners: 'normal', lookCards: 'm', lookCalm: false });
+      await sleep(500);
+      const sizesBack = await sw.webContents.executeJavaScript(`['data-text', 'data-corners', 'data-cards', 'data-calm'].every((a) => !document.documentElement.hasAttribute(a))`);
+      result.lookSizes = { fontBefore, segments, sizes, sizesBack };
+      result.lookSizesOk =
+        Array.isArray(segments) && segments.length === 3 && segments.every((n: number) => n === 3) &&
+        sizes.text === 'l' && sizes.corners === 'round' && sizes.cards === 's' && sizes.calm === '1' && sizes.font > fontBefore && sizes.radius >= 20 && sizes.active === 'true' && sizesBack;
     }
 
     // Zmenšování klipů: velký klip (1080p30, 20 Mb/s) v knihovně -> Klipy -> úložiště nahoře ->
@@ -1385,8 +1466,8 @@ export async function runTestDriver(kine: {
       'inlinePlayer', 'gridUntouched', 'trimPanel', 'trimNewClip', 'trimReplace', 'vertical', 'verticalUi', 'autoClip', 'overlayClosed', 'filters',
       'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks', 'reviewMerge', 'updateUi',
       'playerNav', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
-      'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
-      'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'clipToastInstant', 'recordingStopOnceOk', 'updateProgressOk', 'playerFullscreenOk', 'lookOk', 'lookFollowOk',
+      'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'trashUndoOk', 'trashDoubleOk', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
+      'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'clipToastInstant', 'recordingStopOnceOk', 'updateProgressOk', 'playerFullscreenOk', 'lookOk', 'lookSizesOk', 'lookFollowOk',
       'updateIssueOk', 'settingsSectionsOk', 'compressOk',
     ];
     if (process.env.KINE_TEST_LIVE_URL) common.push('liveOk');

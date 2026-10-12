@@ -82,7 +82,7 @@ import { compressSummary, COMPRESS_LEVELS, type CompressLevel } from '../shared/
 import { makeGif, makeThumbnail, mergeClips, trimClip } from './edit';
 import { runFfmpeg, spawnFfmpeg } from './ffmpeg';
 import { LiveController } from './live';
-import { LIVE_QUALITIES, cleanLiveError, liveElapsed, liveErrorTextKey } from '../shared/live';
+import { LIVE_QUALITIES, cleanLiveError, liveElapsed, liveErrorTextKey, looksLikeLiveThumbnail } from '../shared/live';
 import { GIF_MAX_SECONDS, normalizeSpeed, shiftMarkers, type TextPosition } from './editPlan';
 import { APP_USER_MODEL_IDS, PRODUCT_NAMES, detectVariant, modeForVariant, siblingExe } from './variant';
 import { brandIcon, trayIcon } from './icon';
@@ -1222,10 +1222,50 @@ class KineApp {
     if (!this.auth.current()) return null;
     try {
       const setup = await this.kineApi.liveSetup();
-      return { value: setup.recordingVisibility, supported: setup.recordingAutoSupported };
+      return {
+        value: setup.recordingVisibility,
+        supported: setup.recordingAutoSupported,
+        ...(setup.stream && setup.stream.thumbnailUrl !== undefined ? { thumbnailUrl: setup.stream.thumbnailUrl } : {}),
+      };
     } catch (e) {
       log(`vysílání: nastavení záznamu nejde načíst: ${(e as Error).message}`);
       return null;
+    }
+  }
+
+  /**
+   * Vlastní náhled přenosu (záložka Živě): obrázek už zmenšený na 1280×720
+   * (JPEG, zmenšuje ho okno appky stejně jako studio na webu) -> Kine.
+   */
+  async setLiveThumbnail(bytes: unknown): Promise<{ thumbnailUrl: string | null }> {
+    if (!this.auth.current()) throw new Error('login');
+    const jpeg =
+      bytes instanceof Uint8Array
+        ? bytes
+        : bytes instanceof ArrayBuffer
+          ? new Uint8Array(bytes)
+          : ArrayBuffer.isView(bytes)
+            ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+            : new Uint8Array(0);
+    if (!looksLikeLiveThumbnail(jpeg)) throw new Error('not-jpeg');
+    try {
+      const result = await this.kineApi.liveSetThumbnail(jpeg);
+      log(`vysílání: vlastní náhled uložený (${Math.round(jpeg.length / 1024)} kB)`);
+      return result;
+    } catch (e) {
+      log(`vysílání: náhled nejde uložit: ${(e as Error).message}`);
+      throw e;
+    }
+  }
+
+  async removeLiveThumbnail(): Promise<void> {
+    if (!this.auth.current()) throw new Error('login');
+    try {
+      await this.kineApi.liveRemoveThumbnail();
+      log('vysílání: náhled zase snímek z vysílání');
+    } catch (e) {
+      log(`vysílání: náhled nejde odebrat: ${(e as Error).message}`);
+      throw e;
     }
   }
 
@@ -2667,6 +2707,8 @@ class KineApp {
     ipcMain.handle('live:openRecording', () => this.openLiveRecording());
     ipcMain.handle('live:afterStream', () => this.liveAfterStream());
     ipcMain.handle('live:setAfterStream', (_e, value: unknown) => this.setLiveAfterStream(value));
+    ipcMain.handle('live:setThumbnail', (_e, bytes: unknown) => this.setLiveThumbnail(bytes));
+    ipcMain.handle('live:removeThumbnail', () => this.removeLiveThumbnail());
     ipcMain.handle('live:brb', (_e, on?: unknown) => this.toggleLiveBrb(typeof on === 'boolean' ? on : undefined));
     ipcMain.handle('live:muteMic', (_e, muted: unknown) => this.setLiveMicMuted(Boolean(muted)));
     ipcMain.handle('app:usage', () => this.resourceUsage());
@@ -2685,7 +2727,17 @@ class KineApp {
     ipcMain.handle('platform', () => process.platform);
 
     ipcMain.handle('clips:list', () => this.library.listAll());
-    ipcMain.handle('clips:restore', (_e, id: string) => this.library.restore(String(id)));
+    ipcMain.handle('clips:restore', (_e, id: string) => {
+      const clip = this.library.restore(String(id));
+      // Nahraný klip, který Kine ještě zpracovává: zase čekat na "hotovo" (jinak karta visí na procentech).
+      if (clip?.upload?.state === 'done' && clip.upload.ready === false) this.uploader.watchReady(clip.id, clip.upload.videoId, clip.upload.url);
+      return clip;
+    });
+    // Jen do koše. Klip, který už v koši je, tu zůstane - dvojklik na ikonku koše ho nesmí smazat nadobro.
+    ipcMain.handle('clips:trash', (_e, id: string) => {
+      const clip = this.library.get(String(id));
+      if (clip && !clip.deletedAt) this.library.remove(clip.id);
+    });
     ipcMain.handle('clips:emptyTrash', () => this.library.emptyTrash());
     ipcMain.handle('storage:info', () => this.storageInfo());
     ipcMain.handle('clips:delete', (_e, id: string) => this.library.remove(id));

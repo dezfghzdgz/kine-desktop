@@ -244,3 +244,13 @@ test('nastavení ze starší verze: nedotčená kvalita 1080p30 8 Mb/s se zvedne
   assert.equal(sanitizeSettings({}).audioOffsetMs, 0);
   assert.equal(sanitizeSettings({}).separateMicTrack, true);
 });
+
+test('vzhled: velikost písma, rohy, karty klipů a klidný režim', () => {
+  const d = sanitizeSettings({});
+  assert.deepEqual([d.lookText, d.lookCorners, d.lookCards, d.lookCalm], ['m', 'normal', 'm', false]);
+  const s = sanitizeSettings({ lookText: 'l', lookCorners: 'round', lookCards: 's', lookCalm: true });
+  assert.deepEqual([s.lookText, s.lookCorners, s.lookCards, s.lookCalm], ['l', 'round', 's', true]);
+  const bad = sanitizeSettings({ lookText: 'xl', lookCorners: 'oval', lookCards: 3, lookCalm: 'ano' });
+  assert.deepEqual([bad.lookText, bad.lookCorners, bad.lookCards, bad.lookCalm], ['m', 'normal', 'm', false]);
+  assert.equal(DEFAULT_SETTINGS.lookCalm, false);
+});

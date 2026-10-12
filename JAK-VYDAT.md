@@ -2,8 +2,8 @@
 
 Repo `kine-desktop` už na GitHubu máš a první vydání (v0.1.0) proběhlo.
 Tady je, co dělat dál: **A)** nahrát novou verzi kódu, **B)** zapnout
-stahování z našeho úložiště místo GitHubu, **C)** podpis proti hlášce
-antiviru/SmartScreenu.
+stahování z našeho úložiště místo GitHubu, **C)** podpis, aby Kine pustilo
+Inteligentní řízení aplikací ve Windows 11 (a nevarovaly antiviry a SmartScreen).
 
 ## A) Nová verze (přes web GitHubu, bez gitu)
 
@@ -94,42 +94,106 @@ a nainstalované appky si tam hledají aktualizace (`full/latest.yml`,
 aktualizují appky do verze 0.4.0. GitHub Releases zůstávají jako záloha –
 kdyby R2 nebylo nastavené, web míří tam.
 
-## C) Antivirus / SmartScreen („Systém Windows chránil váš počítač“)
+## C) Podpis – aby Windows Kine pustil (Inteligentní řízení aplikací)
 
-Není to virus a **není to nic v kódu** – hláška je proto, že instalátor
-**není podepsaný certifikátem ověřeného vydavatele** a je nový
-(SmartScreen si buduje pověst podle počtu stažení). Obejít se to dá
-(„Další informace“ → „Přesto spustit“; v prohlížeči „Zachovat“) a web to
-u tlačítka ke stažení říká, ale správné řešení je podpis. Jediný, kdo ho
-může zařídit, jsi ty (jde o tvou identitu); workflow je připravený.
+**Proč.** Windows 11 má **Inteligentní řízení aplikací** (anglicky Smart App
+Control). Když je zapnuté, pustí jen programy podepsané certifikátem
+ověřeného vydavatele – nepodepsaný instalátor zablokuje celý („…zablokovalo
+aplikaci, která může být nebezpečná“) nebo jeho část („část této aplikace
+byla zablokována“) a tlačítko „Přesto spustit“ tam **není**. Kódem se to
+obejít nedá (a nemá). Jediné řešení je **podpis** a ten jde jen na tvoje
+jméno – certifikát si musíš pořídit ty (ověřují totožnost). Všechno ostatní
+je hotové: jakmile do GitHubu přidáš dvě tajemství, každé vydání se podepíše
+celé – instalátor, odinstalátor, Kine.exe, všechny .dll, ffmpeg.exe, pluginy
+instalátoru (NSIS, ty se rozbalují do %TEMP%) i pomocník `kine-helper.exe`.
+Krok „Podpis – kontrola“ ověří, že je podepsaný opravdu každý soubor, jinak
+se nevydá.
 
-Možnosti (stav září 2026):
+Do té doby (pro tebe, na tvém PC): Start → napiš „Inteligentní řízení
+aplikací“ → **Vypnuto** → spusť instalátor znovu. S aktuálními aktualizacemi
+Windows (od dubna 2026) jde později zase zapnout bez přeinstalace Windows –
+ale dokud Kine není podepsané, Windows by ho pak blokoval i při spuštění.
 
-1. **Azure Artifact Signing** (dřív Trusted Signing; Microsoft,
-   9,99 $/měsíc, podpis v CI umí workflow už teď). Háček: jako
-   **jednotlivec** ho dostaneš jen v USA a Kanadě. V EU potřebuje
-   **ověřenou firmu** (živnost s IČO / s.r.o.; podle Microsoftu bez
-   podmínky stáří firmy). Až firmu budeš mít: portal.azure.com →
-   **Artifact Signing** → účet → **Identity validation** (Organization,
-   Public trust; trvá 1–20 pracovních dní) → **Certificate profile**.
-   Pak App registration (Entra ID) s tajným klíčem a role *Trusted Signing
-   Certificate Profile Signer*. Do GitHubu: **Secrets** `AZURE_TENANT_ID`,
-   `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`; **Variables**
-   `AZURE_SIGN_ENDPOINT` (např. `https://weu.codesigning.azure.net`),
-   `AZURE_SIGN_ACCOUNT`, `AZURE_SIGN_PROFILE`, `AZURE_SIGN_PUBLISHER`
-   (přesně jako v certifikátu, např. `CN=Kine s.r.o.`). Workflow podpis
-   přidá sám (`scripts/publish-config.mjs`), podepíše obě appky.
-2. **Certum „Open Source Code Signing“** – nejlevnější cesta pro
-   jednotlivce (od 49 € s podpisem v cloudu SimplySign, od 69 € s kartou),
-   repo kine-desktop je veřejné s licencí MIT, takže na něj máš nárok.
-   Ověřují tvou totožnost (doklad). Podpis v GitHub Actions přes SimplySign
-   jde, ale je to křehčí (přihlášení do jejich aplikace s TOTP) – když si ho
-   vybereš, napiš mi a napojím ho do workflow.
-3. Klasický **OV certifikát** pro jednotlivce (Certum Standard od 139 €,
-   SSL.com apod.) – funguje jako 2, jen dražší.
+### Doporučeno: Certum „Open Source Code Signing in the Cloud“ (od 49 € / rok)
 
-U všech tří platí: „Neznámý vydavatel“ zmizí hned, ale SmartScreen může
-ještě chvíli varovat, než si podpis vybuduje pověst (pár set stažení).
+Nejlevnější cesta pro jednotlivce v ČR (Azure Artifact Signing bere
+jednotlivce jen z USA a Kanady). Repo kine-desktop je veřejné s licencí MIT,
+takže na „open source“ certifikát máš nárok. Certum je v programu důvěryhodných
+certifikačních autorit Microsoftu – Inteligentní řízení aplikací podepsané
+Kine pustí hned. V podpisu bude „Open Source Developer, <tvoje jméno>“.
+
+1. **Koupit:** shop.certum.eu → Code Signing → **Open Source Code Signing in
+   the Cloud** (1 rok) → zaplatit.
+2. **Aktivovat a ověřit totožnost:** shop.certum.eu → *My account* → *Data
+   security products* → u certifikátu *Activate*. Jméno piš přesně jako
+   v občance, ověření buď automaticky (kamera + doklad), nebo nahraješ sken
+   dokladu. U open source chtějí i adresu a odkaz na projekt:
+   `https://github.com/dezfghzdgz/kine-desktop`. Úložiště klíče: **cloud
+   (SimplySign)**, algoritmus nech výchozí. Zadáš e-mail – to je přihlašovací
+   jméno do SimplySign. Ověření trvá obvykle pár dní.
+3. **Po vydání certifikátu** přijdou tři e-maily. V e-mailu *Regaining access
+   to the SimplySign service* otevři odkaz (na počítači) a zadej kód
+   z e-mailu *Secret for regaining access* – stránka ukáže **QR kód**.
+4. **Než QR kód naskenuješ aplikací SimplySign, vytáhni z něj text:** udělej
+   snímek (Win+Shift+S) a přečti ho čtečkou QR, která ukáže text – třeba
+   Google Lens (aplikace Google v mobilu) nebo foťák v Androidu. Text začíná
+   `otpauth://totp/…` – zkopíruj ho **celý**. To je tajemství pro GitHub;
+   kdo ho má spolu s tvým e-mailem, může podepisovat tvým jménem – nikam
+   jinam ho nedávej.
+   Pak v mobilu: aplikace **SimplySign** → *Activate application* → *Other
+   activation methods* → *QR code* → naskenuj → *Generate token* → *Finish*.
+   (Kdyby ses k textu nedostal: stejný postup z kroku 3 jde zopakovat – vznikne
+   nový QR kód, ten pak znovu naskenuj i v aplikaci.)
+5. **GitHub** → repo kine-desktop → *Settings* → *Secrets and variables* →
+   *Actions* → *New repository secret*, dvakrát:
+   - `CERTUM_USERNAME` = e-mail účtu SimplySign
+   - `CERTUM_TOTP` = celý text `otpauth://totp/…` z QR kódu
+6. **Workflow:** v repu musí být nový `.github/workflows/release.yml` (má kroky
+   „Podpis – příprava“, „Podpis – kontrola“, „Podpis – odhlášení“). Přetažením
+   se `.github` nenahraje: na GitHubu otevři `.github/workflows/release.yml` →
+   tužka (*Edit*) → smaž obsah, vlož obsah stejného souboru z balíčku →
+   *Commit changes*. Stačí jednou – celá logika je v `scripts/podpis.mjs`.
+7. **Vydat:** *Actions* → *Vydání* → *Run workflow*. V *Summary* běhu uvidíš
+   „Podpis ✅ Certum – Open Source Developer, …“ a „Kontrola podpisu ✅ všech
+   N spustitelných souborů je podepsaných“. Kontrola u tebe: na stažený
+   `Kine-Setup.exe` pravým tlačítkem → *Vlastnosti* → *Digitální podpisy*.
+8. **Obnova:** certifikát platí nejvýš rok a čtvrt (pravidla od února 2026).
+   Workflow 30 dní předem napíše varování; obnovíš ho u Certumu, tajemství
+   v GitHubu zůstávají (stejný účet SimplySign). Kdyby měl účet víc
+   certifikátů, ten správný vybere proměnná (*Variables*) `CERTUM_CERT_SHA1`
+   = otisk certifikátu.
+
+**Když krok „Podpis – příprava“ spadne** („Přihlášení do SimplySign se
+nepovedlo“): zkontroluj obě tajemství a spusť Vydání znovu. Když to nejde ani
+napodruhé, pošli mi log toho kroku – nespouštěj to pořád dokola, opakované
+špatné kódy umí účet u Certumu zamknout. Bez tajemství (nebo když je smažeš)
+se vydává jako dřív, jen nepodepsaně.
+
+**SmartScreen** („Systém Windows chránil váš počítač“, modré okno) může
+u nového certifikátu ještě chvíli varovat, než si podpis vybuduje pověst (pár
+set stažení) – tam „Další informace“ → „Přesto spustit“ jde. Inteligentní
+řízení aplikací už ale nic neblokuje.
+
+**Aktualizace:** nainstalované nepodepsané verze si podepsanou aktualizaci
+stáhnou normálně. Appka u aktualizací jméno v certifikátu nekontroluje
+(stahuje přes HTTPS a hlídá kontrolní součet), takže pozdější přechod na jiný
+certifikát (třeba firemní) aktualizace nerozbije.
+
+### Další možnosti
+
+- **Azure Artifact Signing** (Microsoft, 9,99 $/měsíc) – jednotlivci jen USA
+  a Kanada, v EU jen ověřená **firma**. Workflow ho umí (podepíše i pluginy):
+  *Secrets* `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`;
+  *Variables* `AZURE_SIGN_ENDPOINT` (např. `https://weu.codesigning.azure.net`),
+  `AZURE_SIGN_ACCOUNT`, `AZURE_SIGN_PROFILE`, `AZURE_SIGN_PUBLISHER` (přesně
+  jako v certifikátu, např. `CN=Kine s.r.o.`). Když jsou nastavené Certum
+  i Azure, použije se Certum.
+- **Microsoft Store** (zdarma, podepíše Microsoft) – Kine by se instalovalo ze
+  Storu (balík MSIX); větší přestavba, jde udělat později.
+- **SignPath Foundation** (zdarma pro open source) – schvalují projekt ručně,
+  v podpisu je „SignPath Foundation“.
+- Klasický **OV certifikát** (Certum Standard, SSL.com…) – funguje stejně
+  jako Certum Open Source, jen dražší.
 
 **Falešný poplach antiviru** (Defender označí `Kine-Setup.exe` jako
 hrozbu) nahlas Microsoftu: microsoft.com/wdsi/filesubmission → *Software

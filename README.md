@@ -484,7 +484,7 @@ src/main/        hlavní proces (Electron, Node)
   live.ts        živé vysílání na Kine: klíč z Kine, ffmpeg -> RTMPS, znovupřipojení, hlídač
   livePlan.ts    čistá část vysílání: adresa, argumenty ffmpeg, průběh, pokusy (test)
   editPlan.ts    čistá část úprav: slepení klipu se stopami zvuku, zkrácení (trimArgs), sestřih, GIF, momenty, rozbor hlavičky ffmpeg (test)
-  winHelper.ts   pomocník pro Windows (PowerShell + C# přes Add-Type): okno v popředí, procesy, okna, Steam, stav kláves
+  winHelper.ts   pomocník pro Windows: podepsaný kine-helper.exe (src/helper/KineHelper.cs), jinak PowerShell + C# přes Add-Type: okno v popředí, procesy, okna, Steam, stav kláves
   hotkeys.ts     zkratky: systémové (Electron) + složené přes pomocníka
   clips.ts       knihovna klipů (index.json ve složce s klipy)
   updater.ts     aktualizace: R2 / GitHub / web Kine jako záloha, stahování až po hře; updaterParse.ts čistá část (test)
@@ -590,10 +590,9 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   jede bez něj (jednoduché zkratky jako F8 fungují) a řekne proč.
 - **Podpis:** jediné opravdové řešení pro Smart App Control je podepsaná
   appka (instalátor, appka i pluginy instalátoru). Azure Artifact Signing
-  (dřív Trusted Signing) je zatím pro jednotlivce jen v USA a Kanadě;
-  možnosti: Microsoft Store (MSIX podepíše Microsoft), SignPath pro open
-  source, nebo klasický certifikát (OV). Workflow podpis přes Azure umí,
-  až bude k dispozici.
+  (dřív Trusted Signing) je zatím pro jednotlivce jen v USA a Kanadě; od
+  0.10.1 workflow podepisuje certifikátem Certum Open Source (SimplySign),
+  viz Novinky 0.10.1 a JAK-VYDAT.md, část C.
 
 ## Novinky 0.10.0
 
@@ -629,3 +628,61 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
 - **Plynulejší světlo kolem přehrávače:** barvy z videa se přelévají
   (desetkrát za sekundu, s prolínáním), neskáčou.
 
+## Novinky 0.10.1
+
+- **Podpis celé appky (Inteligentní řízení aplikací / Smart App Control):**
+  Windows 11 s ním pustí jen podepsaný kód, nepodepsaný instalátor zablokuje
+  celý. Workflow Vydání teď umí podepisovat certifikátem **Certum Open Source
+  (SimplySign v cloudu)** – stačí tajemství `CERTUM_USERNAME` a `CERTUM_TOTP`
+  (celý odkaz `otpauth://…` z QR kódu při aktivaci). `scripts/podpis.mjs
+  priprav` nainstaluje SimplySign Desktop (ověří podpis jeho instalátoru),
+  přihlásí se jednorázovým kódem (TOTP, SHA-256 – `scripts/podpisCore.mjs`),
+  najde certifikát v úložišti Windows a podepíše kopie pluginů NSIS
+  (`ELECTRON_BUILDER_NSIS_DIR` / `ELECTRON_BUILDER_NSIS_RESOURCES_DIR` – instalátor
+  je rozbaluje do %TEMP% a načítá); electron-builder pak podepíše Kine.exe,
+  **všechny .dll a .node** (`signExts`), ffmpeg.exe, elevate.exe,
+  odinstalátor i instalátor (`scripts/publish-config.mjs`). `podpis.mjs over`
+  po sestavení zkontroluje každý spustitelný soubor včetně toho, co je
+  uvnitř instalátoru (7-Zip), a nepodepsané vydání zastaví. Bez tajemství se
+  vydává jako dřív. Azure Artifact Signing zůstává (podepíše i pluginy).
+  Zkouška naostro na Linuxu (skutečné Electron pro Windows + NSIS, testovací
+  certifikát, `osslsigncode verify`): 18 z 18 souborů podepsaných, instalátor
+  pod wine instaluje.
+- **Pomocník jako program:** `src/helper/KineHelper.cs` → `kine-helper.exe`
+  (csc.exe z .NET Frameworku, který je v každých Windows) dělá totéž co
+  PowerShell skript a mluví stejně (řádky JSON). Při Inteligentním řízení
+  aplikací PowerShell jede v omezeném režimu a skript nejde – podepsaný
+  program projde. Přibalí se jen v podepsaném sestavení (nepodepsaný by
+  blokoval stejně); appka ho pak použije, a když se dvakrát nerozjede, vrátí
+  se k PowerShellu. Sám skončí, když appka zavře stdin (nezůstane viset po
+  pádu appky). Testy: `tests/helper.test.mjs` (logika přes mono / csc),
+  ve Vydání ho `podpis.mjs priprav` vždycky přeloží a pustí naostro.
+- Česky se Smart App Control v textech jmenuje jako ve Windows –
+  **Inteligentní řízení aplikací**.
+- **Smazání klipu bez potvrzování:** ikonka koše dá klip hned do koše
+  a dole se ukáže lišta „Přesunuto do koše · Vrátit“ (8 s, i **Ctrl+Z** –
+  podle písmene, takže funguje i na české klávesnici QWERTZ); dřív se
+  v kartě rozbalovalo dlouhé „Přesunout do koše?…“, které z karty
+  přetékalo. Stejně hromadné smazání vybraných klipů. Co se smaže, dokud
+  lišta svítí, vrátí Vrátit všechno. Karta zmizí hned a druhé kliknutí
+  dvojkliku se nepočítá (na stejném místě už je další klip); do koše jde
+  zvláštní požadavek `clips:trash`, který klip už v koši nechá být – dřív by
+  ho druhé „smazat“ smazalo nadobro. Smazat nadobro a Vysypat koš (z koše)
+  se dál potvrzují (dvojklik nepotvrdí), jen kratším textem. Klip vrácený
+  z koše, který Kine ještě zpracovává, se zase dočká „Klip je na Kine“.
+- **Přehrávač: jedno tlačítko celé obrazovky.** Mimo celou obrazovku jen
+  „Celá obrazovka“ v hlavičce; tlačítko ve videu je až v celé obrazovce
+  (jak z ní ven). Šipky na předchozí / další klip beze změny.
+- **Náhled přenosu** (Živě -> O přenosu): vlastní obrázek, který lidé uvidí
+  na Kine v řadě Živě a v náhledu odkazu; appka ho ořízne na 16:9
+  (1280×720 JPEG) a pošle na Kine (`/api/live/thumbnail`). Bez něj snímek
+  z vysílání jako dřív. Jde měnit i během vysílání. Adresu náhledu od Kine
+  appka bere jen https.
+- **Vzhled:** velikost písma, rohy (hranaté / normální / kulaté), velikost
+  karet klipů a klidný režim bez animací (Záznam -> Vzhled).
+- **Rychlejší nahrávání dlouhých videí:** velikost kusu se přizpůsobuje
+  rychlosti připojení (8–64 MiB, cíl ~8 s na kus - Cloudflare doporučuje
+  kolem 50 MB); na rychlém připojení (i optice, kde kus trvá pod půl
+  vteřiny) výrazně méně čekání na potvrzení kusů. Kusy se z disku čtou
+  asynchronně, ať velký kus nezastaví okna appky. Po nahrání karta
+  ukazuje, kolik procent má Cloudflare zpracováno.

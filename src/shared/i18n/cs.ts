@@ -817,4 +817,5 @@ export const cs: Record<Key, string> = {
   lookCardsL: 'Větší',
   lookCalm: 'Klidný režim (bez animací)',
   lookCalmHint: 'Vypne animace a přechody v okně appky - nic se neposouvá ani nepřelévá. Hodí se na slabší počítač, nebo když pohyb na obrazovce ruší.',
+  audioNativeNote: 'Zvuk hry se bere přímo z Windows z „{device}“ (jako v OBS) - běžnou cestou toto zařízení otevřít nešlo.',
 };

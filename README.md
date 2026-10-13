@@ -686,3 +686,41 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   vteřiny) výrazně méně čekání na potvrzení kusů. Kusy se z disku čtou
   asynchronně, ať velký kus nezastaví okna appky. Po nahrání karta
   ukazuje, kolik procent má Cloudflare zpracováno.
+
+## Novinky 0.10.2
+
+- **Zvuk hry i u headsetů s vlastním programem (Logitech G HUB, Razer
+  Synapse…), Oculus / Meta Quest, Steam Streaming - jako v OBS.** Chromium
+  otevírá zvuk výchozího výstupu ve stereu a virtuální zařízení 7.1 to
+  odmítnou („Could not start audio source"), takže klipy byly bez zvuku hry.
+  Když se to stane, appka teď sama pustí pomocníka
+  (`src/helper/KineLoopback.cs`, přeloží ho PowerShell přes Add-Type -
+  C# 5), který zařízení otevře jako OBS: WASAPI loopback v jeho vlastním
+  formátu (mix format), převede ho na stereo (střed a zadní kanály do stran,
+  LFE pryč, jako Web Audio) a posílá binárně (`KLB1` + zprávy F / A / E).
+  Hlavní proces ho čte (`src/main/audioLoopback.ts`) a předává snímací
+  stránce, kde z něj Web Audio (bez výstupu do reproduktorů) udělá stopu
+  místo té z Chromia - nahrávání, klipy, měřáky i vysílání jedou beze změny.
+  Zpoždění proti obrazu je stálé (náskok 60 ms + čtení) a klip ho při stavbě
+  srovná (`systemLatencyMs` → `clipMuxArgs`). Rozdíl hodin zvukovky a Web
+  Audio vyrovná nepatrná změna rychlosti (±0,3 %). Pořadí záchrany: znovu
+  přes Chromium → pomocník → Stereo Mix a spol. → bez zvuku hry (a proč).
+  Hráč nic nenastavuje; v Nastavení → Záznam → Zvuk je vidět, že zvuk jde
+  „přímo z Windows (jako v OBS)". Přepnutí výchozího výstupu (reproduktory
+  ↔ sluchátka) pomocník pozná do vteřiny a jde za ním, odpojení zařízení
+  přečká (čeká, až zase bude). Když pomocník spadne, rozjede se znovu
+  (nejvýš 3× za minutu). Při Inteligentním řízení aplikací PowerShell
+  nejde (omezený režim) - pak zbývá Stereo Mix.
+  Testy: `tests/loopback.test.mjs` (protokol, převod formátů 7.1 / 5.1 /
+  16 / 24 / 32 bit přes mono `mcs -langversion:5`, celý skript v PowerShellu),
+  e2e `KINE_TEST_FAKE_LOOPBACK=1` (falešný pomocník s tónem 440 Hz ze
+  „zařízení 7.1": hladina, poznámka v nastavení, tón v klipu).
+- **Ikona celé obrazovky vpravo dole v přehrávači** (jako u videí na Kine)
+  místo tlačítka v hlavičce - ve vestavěném ovládání videa, dovnitř i ven
+  (v celé obrazovce ukazuje „zmenšit"). Tlačítko ve videu by dalo přes celou
+  obrazovku jen holé video a kliknutí si „vezme" - scénu se šipkami na další
+  klip pak zapne hlavní proces jako kliknutím (`player:stageFullscreen`,
+  `executeJavaScript` s gestem) a video se z vrstvy celé obrazovky vyjme
+  (vyndá a hned vrátí - hraje dál). Okno při tom z celé obrazovky nevyskočí.
+  Dvojklik do videa a F fungují dál; skryté jsou stahování, rychlost, obraz
+  v obraze a přenos do TV (jinak by v rohu byla nabídka ⋮ místo ikony).

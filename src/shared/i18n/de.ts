@@ -817,4 +817,5 @@ export const de: Record<Key, string> = {
   lookCardsL: 'Größer',
   lookCalm: 'Ruhiger Modus (ohne Animationen)',
   lookCalmHint: 'Schaltet Animationen und Übergänge im App-Fenster aus - nichts gleitet oder fließt. Praktisch auf einem langsameren PC oder wenn Bewegung auf dem Bildschirm stört.',
+  audioNativeNote: 'Der Spielsound kommt direkt aus Windows von „{device}“ (wie bei OBS) - auf dem normalen Weg ließ sich dieses Gerät nicht öffnen.',
 };

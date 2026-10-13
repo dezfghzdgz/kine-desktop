@@ -2535,6 +2535,8 @@ function audioLiveNote(): string {
   }
   if (l.systemFallback) return t('audioFallbackNote', { device: l.systemFallback });
   const device = l.systemDevice || t('audioDefaultDevice');
+  // Chromium zařízení otevřít nešel (G HUB, Razer, Oculus...) - zvuk jde přímo z Windows, jako v OBS.
+  if (l.systemNative) return l.systemSilentSeconds >= 10 ? t('audioSilentNote', { device, seconds: l.systemSilentSeconds }) : t('audioNativeNote', { device });
   if (l.systemSilentSeconds >= 10) return t('audioSilentNote', { device, seconds: l.systemSilentSeconds });
   return t('audioSourceNote', { device });
 }
@@ -3269,6 +3271,7 @@ function showClip(clip: Clip, edit = false) {
     onOpenExternal: (c) => void kine.openClip(c.id),
     onLog: (m) => void kine.log(m),
     setWindowFullscreen: (on) => void kine.setWindowFullscreen(on),
+    stageFullscreen: () => void kine.playerStageFullscreen(),
     onClipChange: (c) => void kine.setPlayerClip(c.id),
     onClose: () => {
       player = null;

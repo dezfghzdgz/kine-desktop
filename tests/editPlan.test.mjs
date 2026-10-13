@@ -158,6 +158,21 @@ test('slepení klipu: hra + mikrofon = tři stopy (mix, hra, mikrofon) s hlasito
   assert.deepEqual(clipAudioTracks(false, false, true), []);
 });
 
+test('slepení klipu: zvuk hry přímo z Windows (pomocník) je pozadu - posune se dopředu, mikrofon ne', () => {
+  // Zpoždění pomocníka 70 ms, kalibrace hráče +40 ms -> hra o 30 ms dopředu (uříznout), mikrofon jen +40.
+  const args = clipMuxArgs({ videoList: 'v.txt', hasSystemAudio: true, micList: 'm.txt', micOffsetMs: 0, audioOffsetMs: 40, systemLatencyMs: 70, separateTracks: true, container: 'mp4', output: 'o.mp4', durationSeconds: 10 });
+  const fc = args[args.indexOf('-filter_complex') + 1];
+  assert.match(fc, /\[0:a\]aresample=[^,]*,atrim=start=0\.030,asetpts=PTS-STARTPTS,aformat=[^,]*,asplit=2/);
+  assert.match(fc, /\[1:a\]aresample=[^,]*,adelay=delays=40:all=1,aformat=/);
+  // WebM jen se zvukem hry: s posunem se zvuk nekopíruje (jinak by posun nešel udělat).
+  const webm = clipMuxArgs({ videoList: 'v.txt', hasSystemAudio: true, systemLatencyMs: 70, container: 'webm', output: 'o.webm', durationSeconds: 10 });
+  assert.ok(!webm.includes('copy') || webm.indexOf('-c:a') < 0 || webm[webm.indexOf('-c:a') + 1] !== 'copy');
+  assert.match(webm[webm.indexOf('-filter_complex') + 1], /atrim=start=0\.070/);
+  // Bez pomocníka beze změny (WebM se zvukem hry se kopíruje).
+  const plain = clipMuxArgs({ videoList: 'v.txt', hasSystemAudio: true, container: 'webm', output: 'o.webm', durationSeconds: 10 });
+  assert.equal(plain[plain.indexOf('-c:a') + 1], 'copy');
+});
+
 import { trimAudioPlan } from '../dist/esm/editPlan.js';
 
 test('úprava klipu: zvuk všechno / jen hra / jen mikrofon / nic podle stop zdroje', () => {

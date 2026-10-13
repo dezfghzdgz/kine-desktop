@@ -76,6 +76,13 @@ export type PlayerOptions = {
    * přes celou obrazovku a scéna ho vyplní. Bez tohohle zůstane jen API.
    */
   setWindowFullscreen?: (on: boolean) => void;
+  /**
+   * Tlačítko celé obrazovky ve videu (vpravo dole) dá přes celou obrazovku
+   * holé video a "spotřebuje" kliknutí - scénu se šipkami pak zapne hlavní
+   * proces, jako by kliknul uživatel (window.__kinePlayerStageFullscreen).
+   * Bez tohohle zůstane přes celou obrazovku jen video.
+   */
+  stageFullscreen?: () => void;
   /** Přepnuto na jiný klip (šipky) - okno ví, který soubor přehrávač drží. */
   onClipChange?: (clip: Clip) => void;
   /** Bez tohohle se klip jen přehrává (žádné tlačítko Upravit). */
@@ -268,7 +275,17 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
 
   // ---- prvky ----------------------------------------------------------------------
   // Celou obrazovku nedělá samotné video (to by ukázalo jen obraz), ale celá scéna - se šipkami na další klip.
-  const video = h('video', { class: 'player-video', controls: true, autoplay: true, preload: 'auto', controlslist: 'nofullscreen' }) as HTMLVideoElement;
+  // Ikona celé obrazovky je vpravo dole v ovládání videa (jako u videí na Kine); stahování, rychlost,
+  // obraz v obraze a přenos do TV jsou schované - jinak by v rohu byla nabídka ⋮ místo ikony.
+  const video = h('video', {
+    class: 'player-video',
+    controls: true,
+    autoplay: true,
+    preload: 'auto',
+    controlslist: 'nodownload noplaybackrate noremoteplayback',
+    disablepictureinpicture: true,
+    disableremoteplayback: true,
+  }) as HTMLVideoElement;
   // Stínování mimo výřez 9:16 (jen v úpravách s formátem na výšku).
   const shadeLeft = h('div', { class: 'crop-shade hidden' });
   const shadeRight = h('div', { class: 'crop-shade hidden' });
@@ -279,7 +296,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const stageNext = h('button', { class: 'stage-nav next', title: `${t('playerNext')} (→)`, 'aria-label': t('playerNext'), onclick: () => go(1) }, icon('chevronRight', 34));
   const stageTitle = h('span', { class: 'stage-title' });
   const stagePos = h('span', { class: 'stage-pos' });
-  const fullscreenBtn = h('button', { class: 'stage-fullscreen', title: `${t('playerFullscreen')} (F)`, 'aria-label': t('playerFullscreen'), onclick: () => toggleFullscreen() }, icon('expand', 18));
+  // Jak z celé obrazovky ven, když se klip nedá přehrát (není video s vlastní ikonou vpravo dole).
+  const fullscreenBtn = h('button', { class: 'stage-fullscreen', title: `${t('playerExitFullscreen')} (F)`, 'aria-label': t('playerExitFullscreen'), onclick: () => toggleFullscreen() }, icon('shrink', 18));
   const stageTop = h('div', { class: 'stage-top' }, stageTitle, stagePos);
   const stageChrome = [stagePrev, stageNext, stageTop, fullscreenBtn];
   const stage = h('div', { class: 'player-stage' }, video, shadeLeft, shadeRight, textLayer, ...stageChrome);
@@ -290,8 +308,6 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const positionEl = h('span', { class: 'player-pos faint hidden' });
   const editBtn = h('button', { class: 'small quiet player-edit', onclick: () => toggleEdit() }, icon('scissors', 15), t('libraryEdit'));
   const copyBtn = h('button', { class: 'small quiet player-copy hidden', onclick: () => { if (options.onCopyLink) { options.onCopyLink(clip); showNote(t('linkCopied'), 'ok'); } } }, icon('link', 15), t('libraryCopyLink'));
-  // Celá obrazovka: tlačítko v hlavičce (jediné mimo celou obrazovku); to na scéně je jen v ní - jak ven.
-  const headFullBtn = h('button', { class: 'small quiet player-full', title: `${t('playerFullscreen')} (F)`, onclick: () => toggleFullscreen() }, icon('expand', 15), t('playerFullscreen'));
   const note = h('div', { class: 'player-note hidden' });
   const trim = h('div', { class: 'trim hidden' });
   const box = h(
@@ -305,7 +321,6 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
         'div',
         { class: 'row', style: 'flex-wrap:nowrap' },
         options.onCopyLink ? copyBtn : null,
-        headFullBtn,
         edit ? editBtn : null,
         h('button', { class: 'small quiet', title: t('playerOpenExternal'), onclick: () => options.onOpenExternal(clip) }, icon('external', 15), t('playerOpenExternal')),
         h('button', { class: 'small quiet player-close', title: t('playerClose'), 'aria-label': t('playerClose'), onclick: () => close() }, icon('close', 16))
@@ -351,12 +366,36 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     return document.fullscreenElement === stage || stage.classList.contains('pseudo-full');
   }
   function toggleFullscreen() {
-    if (isFull()) {
+    // I holé video přes celou obrazovku (když scéna nešla) se tímhle zavře.
+    if (isFull() || document.fullscreenElement) {
       exitFullscreen();
       return;
     }
     stage.requestFullscreen().catch(() => enterPseudoFullscreen());
   }
+  /**
+   * Video vyjmuté z celé obrazovky: vyndá se a hned vrátí na stejné místo
+   * (prohlížeč ho tím pustí z vrstvy celé obrazovky). Hraje dál, nic se
+   * znovu nenačítá - scéna kolem něj zůstane přes celou obrazovku.
+   */
+  function releaseVideo() {
+    if (!video.matches(':fullscreen')) return;
+    const parent = video.parentNode;
+    if (!parent) return;
+    const next = video.nextSibling;
+    parent.removeChild(video);
+    parent.insertBefore(video, next);
+  }
+  /** Scéna přes celou obrazovku "jako kliknutím" - volá ji hlavní proces (options.stageFullscreen). */
+  const stageFullscreenHook = (): Promise<boolean> =>
+    stage
+      .requestFullscreen()
+      .then(() => {
+        releaseVideo();
+        return true;
+      })
+      .catch(() => false);
+  (window as any).__kinePlayerStageFullscreen = stageFullscreenHook;
   function enterPseudoFullscreen() {
     if (closed || !options.setWindowFullscreen) return;
     stage.classList.add('pseudo-full');
@@ -365,6 +404,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     onFullscreenChange();
   }
   function exitFullscreen() {
+    releaseVideo();
     if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
     if (stage.classList.contains('pseudo-full')) {
       stage.classList.remove('pseudo-full');
@@ -384,17 +424,24 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   };
   stage.addEventListener('mousemove', wake);
   const onFullscreenChange = () => {
-    // Kdyby se přece jen dostalo přes celou obrazovku holé video (dvojklik ve starším
-    // Chromiu), vymění se za scénu - jinak by tam šipky nebyly.
+    if (closed) return;
+    // Ikona celé obrazovky ve videu (vpravo dole) dá přes celou obrazovku holé video.
     if (document.fullscreenElement === video) {
-      void document.exitFullscreen().then(() => stage.requestFullscreen()).catch(() => undefined);
+      if (stage.classList.contains('fullscreen')) {
+        // ...zmáčknutá v celé obrazovce scény = ven (ikona tam ukazuje "zmenšit").
+        exitFullscreen();
+        return;
+      }
+      // ...mimo ni = celá obrazovka, ale scéna se šipkami na další klip, ne holé video.
+      // Kliknutí už prohlížeč "spotřeboval", takže scénu zapne hlavní proces.
+      stage
+        .requestFullscreen()
+        .then(releaseVideo)
+        .catch(() => options.stageFullscreen?.());
       return;
     }
     const full = isFull();
     stage.classList.toggle('fullscreen', full);
-    fullscreenBtn.title = `${full ? t('playerExitFullscreen') : t('playerFullscreen')} (F)`;
-    clear(fullscreenBtn);
-    fullscreenBtn.append(icon(full ? 'shrink' : 'expand', 18));
     if (full) wake();
     else stage.classList.remove('idle');
     onResize();
@@ -402,6 +449,10 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   document.addEventListener('fullscreenchange', onFullscreenChange);
   video.addEventListener('dblclick', (e) => {
     e.preventDefault();
+    // Chromium dvojklikem sám dá přes celou obrazovku holé video a "kliknutí" si tím vezme -
+    // to pak převezme onFullscreenChange (scéna, nebo ven). Tady jen když to neudělal.
+    const activation = (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation;
+    if (activation && !activation.isActive) return;
     toggleFullscreen();
   });
   function go(direction: -1 | 1) {
@@ -585,6 +636,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const fail = (why: string) => {
     broken = true;
     options.onLog?.(`přehrávač: ${why} - ${clip.file}`);
+    releaseVideo();
+    stage.classList.add('broken');
     clear(stage);
     stage.append(
       h(
@@ -604,6 +657,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const loadVideo = (bust: boolean) => {
     broken = false;
     editBtn.disabled = false;
+    stage.classList.remove('broken');
     clear(stage);
     stage.append(video, shadeLeft, shadeRight, textLayer, ...stageChrome);
     if (guard) clearTimeout(guard);
@@ -1121,8 +1175,10 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     closed = true;
     document.removeEventListener('keydown', onKey, true);
     document.removeEventListener('fullscreenchange', onFullscreenChange);
+    if ((window as any).__kinePlayerStageFullscreen === stageFullscreenHook) delete (window as any).__kinePlayerStageFullscreen;
     if (idleTimer) clearTimeout(idleTimer);
-    if (document.fullscreenElement === stage) void document.exitFullscreen().catch(() => undefined);
+    releaseVideo();
+    if (document.fullscreenElement === stage || document.fullscreenElement === video) void document.exitFullscreen().catch(() => undefined);
     if (stage.classList.contains('pseudo-full')) {
       stage.classList.remove('pseudo-full');
       document.body.classList.remove('player-pseudo-full');

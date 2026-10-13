@@ -832,6 +832,7 @@ export const en = {
   lookCardsL: 'Larger',
   lookCalm: 'Calm mode (no animations)',
   lookCalmHint: 'Turns off animations and transitions in the app window - nothing slides or flows. Handy on a slower PC, or when movement on screen is distracting.',
+  audioNativeNote: 'Game sound comes straight from Windows from "{device}" (like OBS) - the regular way couldn\'t open this device.',
 } as const;
 
 export type Key = keyof typeof en;

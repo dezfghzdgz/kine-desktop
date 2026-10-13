@@ -817,4 +817,5 @@ export const pl: Record<Key, string> = {
   lookCardsL: 'Większe',
   lookCalm: 'Tryb spokojny (bez animacji)',
   lookCalmHint: 'Wyłącza animacje i przejścia w oknie aplikacji - nic się nie przesuwa ani nie przelewa. Przydaje się na słabszym komputerze albo gdy ruch na ekranie przeszkadza.',
+  audioNativeNote: 'Dźwięk gry pochodzi bezpośrednio z Windows z „{device}” (jak w OBS) - zwykłą drogą tego urządzenia nie dało się otworzyć.',
 };

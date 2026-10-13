@@ -63,6 +63,7 @@ function showClip(clip: Clip, edit = false) {
     onOpenExternal: (c) => void kine.openClip(c.id),
     onLog: (m) => void kine.log(m),
     setWindowFullscreen: (on) => void kine.setWindowFullscreen(on),
+    stageFullscreen: () => void kine.playerStageFullscreen(),
     onClose: () => {
       player = null;
     },

@@ -179,6 +179,12 @@ export type ClipMuxInput = {
   micGain?: number;
   /** Posun celého zvuku vůči obrazu v ms (kladné = zvuk později) - kalibrace hráčem. */
   audioOffsetMs?: number;
+  /**
+   * O kolik je zvuk hry v proudu obrazu pozadu (ms) - když jde přímo z
+   * Windows přes pomocníka (Web Audio s náskokem). V klipu se o tolik
+   * posune dopředu; mikrofon má vlastní proud a tohle se ho netýká.
+   */
+  systemLatencyMs?: number;
   /** Kromě smíchané stopy i samostatné stopy: jen hra, jen mikrofon (pro střih). */
   separateTracks?: boolean;
   container: 'mp4' | 'webm';
@@ -240,11 +246,12 @@ export function clipMuxArgs(input: ClipMuxInput): string[] {
   const maps: string[] = ['-map', '0:v:0'];
   const titles: string[] = [];
 
-  const gameFilters = [RESAMPLE, volumeFilter(input.systemGain), shiftFilter(audioOffset), STEREO].filter((f): f is string => !!f);
+  const gameShift = audioOffset - Math.max(0, input.systemLatencyMs ?? 0);
+  const gameFilters = [RESAMPLE, volumeFilter(input.systemGain), shiftFilter(gameShift), STEREO].filter((f): f is string => !!f);
   const micFilters = [RESAMPLE, volumeFilter(input.micGain), shiftFilter((input.micOffsetMs ?? 0) + audioOffset), STEREO].filter((f): f is string => !!f);
 
   // WebM (VP8/VP9) se zvukem hry beze změn: zvuk se jen zkopíruje (Opus zůstane Opusem).
-  const copyGame = !mp4 && tracks.length === 1 && tracks[0] === 'game' && Math.abs((input.systemGain ?? 1) - 1) < 0.005 && Math.round(audioOffset) === 0;
+  const copyGame = !mp4 && tracks.length === 1 && tracks[0] === 'game' && Math.abs((input.systemGain ?? 1) - 1) < 0.005 && Math.round(gameShift) === 0;
 
   if (tracks.length === 3) {
     chains.push(`[0:a]${gameFilters.join(',')},asplit=2[g1][g2]`);

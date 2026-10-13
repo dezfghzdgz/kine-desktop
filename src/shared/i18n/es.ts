@@ -817,4 +817,5 @@ export const es: Record<Key, string> = {
   lookCardsL: 'Más grandes',
   lookCalm: 'Modo tranquilo (sin animaciones)',
   lookCalmHint: 'Desactiva animaciones y transiciones en la ventana de la app: nada se desliza ni fluye. Útil en un PC más lento o cuando el movimiento en pantalla molesta.',
+  audioNativeNote: 'El sonido del juego se toma directamente de Windows desde «{device}» (como en OBS): por la vía normal no se pudo abrir este dispositivo.',
 };

@@ -321,6 +321,8 @@ export type SavedGeneration = {
   hasAudio: boolean;
   hasMic: boolean;
   micLatencyMs: number;
+  /** Zpoždění zvuku hry (ms), když šel přímo z Windows přes pomocníka (starší gen.json ho nemají = 0). */
+  systemLatencyMs?: number;
   video: Segment[];
   mic: Segment[];
 };

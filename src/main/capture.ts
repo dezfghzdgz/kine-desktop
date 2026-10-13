@@ -64,6 +64,8 @@ type Generation = {
   hasAudio: boolean;
   /** Zpoždění mikrofonu podle Chromia (ms) - při stavbě klipu se o tolik posune dopředu. */
   micLatencyMs: number;
+  /** Zpoždění zvuku hry v proudu obrazu (ms) - jen když jde přímo z Windows přes pomocníka; klip ho srovná. */
+  systemLatencyMs: number;
   /** Rozměry obrazu na začátku generace ("1920x1080"), podle snímací stránky; null = neví se. */
   size: string | null;
   /** Kdy (hodiny počítače) obrazovka během generace změnila rozměry (hra přepnula rozlišení). */
@@ -71,7 +73,7 @@ type Generation = {
 };
 
 /** Zvukové vlastnosti generace, podle kterých se lepí klip (zvuk hry ano/ne, zpoždění mikrofonu). */
-type GenerationAudio = { id: number; hasAudio: boolean; micLatencyMs: number };
+type GenerationAudio = { id: number; hasAudio: boolean; micLatencyMs: number; systemLatencyMs?: number };
 
 /** Nahrávka zápasu slepená po pádu z kousků, které zůstaly na disku. */
 export type RecoveredRecording = ClipResult & { since: number; game: string | null };
@@ -123,7 +125,7 @@ export class CaptureManager {
   /** Chce někdo plynulé měřáky (nastavení je otevřené na Záznamu)? */
   private metersFast = false;
   /** Co se právě nahrává (pro diagnostiku). */
-  lastStarted: { mimeType: string; audio: boolean; mic: boolean; micLatencyMs: number } | null = null;
+  lastStarted: { mimeType: string; audio: boolean; mic: boolean; micLatencyMs: number; systemLatencyMs: number } | null = null;
   private csvTimer: ReturnType<typeof setInterval> | null = null;
   private waiters = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
   /** Složka se zásobníkem (kousky videa). Každá appka svou; když je zamčená, vezme se jiná. */
@@ -150,6 +152,8 @@ export class CaptureManager {
       onLiveEvent?: (event: Extract<CaptureEvent, { type: 'live-started' | 'live-stopped' | 'live-error' | 'live-warning' }>) => void;
       /** Průběh ukládání nahrávky zápasu (tlačítko "Ukládám… 40 %"). */
       onSavingProgress?: () => void;
+      /** Zvuk hry už v tomhle běhu appky šel přes pomocníka (audioLoopback.ts) - snímací stránka nemusí zkoušet Chromium znovu. */
+      nativeLoopbackKnown?: () => boolean;
     }
   ) {
     this.bufferName = deps.bufferName ?? 'kine-buffer';
@@ -279,7 +283,13 @@ export class CaptureManager {
       await this.ensureWindow();
       const gen = this.newGeneration('');
       const started = this.waitFor(`started:${gen.id}`, 20000);
-      this.send({ type: 'start', settings: this.deps.settings(), generation: gen.id });
+      this.send({
+        type: 'start',
+        settings: this.deps.settings(),
+        generation: gen.id,
+        ...(process.env.KINE_TEST_FAKE_LOOPBACK ? { testNativeLoopback: true } : {}),
+        ...(this.deps.nativeLoopbackKnown?.() ? { nativeLoopbackKnown: true } : {}),
+      });
       await started;
       this.startCsvPolling();
       this.setState('on');
@@ -456,6 +466,7 @@ export class CaptureManager {
       hasMic: false,
       hasAudio: false,
       micLatencyMs: 0,
+      systemLatencyMs: 0,
       size: null,
       resizes: [],
     };
@@ -548,13 +559,14 @@ export class CaptureManager {
       gen.hasMic = !!event.mic;
       gen.hasAudio = !!event.audio;
       gen.micLatencyMs = event.micLatencyMs ?? 0;
+      gen.systemLatencyMs = Math.max(0, Math.min(1000, Number(event.systemLatencyMs) || 0));
       gen.size = event.width && event.height ? `${event.width}x${event.height}` : null;
       if (typeof event.hwEncoder === 'boolean') this.hwEncoder = event.hwEncoder;
       if (typeof event.fps === 'number') this.effectiveFps = event.fps;
       // Nová snímací stránka / generace neví, jestli se někdo dívá na měřáky.
       if (this.metersFast) this.sendSafe({ type: 'meters', fast: true });
-      this.lastStarted = { mimeType: event.mimeType, audio: !!event.audio, mic: !!event.mic, micLatencyMs: gen.micLatencyMs };
-      log(`snímání gen ${gen.id}: ${event.mimeType}, zvuk hry ${event.audio ? 'ano' : 'ne'}, mikrofon ${event.mic ? `ano (zpoždění ${gen.micLatencyMs} ms)` : 'ne'}, HW kodér ${event.hwEncoder === null || event.hwEncoder === undefined ? '?' : event.hwEncoder ? 'ano' : 'ne'}`);
+      this.lastStarted = { mimeType: event.mimeType, audio: !!event.audio, mic: !!event.mic, micLatencyMs: gen.micLatencyMs, systemLatencyMs: gen.systemLatencyMs };
+      log(`snímání gen ${gen.id}: ${event.mimeType}, zvuk hry ${event.audio ? (gen.systemLatencyMs ? `ano (přímo z Windows, zpoždění ${gen.systemLatencyMs} ms)` : 'ano') : 'ne'}, mikrofon ${event.mic ? `ano (zpoždění ${gen.micLatencyMs} ms)` : 'ne'}, HW kodér ${event.hwEncoder === null || event.hwEncoder === undefined ? '?' : event.hwEncoder ? 'ano' : 'ne'}`);
       this.writeGenerationInfo(gen);
       this.spawnSegmenter(gen);
       if (gen.hasMic) this.spawnSegmenter(gen, 'mic');
@@ -1010,6 +1022,8 @@ export class CaptureManager {
     // Zvuk hry jen když ho mají všechny generace (concat potřebuje ve všech souborech stejné stopy).
     const hasSystemAudio = genInfo.length > 0 && genInfo.every((g) => g.hasAudio);
     const latency = Math.max(0, ...genInfo.map((g) => g.micLatencyMs));
+    // Zvuk hry přímo z Windows (pomocník) je v proudu obrazu o kousek pozadu - v klipu se posune dopředu.
+    const systemLatency = Math.max(0, ...genInfo.map((g) => g.systemLatencyMs ?? 0));
     const plan = planClip(video, micAll.filter((m) => gens.has(m.generation)), latency);
     const videoList = join(workDir, `concat-${Date.now().toString(36)}.ffconcat`);
     writeFileSync(videoList, concatScript(plan.video));
@@ -1026,6 +1040,7 @@ export class CaptureManager {
       systemGain: settings.systemGain,
       micGain: settings.micGain,
       audioOffsetMs: settings.audioOffsetMs,
+      systemLatencyMs: systemLatency,
       separateTracks: settings.separateMicTrack,
       container: (isH264 ? 'mp4' : 'webm') as 'mp4' | 'webm',
       output: file,
@@ -1063,7 +1078,7 @@ export class CaptureManager {
     try {
       writeFileSync(
         join(gen.dir, 'gen.json'),
-        JSON.stringify({ id: gen.id, startWall: gen.startWall, mimeType: gen.mimeType, hasAudio: gen.hasAudio, hasMic: gen.hasMic, micLatencyMs: gen.micLatencyMs })
+        JSON.stringify({ id: gen.id, startWall: gen.startWall, mimeType: gen.mimeType, hasAudio: gen.hasAudio, hasMic: gen.hasMic, micLatencyMs: gen.micLatencyMs, systemLatencyMs: gen.systemLatencyMs })
       );
     } catch {
       // Nevadí - obnova po pádu by jen tuhle generaci vynechala.
@@ -1210,6 +1225,7 @@ export class CaptureManager {
         hasAudio: !!info.hasAudio,
         hasMic: !!info.hasMic,
         micLatencyMs: Number(info.micLatencyMs) || 0,
+        systemLatencyMs: Number(info.systemLatencyMs) || 0,
         video: rows('list.csv'),
         mic: info.hasMic ? rows('mic.csv') : [],
       });

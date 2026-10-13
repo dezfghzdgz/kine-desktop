@@ -485,7 +485,12 @@ export type ProcessInfo = { exe: string; name: string; hasWindow: boolean };
 
 /** Příkazy pro skrytou stránku, která snímá obrazovku. */
 export type CaptureCommand =
-  | { type: 'start'; settings: Settings; generation: number }
+  /**
+   * testNativeLoopback: zkouška bez Windows (KINE_TEST_FAKE_LOOPBACK) - zvuk hry jde rovnou přes pomocníka.
+   * nativeLoopbackKnown: pomocník (zvuk hry přímo z Windows) už v tomhle běhu appky pomohl - druhý
+   * pokus přes Chromium se přeskočí (snímací stránka je při každém startu nová, sama si to nepamatuje).
+   */
+  | { type: 'start'; settings: Settings; generation: number; testNativeLoopback?: boolean; nativeLoopbackKnown?: boolean }
   | { type: 'restart'; generation: number }
   | { type: 'stop' }
   /** Živé vysílání: druhý recorder (nižší datový tok, hra + mikrofon smíchané) na stejném snímání. */
@@ -508,6 +513,8 @@ export type CaptureEvent =
       mic?: boolean;
       /** Zpoždění mikrofonu podle Chromia (ms; o tolik je záznam mikrofonu za skutečností). */
       micLatencyMs?: number;
+      /** O kolik je zvuk hry v proudu obrazu pozadu (ms) - jen když jde přímo z Windows přes pomocníka. */
+      systemLatencyMs?: number;
       /** Je v počítači hardwarový kodér H.264 (podle WebCodecs)? null = nejde zjistit. */
       hwEncoder?: boolean | null;
       /** Snímky za sekundu, se kterými se opravdu nahrává (bez hardwarového kodéru nejvýš 30). */
@@ -522,8 +529,11 @@ export type CaptureEvent =
   | {
       type: 'warning';
       generation: number;
-      /** systemLoopback = zvuk hry nejde otevřít; systemAudioFallback = bere se ze Stereo Mix a spol.; systemAudioRetry = povedlo se na druhý pokus. */
-      kind: 'microphone' | 'systemAudio' | 'bluetoothMic' | 'systemLoopback' | 'systemAudioFallback' | 'systemAudioRetry';
+      /**
+       * systemLoopback = zvuk hry nejde otevřít; systemAudioFallback = bere se ze Stereo Mix a spol.;
+       * systemAudioRetry = povedlo se na druhý pokus; systemAudioNative = bere se přímo z Windows (WASAPI, jako OBS).
+       */
+      kind: 'microphone' | 'systemAudio' | 'bluetoothMic' | 'systemLoopback' | 'systemAudioFallback' | 'systemAudioRetry' | 'systemAudioNative';
       message: string;
     }
   /** Hladiny zvuku (0-1, RMS) zhruba každou sekundu - měřáky v nastavení a hlídání ticha. */
@@ -648,6 +658,8 @@ export type AudioLevels = {
   systemError?: string;
   /** Zvuk hry se náhradně bere z tohohle vstupu (Stereo Mix, VB-Cable...). */
   systemFallback?: string;
+  /** Zvuk hry jde přímo z Windows přes pomocníka (WASAPI loopback, jako OBS) - Chromium ho otevřít nešel. */
+  systemNative?: boolean;
   /** Výchozí výstup Windows (název) - kvůli radě, když zvuk nejde. */
   defaultOutput?: string;
 };

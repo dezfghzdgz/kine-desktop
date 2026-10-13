@@ -77,6 +77,18 @@ export async function runTestDriver(kine: {
       result.fakeAudioLevels = levels;
       result.fakeAudioMeter = !!levels && levels.mic !== null && levels.mic > 0.01 && levels.system === null;
     }
+    // KINE_TEST_FAKE_LOOPBACK: zvuk hry "přímo z Windows" přes pomocníka (falešný pomocník: tón 440 Hz
+    // ze zařízení 7.1, stejný protokol jako KineLoopback.cs) - hladina, značka v nastavení a zpoždění pro klip.
+    if (process.env.KINE_TEST_FAKE_LOOPBACK) {
+      let levels: any = null;
+      for (let i = 0; i < 40 && !(levels && levels.systemNative && levels.system > 0.01); i++) {
+        await sleep(300);
+        levels = (kine as any).capture.levels;
+      }
+      result.nativeLoopbackLevels = levels;
+      result.nativeLoopbackStarted = (kine as any).capture.lastStarted;
+      result.nativeLoopbackMeter = !!levels && levels.systemNative === true && levels.system > 0.01 && (kine as any).capture.lastStarted?.systemLatencyMs > 0;
+    }
     // KINE_TEST_FAKE_AUDIO=full: "zvuk hry" z falešného vstupního zařízení (jako Stereo Mix) + mikrofon ->
     // klip má tři stopy (hra + mikrofon, hra, mikrofon) a v úpravách jde uložit "jen hra".
     let multiClipId: string | null = null;
@@ -161,6 +173,20 @@ export async function runTestDriver(kine: {
       }
       result.fakeAudioMeanDb = mean;
       result.fakeAudioClip = info.hasAudio && mean > -50;
+    }
+    if (process.env.KINE_TEST_FAKE_LOOPBACK && clip1) {
+      // V klipu je tón z pomocníka (ne ticho) - a zvuk je posunutý o zpoždění pomocníka (atrim na začátku).
+      const info = await probe(clip1.file);
+      let mean = -100;
+      try {
+        const out = await runFfmpeg(['-i', clip1.file, '-af', 'volumedetect', '-vn', '-f', 'null', '-'], 30000);
+        const m = /mean_volume:\s*(-?\d+(?:\.\d+)?) dB/.exec(out);
+        if (m) mean = Number(m[1]);
+      } catch (e) {
+        log(`[test] volumedetect: ${(e as Error).message}`);
+      }
+      result.nativeLoopbackMeanDb = mean;
+      result.nativeLoopbackClip = info.hasAudio && mean > -30;
     }
     await sleep(3500);
     const clip2 = await kine.onClipHotkey();
@@ -519,18 +545,46 @@ export async function runTestDriver(kine: {
         const secondClip = kine.library.list().find((c) => c.id === shown[1]);
         result.playerNav = first.next && first.prevDisabled && first.pos === `1 / ${shown.length}` && second.pos === `2 / ${shown.length}` && second.overlay === 1 && !!secondClip && second.title === secondClip.title && back === `1 / ${shown.length}`;
         result.playerNavDebug = { first, second, back };
-        // Celá obrazovka (tlačítko v hlavičce / na scéně / F / dvojklik): celá scéna se šipkami na další klip, ne holé video.
-        // Mimo celou obrazovku jen jedno tlačítko (v hlavičce) - to na scéně je až v celé obrazovce (jak ven).
-        const headFull = await win.webContents.executeJavaScript(`(() => { const b = document.querySelector('.player-head .player-full'); const s = document.querySelector('.player-stage .stage-fullscreen'); return !!b && !!b.querySelector('svg') && getComputedStyle(b).display !== 'none' && !!s && getComputedStyle(s).display === 'none'; })()`);
-        await win.webContents.executeJavaScript(`(() => { const b = document.querySelector('.player-head .player-full'); if (b) b.click(); return !!b; })()`, true);
-        let fsOn = false;
-        for (let i = 0; i < 20 && !fsOn; i++) {
-          await sleep(150);
-          fsOn = await win.webContents.executeJavaScript(`!!document.fullscreenElement && document.fullscreenElement.classList.contains('player-stage') && document.fullscreenElement.classList.contains('fullscreen')`);
-        }
-        const fsFirst = await win.webContents.executeJavaScript(
-          `(() => { const st = document.querySelector('.player-stage.fullscreen'); const n = st && st.querySelector('.stage-nav.next'); const r = n ? n.getBoundingClientRect() : null; const x = st && st.querySelector('.stage-fullscreen'); return { next: !!n && !n.disabled && getComputedStyle(n).display !== 'none' && !!r && r.right > window.innerWidth - 120, exit: !!x && getComputedStyle(x).display !== 'none', pos: st ? st.querySelector('.stage-pos')?.textContent : null, title: st ? st.querySelector('.stage-title')?.textContent : null }; })()`
+        // Celá obrazovka: jedna ikona vpravo dole v ovládání videa (jako u videí na Kine) - dovnitř
+        // i ven. Kliknutí opravdovou myší: video si ho vezme, scénu se šipkami zapne hlavní proces.
+        const realClick = async (x: number, y: number, count = 1) => {
+          win.webContents.sendInputEvent({ type: 'mouseMove', x, y });
+          await sleep(120);
+          for (let c = 1; c <= count; c++) {
+            win.webContents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: c });
+            win.webContents.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: c });
+            await sleep(60);
+          }
+        };
+        const videoRect = () =>
+          win.webContents.executeJavaScript(`(() => { const r = document.querySelector('.player-stage video').getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })()`);
+        const waitStageFull = async (want: boolean) => {
+          let ok = false;
+          for (let i = 0; i < 25 && !ok; i++) {
+            await sleep(150);
+            ok = await win.webContents.executeJavaScript(
+              want
+                ? `!!document.fullscreenElement && document.fullscreenElement.classList.contains('player-stage') && document.fullscreenElement.classList.contains('fullscreen') && !document.querySelector('video:fullscreen')`
+                : `!document.fullscreenElement && !document.querySelector('.player-stage.fullscreen')`
+            );
+          }
+          return ok;
+        };
+        const headFull = await win.webContents.executeJavaScript(
+          `(() => { const s = document.querySelector('.player-stage .stage-fullscreen'); const v = document.querySelector('.player-stage video'); return !document.querySelector('.player-head .player-full') && !!s && getComputedStyle(s).display === 'none' && !!v && v.controls && !(v.getAttribute('controlslist') || '').includes('nofullscreen'); })()`
         );
+        let vr = await videoRect();
+        await realClick(Math.round(vr.x + vr.w / 2), Math.round(vr.y + vr.h / 3));
+        await sleep(300);
+        await shot(win, 'settings-clips-player-controls');
+        await realClick(Math.round(vr.x + vr.w - 24), Math.round(vr.y + vr.h - 48));
+        const fsOn = await waitStageFull(true);
+        const fsFirst = await win.webContents.executeJavaScript(
+          `(() => { const st = document.querySelector('.player-stage.fullscreen'); const n = st && st.querySelector('.stage-nav.next'); const r = n ? n.getBoundingClientRect() : null; const v = st && st.querySelector('video'); return { next: !!n && !n.disabled && getComputedStyle(n).display !== 'none' && !!r && r.right > window.innerWidth - 120, exit: !!v && v.controls, pos: st ? st.querySelector('.stage-pos')?.textContent : null, title: st ? st.querySelector('.stage-title')?.textContent : null }; })()`
+        );
+        vr = await videoRect();
+        win.webContents.sendInputEvent({ type: 'mouseMove', x: Math.round(vr.x + vr.w - 30), y: Math.round(vr.y + vr.h - 44) });
+        await sleep(400);
         await shot(win, 'settings-clips-player-fullscreen');
         await win.webContents.executeJavaScript(`(() => { const n = document.querySelector('.player-stage.fullscreen .stage-nav.next'); if (n) n.click(); return !!n; })()`, true);
         await sleep(600);
@@ -541,12 +595,25 @@ export async function runTestDriver(kine: {
         await win.webContents.executeJavaScript(`(() => { const v = document.querySelector('.player-stage.fullscreen video'); if (v) { v.setAttribute('tabindex', '-1'); v.focus(); } (v || document).dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true })); return true; })()`, true);
         await sleep(600);
         const fsKey = await win.webContents.executeJavaScript(`({ still: !!document.fullscreenElement, pos: document.querySelector('.player-stage.fullscreen .stage-pos')?.textContent })`);
-        await win.webContents.executeJavaScript(`document.exitFullscreen ? document.exitFullscreen().then(() => true).catch(() => false) : false`, true);
-        await sleep(500);
-        const fsOff = await win.webContents.executeJavaScript(`!document.fullscreenElement && !document.querySelector('.player-stage.fullscreen')`);
-        result.playerFullscreen = { headFull, fsOn, fsFirst, fsSecond, fsKey, fsOff };
+        // Ven tou samou ikonou vpravo dole.
+        vr = await videoRect();
+        await realClick(Math.round(vr.x + vr.w / 2), Math.round(vr.y + vr.h / 3));
+        await sleep(200);
+        await realClick(Math.round(vr.x + vr.w - 24), Math.round(vr.y + vr.h - 48));
+        const fsOff = await waitStageFull(false);
+        // Dvojklik do videa: taky scéna se šipkami (ne holé video), F ji zavře.
+        // (Okno se po celé obrazovce chvíli vrací do původní velikosti - až pak měřit.)
+        await sleep(900);
+        vr = await videoRect();
+        await realClick(Math.round(vr.x + vr.w / 2), Math.round(vr.y + vr.h / 3), 2);
+        const fsDbl = await waitStageFull(true);
+        const dblDebug = { rect: vr, fe: await win.webContents.executeJavaScript(`(() => { const f = document.fullscreenElement; return f ? f.className || f.tagName : null; })()`) };
+        await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true }))`, true);
+        const fsDblOff = await waitStageFull(false);
+        const playing = await win.webContents.executeJavaScript(`(() => { const v = document.querySelector('.player-stage video'); return !!v && v.isConnected && v.readyState >= 1; })()`);
+        result.playerFullscreen = { headFull, fsOn, fsFirst, fsSecond, fsKey, fsOff, fsDbl, fsDblOff, playing, dblDebug };
         result.playerFullscreenOk =
-          headFull && fsOn && fsFirst.next && fsFirst.exit && fsFirst.pos === `1 / ${shown.length}` && fsSecond.still && fsSecond.pos === `2 / ${shown.length}` && fsSecond.video && fsKey.still && fsKey.pos === `1 / ${shown.length}` && fsOff;
+          headFull && fsOn && fsFirst.next && fsFirst.exit && fsFirst.pos === `1 / ${shown.length}` && fsSecond.still && fsSecond.pos === `2 / ${shown.length}` && fsSecond.video && fsKey.still && fsKey.pos === `1 / ${shown.length}` && fsOff && fsDbl && fsDblOff && playing;
         await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
         await sleep(300);
       }
@@ -1234,6 +1301,15 @@ export async function runTestDriver(kine: {
         await shot(audioWin, 'settings-audio');
         result.audioDebug = { panel, real };
         result.audioPanel = panel && real.mic > 5 && real.systemOff;
+      } else if (process.env.KINE_TEST_FAKE_LOOPBACK) {
+        // Zvuk hry přes pomocníka: skutečné hladiny tónu a věta, že jde přímo z Windows.
+        await sleep(1500);
+        const native = await audioWin.webContents.executeJavaScript(`(() => { const s = document.querySelector('.meter.system > span'); const n = document.querySelector('.audio-live-note'); return { width: s ? parseFloat(s.style.width) : -1, note: n ? n.textContent : null }; })()`);
+        await audioWin.webContents.executeJavaScript(`(() => { const p = document.querySelector('.audio-panel'); if (p) p.scrollIntoView({ block: 'start' }); return true; })()`);
+        await sleep(200);
+        await shot(audioWin, 'settings-audio-native');
+        result.audioDebug = { panel, native };
+        result.audioPanel = panel && native.width > 10 && /OBS/.test(native.note ?? '');
       } else {
       // Hladiny jako by přišly ze snímací stránky (v Xvfb žádný zvuk není).
       (kine as any).capture.handleEvent({ type: 'levels', generation: 0, levels: { system: 0.25, mic: 0.05, systemDevice: 'Test Speakers', systemSilentSeconds: 0 } });
@@ -1473,6 +1549,7 @@ export async function runTestDriver(kine: {
     if (process.env.KINE_TEST_LIVE_URL) common.push('liveOk');
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];
     if (process.env.KINE_TEST_FAKE_AUDIO) checks.push('fakeAudioMeter', 'fakeAudioClip');
+    if (process.env.KINE_TEST_FAKE_LOOPBACK) checks.push('nativeLoopbackMeter', 'nativeLoopbackClip');
     if (process.env.KINE_TEST_FAKE_AUDIO === 'full') checks.push('multiTrackOk', 'trimAudioSelect');
     result.failed = checks.filter((k) => result[k] !== true);
     result.ok = !!clip1 && !!clip2 && kine.capture.state === 'on' && (result.failed as string[]).length === 0 && result.brandColor === '#a34ff7';

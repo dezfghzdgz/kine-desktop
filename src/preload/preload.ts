@@ -147,6 +147,8 @@ const kine = {
   setPlayerClip: (id: string | null): Promise<void> => ipcRenderer.invoke('player:current', id),
   /** Okno přes celou obrazovku (náhradní celá obrazovka přehrávače, když Fullscreen API nejde). */
   setWindowFullscreen: (on: boolean): Promise<void> => ipcRenderer.invoke('window:fullscreen', on),
+  /** Scéna přehrávače přes celou obrazovku po kliknutí na ikonu ve videu (to kliknutí si vezme video). */
+  playerStageFullscreen: (): Promise<void> => ipcRenderer.invoke('player:stageFullscreen'),
   /** Zabezpečení Windows: nastavení Smart App Control / Historie ochrany. */
   openWindowsSecurity: (page: 'smartapp' | 'history'): Promise<void> => ipcRenderer.invoke('app:openWindowsSecurity', page),
   copyDiagnostics: (): Promise<boolean> => ipcRenderer.invoke('app:copyDiagnostics'),
@@ -186,6 +188,16 @@ const kineCapture = {
   event: (event: CaptureEvent) => ipcRenderer.send('capture:event', event),
   sources: (): Promise<{ id: string; name: string; display_id: string }[]> => ipcRenderer.invoke('capture:sources'),
   getSettings: (): Promise<Settings> => ipcRenderer.invoke('settings:get'),
+  /** Zvuk hry přímo z Windows (pomocník, WASAPI loopback) - když ho Chromium otevřít nejde. */
+  loopbackStart: (): Promise<{ ok: true; format: { sampleRate: number; channels: number; channelMask: number; device: string } } | { ok: false; error: string }> =>
+    ipcRenderer.invoke('loopback:start'),
+  loopbackStop: () => ipcRenderer.send('loopback:stop'),
+  /** Kousky zvuku: float32 stereo prokládaně (L, R, L, R...). */
+  onLoopbackAudio: (cb: (samples: Uint8Array) => void) => on<Uint8Array>('loopback:audio', cb),
+  /** Pomocník zařízení otevřel znovu (třeba s jinou vzorkovací frekvencí). */
+  onLoopbackFormat: (cb: (format: { sampleRate: number; channels: number; channelMask: number; device: string }) => void) => on('loopback:format', cb),
+  /** Pomocník skončil a znovu to nejde (důvod). */
+  onLoopbackEnded: (cb: (why: string) => void) => on<string>('loopback:ended', cb),
 };
 
 contextBridge.exposeInMainWorld('kine', kine);

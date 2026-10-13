@@ -50,6 +50,12 @@ let systemDeviceLabel = '';
 let systemAudioError = '';
 /** Zvuk hry se bere náhradně ze vstupu "Stereo Mix" a spol. (název), protože loopback výstupu nešel. */
 let systemAudioFallback = '';
+/** Zvuk hry jde přímo z Windows přes pomocníka (WASAPI loopback, jako OBS) - viz startNativeLoopback. */
+let systemAudioNative = false;
+/** Pomocník už jednou fungoval, kde Chromium nešel - příště rovnou on, bez druhého pokusu přes Chromium. */
+let nativeWorkedBefore = false;
+/** Zkouška bez Windows (KINE_TEST_FAKE_LOOPBACK): zvuk hry rovnou přes pomocníka. */
+let testNativeLoopback = false;
 /** Zpoždění mikrofonu podle Chromia (ms) - o tolik se při stavbě klipu mikrofon posune dopředu. */
 let micLatencyMs = 0;
 /** Je v počítači hardwarový kodér H.264? Zjišťuje se jednou (WebCodecs). */
@@ -187,6 +193,126 @@ function errorText(e: unknown): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 160);
 }
 
+// ---- zvuk hry přímo z Windows (pomocník, WASAPI loopback) ------------------------------------
+
+/**
+ * Náskok, se kterým se kousky zvuku z pomocníka přehrávají do stopy - vyrovná
+ * nepravidelné doručování (pomocník čte po ~10 ms, IPC). Zvuk je tím v
+ * nahrávce o kousek pozadu proti obrazu; klip ho při stavbě posune zpátky
+ * (systemLatencyMs v 'started' -> editPlan.clipMuxArgs).
+ */
+const NATIVE_LEAD_MS = 60;
+/** Celkové zpoždění proti cestě přes Chromium: náskok + čtení pomocníka (~10 ms). */
+const NATIVE_LATENCY_MS = NATIVE_LEAD_MS + 10;
+
+/** Proč pomocník nejde (krátce, do diagnostiky), když nejde. */
+let nativeLoopbackError = '';
+
+type NativeState = { ctx: AudioContext; dest: MediaStreamAudioDestinationNode; rate: number; next: number; off: (() => void)[] };
+let nativeState: NativeState | null = null;
+/** Číslo pokusu o pomocníka - stop během čekání na odpověď pokus zruší (a pomocník se zastaví). */
+let nativeRun = 0;
+
+/**
+ * Pustí pomocníka (hlavní proces) a z jeho kousků zvuku (float32 stereo)
+ * poskládá stopu přes Web Audio - ta pak jde do nahrávání místo stopy
+ * z Chromia. Web Audio bez výstupu (sinkId 'none'): nic nehraje do
+ * reproduktorů a nezávisí na zvukovce.
+ */
+async function startNativeLoopback(): Promise<MediaStreamTrack | null> {
+  stopNativeLoopback();
+  const run = ++nativeRun;
+  let result: Awaited<ReturnType<KineCaptureBridge['loopbackStart']>>;
+  try {
+    result = await bridge.loopbackStart();
+  } catch (e) {
+    result = { ok: false, error: errorText(e) };
+  }
+  if (run !== nativeRun) {
+    // Mezitím přišel stop (nebo nový start) - pomocník tu už není potřeba.
+    if (result.ok) bridge.loopbackStop();
+    return null;
+  }
+  if (!result.ok) {
+    nativeLoopbackError = result.error;
+    return null;
+  }
+  let ctx: AudioContext;
+  try {
+    ctx = new AudioContext({ latencyHint: 'playback', sinkId: { type: 'none' } } as AudioContextOptions);
+  } catch {
+    ctx = new AudioContext({ latencyHint: 'playback' });
+  }
+  if (ctx.state !== 'running') void ctx.resume().catch(() => undefined);
+  const dest = ctx.createMediaStreamDestination();
+  dest.channelCount = 2;
+  const state: NativeState = { ctx, dest, rate: result.format.sampleRate || 48000, next: 0, off: [] };
+  state.off.push(
+    bridge.onLoopbackFormat((format) => {
+      if (format.sampleRate > 0) state.rate = format.sampleRate;
+    }),
+    bridge.onLoopbackAudio((bytes) => pushNative(state, bytes)),
+    bridge.onLoopbackEnded((why) => {
+      // Pomocník pořád padá - nahrává se dál, jen bez zvuku hry (a v nastavení je proč).
+      if (nativeState !== state) return;
+      systemAudioError = why || 'helper';
+      report({ type: 'warning', generation, kind: 'systemLoopback', message: `${systemAudioError} | ${defaultOutputAtStart}` });
+    })
+  );
+  nativeState = state;
+  systemAudioNative = true;
+  systemDeviceLabel = defaultOutputAtStart;
+  return dest.stream.getAudioTracks()[0] ?? null;
+}
+
+/** Kousek zvuku z pomocníka do stopy: se stálým náskokem; rozdíl hodin zvukovky a Web Audio vyrovná nepatrná změna rychlosti. */
+function pushNative(state: NativeState, bytes: Uint8Array) {
+  if (nativeState !== state || state.ctx.state === 'closed') return;
+  const aligned = bytes.byteOffset % 4 === 0 ? bytes : bytes.slice();
+  const samples = new Float32Array(aligned.buffer, aligned.byteOffset, aligned.byteLength >> 2);
+  const frames = samples.length >> 1;
+  if (frames === 0) return;
+  const buffer = state.ctx.createBuffer(2, frames, state.rate);
+  const left = buffer.getChannelData(0);
+  const right = buffer.getChannelData(1);
+  for (let i = 0, j = 0; i < frames; i++, j += 2) {
+    left[i] = samples[j];
+    right[i] = samples[j + 1];
+  }
+  const now = state.ctx.currentTime;
+  const lead = NATIVE_LEAD_MS / 1000;
+  let ahead = state.next - now;
+  if (ahead < lead * 0.3) {
+    // Začátek, nebo po tichu (Windows loopbacku v tichu nic neposílá) / výpadku: znovu od stálého náskoku.
+    state.next = now + lead;
+    ahead = lead;
+  } else if (ahead > lead * 4) {
+    // Nahromadilo se (stránka se na chvíli zasekla) - zahodit, ať zpoždění neroste.
+    return;
+  }
+  // ±0,3 % rychlosti (neslyšitelné) drží náskok kolem cíle, i když hodiny zvukovky jdou jinak.
+  const rate = 1 + Math.max(-0.003, Math.min(0.003, (ahead - lead) * 0.1));
+  const source = state.ctx.createBufferSource();
+  source.buffer = buffer;
+  source.playbackRate.value = rate;
+  source.connect(state.dest);
+  source.start(state.next);
+  state.next += frames / state.rate / rate;
+}
+
+function stopNativeLoopback() {
+  const pending = nativeRun;
+  nativeRun++;
+  const state = nativeState;
+  nativeState = null;
+  // I rozběhnutý start bez odpovědi: hlavní proces pomocníka zastaví (jinak by snímal dál pro nikoho).
+  if (state || pending > 0) bridge.loopbackStop();
+  if (!state) return;
+  for (const off of state.off) off();
+  for (const track of state.dest.stream.getTracks()) track.stop();
+  void state.ctx.close().catch(() => undefined);
+}
+
 /**
  * Zvuk hry (loopback výchozího výstupu Windows) se nepodařilo otevřít.
  * Stává se to u výchozího výstupu, který Windows "drží" jinak než běžná
@@ -199,21 +325,32 @@ function errorText(e: unknown): string {
  *   3. jinak nahrávat bez zvuku hry - a v nastavení říct proč a co s tím.
  */
 async function recoverSystemAudio(firstError: unknown): Promise<MediaStreamTrack | null> {
-  // 1) znovu, po krátké pauze (jen zvuk - obraz z druhého pokusu se hned zahodí)
-  await new Promise((r) => setTimeout(r, 1200));
-  try {
-    const again = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-    for (const v of again.getVideoTracks()) v.stop();
-    const track = again.getAudioTracks()[0] ?? null;
-    if (track) {
-      sourceTracks.push(track);
-      report({ type: 'warning', generation, kind: 'systemAudioRetry', message: errorText(firstError) });
-      return track;
+  // 1) znovu, po krátké pauze (jen zvuk - obraz z druhého pokusu se hned zahodí).
+  //    Když už jednou pomohl až pomocník, tohle se přeskočí (zařízení je pořád stejné).
+  if (!nativeWorkedBefore && !testNativeLoopback) {
+    await new Promise((r) => setTimeout(r, 1200));
+    try {
+      const again = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      for (const v of again.getVideoTracks()) v.stop();
+      const track = again.getAudioTracks()[0] ?? null;
+      if (track) {
+        sourceTracks.push(track);
+        report({ type: 'warning', generation, kind: 'systemAudioRetry', message: errorText(firstError) });
+        return track;
+      }
+    } catch (e) {
+      firstError = firstError ?? e;
     }
-  } catch (e) {
-    firstError = firstError ?? e;
   }
-  // 2) vstup, který nahrává zvuk počítače
+  // 2) přímo z Windows (WASAPI loopback přes pomocníka, jako OBS): zařízení se otevře v jeho
+  //    vlastním formátu - jde i u virtuálních 7.1 zařízení (Logitech G HUB, Razer, Oculus...).
+  const native = await startNativeLoopback();
+  if (native) {
+    nativeWorkedBefore = true;
+    report({ type: 'warning', generation, kind: 'systemAudioNative', message: `${errorText(firstError) || 'no track'} | ${defaultOutputAtStart}` });
+    return native;
+  }
+  // 3) vstup, který nahrává zvuk počítače
   try {
     const inputs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput' && d.deviceId !== 'default' && d.deviceId !== 'communications' && isLoopbackInput(d.label));
     for (const input of inputs) {
@@ -235,8 +372,8 @@ async function recoverSystemAudio(firstError: unknown): Promise<MediaStreamTrack
   } catch {
     // seznam zařízení nejde - nic
   }
-  // 3) bez zvuku hry
-  systemAudioError = errorText(firstError) || 'unknown';
+  // 4) bez zvuku hry
+  systemAudioError = errorText(firstError) || nativeLoopbackError || 'unknown';
   report({ type: 'warning', generation, kind: 'systemLoopback', message: `${systemAudioError} | ${defaultOutputAtStart}` });
   return null;
 }
@@ -248,7 +385,7 @@ async function recoverSystemAudio(firstError: unknown): Promise<MediaStreamTrack
 async function getStreams(settings: Settings): Promise<void> {
   // Zvuk hry z Windows (loopback výchozího výstupu), nebo ze zvoleného vstupního zařízení (Stereo Mix, VB-Cable…).
   const viaDevice = settings.systemAudio && !!settings.systemAudioDevice;
-  const wantAudio = settings.systemAudio && bridge.platform === 'win32' && !viaDevice;
+  const wantAudio = settings.systemAudio && (bridge.platform === 'win32' || testNativeLoopback) && !viaDevice;
   // Hardwarový kodér se zjistí dřív, než se začne snímat: bez něj kóduje procesor
   // a 60 fps by hru brzdilo - pak se nahrává 30 fps (a v nastavení je to vidět).
   if (hwEncoder === null) hwEncoder = await detectHwEncoder(Math.round(((settings.maxHeight || 1080) * 16) / 9), settings.maxHeight || 1080, settings.fps);
@@ -266,6 +403,8 @@ async function getStreams(settings: Settings): Promise<void> {
   let legacyAudioError: unknown = null;
   systemAudioError = '';
   systemAudioFallback = '';
+  systemAudioNative = false;
+  nativeLoopbackError = '';
   // 1) moderní cesta: getDisplayMedia (obrazovku vybírá hlavní proces)
   try {
     display = await navigator.mediaDevices.getDisplayMedia({ video, audio: wantAudio });
@@ -433,6 +572,7 @@ function startMeters(systemTrack: MediaStreamTrack | null, micTrack: MediaStream
         bluetoothMicAvoided,
         systemError: systemAudioError || undefined,
         systemFallback: systemAudioFallback || undefined,
+        systemNative: systemAudioNative || undefined,
         defaultOutput: defaultOutputAtStart || undefined,
       },
     });
@@ -527,6 +667,7 @@ function startRecorders(settings: Settings, gen: number) {
     audio: stream.getAudioTracks().length > 0,
     mic: !!mic,
     micLatencyMs,
+    systemLatencyMs: systemAudioNative ? NATIVE_LATENCY_MS : 0,
     hwEncoder,
     fps: effectiveFps,
     ...(size ? { width: size.width, height: size.height } : {}),
@@ -746,6 +887,7 @@ function stopAll() {
   stopLive();
   stopRecorders();
   stopMeters();
+  stopNativeLoopback();
   stopWatchSize();
   for (const track of stream?.getTracks() ?? []) track.stop();
   for (const track of micStream?.getTracks() ?? []) track.stop();
@@ -775,6 +917,8 @@ bridge.onCommand(async (command: CaptureCommand) => {
     if (command.type === 'start') {
       stopAll();
       currentSettings = command.settings;
+      testNativeLoopback = !!command.testNativeLoopback;
+      if (command.nativeLoopbackKnown) nativeWorkedBefore = true;
       await getStreams(command.settings);
       stream!.getVideoTracks()[0]?.addEventListener('ended', () => {
         report({ type: 'error', generation, message: 'obrazovka přestala posílat obraz' });

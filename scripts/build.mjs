@@ -11,6 +11,9 @@ mkdirSync('dist', { recursive: true });
 
 const common = { bundle: true, sourcemap: 'inline', logLevel: 'warning', target: 'es2022' };
 
+// Zdrojáky pomocníků v C# (src/helper/*.cs) jdou do hlavního procesu jako text - zapíše je a přeloží PowerShell.
+const loader = { '.cs': 'text' };
+
 await build({
   ...common,
   entryPoints: ['src/main/main.ts'],
@@ -18,6 +21,7 @@ await build({
   platform: 'node',
   format: 'cjs',
   packages: 'external',
+  loader,
 });
 
 await build({
@@ -77,11 +81,13 @@ await build({
     siteMove: 'src/main/siteMove.ts',
     updateOutcome: 'src/main/updateOutcome.ts',
     compress: 'src/shared/compress.ts',
+    audioLoopback: 'src/main/audioLoopback.ts',
   },
   outdir: 'dist/esm',
   platform: 'node',
   format: 'esm',
   packages: 'external',
+  loader,
 });
 
 console.log('build ok');

@@ -77,6 +77,7 @@ import {
 } from './updater';
 import { runTestDriver } from './testDriver';
 import { WinHelper } from './winHelper';
+import { NativeLoopback } from './audioLoopback';
 import { ClipCompressor } from './compress';
 import { compressSummary, COMPRESS_LEVELS, type CompressLevel } from '../shared/compress';
 import { makeGif, makeThumbnail, mergeClips, trimClip } from './edit';
@@ -208,6 +209,8 @@ class KineApp {
   uploader!: Uploader;
   toast!: Toast;
   helper: WinHelper | null = null;
+  /** Zvuk hry přímo z Windows (WASAPI loopback přes pomocníka) - jen když ho Chromium otevřít nejde. */
+  loopback: NativeLoopback | null = null;
   hotkeys!: HotkeyManager;
   tray: Tray | null = null;
   settingsWindow: BrowserWindow | null = null;
@@ -374,6 +377,8 @@ class KineApp {
           return;
         }
         if (kind === 'systemAudioRetry') return; // povedlo se na druhý pokus - jen do logu
+        // Zvuk hry jde přímo z Windows (jako v OBS) - funguje, hráč nemusí nic dělat; jen do logu a do Nastavení -> Záznam.
+        if (kind === 'systemAudioNative') return;
         this.quietNotice(`capture:${kind}`, this.t('toastMicUnavailable', { message: clean }), 'warn', 'settings:audio');
       },
       onLevels: (levels) => this.onAudioLevels(levels),
@@ -392,6 +397,7 @@ class KineApp {
       },
       // Každá appka svou složku zásobníku - Kine a Kine Clipper si nesmí mazat kousky.
       bufferName: VARIANT === 'clipper' ? 'kine-clipper-buffer' : 'kine-buffer',
+      nativeLoopbackKnown: () => !!this.loopback?.workedBefore(),
     });
 
     if (WinHelper.supported() && !process.env.KINE_NO_HELPER) {
@@ -981,15 +987,17 @@ class KineApp {
     }
     lines.push(`Capture: ${c.state}${c.error ? ` (${c.error})` : ''} · ${s.maxHeight}p ${s.fps} fps (real ${c.effectiveFps ?? '?'}) · ${s.codec} · ${s.videoMbps} Mb/s · HW encoder ${yesNo(c.hwEncoder)} · ${c.lastStarted?.mimeType ?? '?'}`);
     lines.push(
-      `Audio: game ${yesNo(s.systemAudio)} (${s.systemAudioDevice ? 'input device' : 'loopback'}) · mic ${yesNo(s.microphone)} (${s.microphoneDevice ? 'chosen' : 'default'}) · gain ${Math.round(s.systemGain * 100)}/${Math.round(s.micGain * 100)} % · separate tracks ${yesNo(s.separateMicTrack)} · offset ${s.audioOffsetMs} ms · latency ${c.lastStarted?.micLatencyMs ?? '?'} ms`
+      `Audio: game ${yesNo(s.systemAudio)} (${s.systemAudioDevice ? 'input device' : 'loopback'}) · mic ${yesNo(s.microphone)} (${s.microphoneDevice ? 'chosen' : 'default'}) · gain ${Math.round(s.systemGain * 100)}/${Math.round(s.micGain * 100)} % · separate tracks ${yesNo(s.separateMicTrack)} · offset ${s.audioOffsetMs} ms · latency ${c.lastStarted?.micLatencyMs ?? '?'} ms${c.lastStarted?.systemLatencyMs ? ` · game sound via helper (WASAPI, ${c.lastStarted.systemLatencyMs} ms)` : ''}`
     );
     const l = c.levels;
     const level = (v: number | null) => (v === null ? 'off' : v > 0 ? `${Math.round(20 * Math.log10(v))} dB` : 'silent');
     if (l) {
       lines.push(`Levels: game ${level(l.system)} from "${l.systemDevice || 'default'}" (silent ${l.systemSilentSeconds} s) · mic ${level(l.mic)}${l.micDevice ? ` "${l.micDevice}"` : ''}${l.bluetoothMicAvoided ? ' · Bluetooth mic avoided' : ''}`);
       // Zvuk hry nejde: důvod od Windows a výchozí výstup - podle toho se dá poradit.
-      if (l.systemError || l.systemFallback || l.defaultOutput) {
-        lines.push(`Game audio: default output "${l.defaultOutput || '?'}"${l.systemError ? ` · FAILED: ${l.systemError}` : ''}${l.systemFallback ? ` · fallback input "${l.systemFallback}"` : ''}`);
+      if (l.systemError || l.systemFallback || l.defaultOutput || l.systemNative) {
+        lines.push(
+          `Game audio: default output "${l.defaultOutput || '?'}"${l.systemError ? ` · FAILED: ${l.systemError}` : ''}${l.systemFallback ? ` · fallback input "${l.systemFallback}"` : ''}${l.systemNative ? ' · via helper (WASAPI loopback, Chromium failed)' : ''}`
+        );
       }
     }
     lines.push(`Game: ${this.games.current()?.name ?? '-'} · detection ${s.detection} · performance ${s.performance} · clip ${s.clipSeconds} s · paused ${yesNo(this.paused)} · recording ${yesNo(!!c.recordingInfo())}`);
@@ -2716,6 +2724,19 @@ class KineApp {
     ipcMain.on('capture:event', (e, event: CaptureEvent) => {
       if (isCaptureSender(e)) this.capture.handleEvent(event);
     });
+    // Zvuk hry přímo z Windows (pomocník s WASAPI loopbackem, jako OBS) - jen pro snímací stránku.
+    const fromCapture = (sender: Electron.WebContents) => {
+      const win = BrowserWindow.fromWebContents(sender);
+      return !!win && win.webContents.getURL().endsWith('capture.html');
+    };
+    ipcMain.handle('loopback:start', (e) => {
+      if (!fromCapture(e.sender)) return { ok: false, error: 'sender' };
+      this.loopback ??= new NativeLoopback(app.getPath('userData'));
+      return this.loopback.start(e.sender);
+    });
+    ipcMain.on('loopback:stop', (e) => {
+      if (fromCapture(e.sender)) this.loopback?.stop();
+    });
     ipcMain.handle('capture:sources', async () => {
       const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } });
       return sources.map((x) => ({ id: x.id, name: x.name, display_id: x.display_id }));
@@ -2903,6 +2924,15 @@ class KineApp {
       const win = BrowserWindow.fromWebContents(e.sender);
       if (win && !win.isDestroyed()) win.setFullScreen(on === true);
     });
+    // Ikona celé obrazovky ve videu (vpravo dole) dá přes celou obrazovku holé video a prohlížeč
+    // si to kliknutí "spotřebuje" - scénu se šipkami (player.ts) proto zapne tohle, jako by
+    // kliknul uživatel (executeJavaScript s gestem). Pevný kód, žádná data z okna.
+    ipcMain.handle('player:stageFullscreen', async (e) => {
+      if (e.sender.isDestroyed()) return;
+      await e.sender
+        .executeJavaScript('window.__kinePlayerStageFullscreen ? window.__kinePlayerStageFullscreen() : false', true)
+        .catch(() => undefined);
+    });
     // Zabezpečení Windows: Smart App Control / Historie ochrany (jen tyhle dvě stránky -
     // windowsdefender:// umí i věci jako restart počítače, nic jiného se odsud neotevře).
     ipcMain.handle('app:openWindowsSecurity', (_e, page: unknown) => {
@@ -2974,6 +3004,7 @@ class KineApp {
     log('konec kvůli aktualizaci');
     const started = await installUpdateNow(async () => {
       this.helper?.stop();
+      this.loopback?.stop();
       this.compressor.cancel();
       this.uploader.stopWaiting();
       await Promise.race([this.gameEvents.stop(), new Promise((r) => setTimeout(r, 2000))]).catch(() => undefined);
@@ -3001,6 +3032,7 @@ class KineApp {
     this.quitting = true;
     log('konec');
     this.helper?.stop();
+    this.loopback?.stop();
     this.compressor.cancel();
     this.uploader.stopWaiting();
     void this.gameEvents.stop();
@@ -3039,6 +3071,7 @@ app.on('window-all-closed', () => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   kine.helper?.stop();
+  kine.loopback?.stop();
 });
 
 // Zkouška bez zvukové karty (Xvfb): Chromium podstrčí falešný mikrofon s tónem,

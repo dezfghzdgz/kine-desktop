@@ -89,6 +89,8 @@ const kine = {
   /** Záznam posledního vysílání -> video na Kine (karta po skončení). */
   publishLiveRecording: (opts: { title: string; visibility: Visibility }): Promise<void> => ipcRenderer.invoke('live:publishRecording', opts),
   dismissLiveEnded: (): Promise<void> => ipcRenderer.invoke('live:dismissEnded'),
+  downloadLiveRecording: (): Promise<void> => ipcRenderer.invoke('live:downloadRecording'),
+  discardLiveRecording: (): Promise<void> => ipcRenderer.invoke('live:discardRecording'),
   openLiveRecording: (): Promise<void> => ipcRenderer.invoke('live:openRecording'),
   /** Co se záznamem po skončení (nastavení na Kine, stejné jako ve studiu); null = nepřihlášený / Kine nejde. */
   liveAfterStream: (): Promise<LiveAfterStream | null> => ipcRenderer.invoke('live:afterStream'),

@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { cpus, homedir, release, totalmem } from 'node:os';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, statfsSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, statfsSync, unlinkSync, writeFileSync } from 'node:fs';
+import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { basename, dirname, extname, join } from 'node:path';
 import {
   BrowserWindow,
@@ -81,7 +84,7 @@ import { NativeLoopback } from './audioLoopback';
 import { ClipCompressor } from './compress';
 import { compressSummary, COMPRESS_LEVELS, type CompressLevel } from '../shared/compress';
 import { makeGif, makeThumbnail, mergeClips, trimClip } from './edit';
-import { runFfmpeg, spawnFfmpeg } from './ffmpeg';
+import { probe, runFfmpeg, spawnFfmpeg } from './ffmpeg';
 import { LiveController } from './live';
 import { LIVE_QUALITIES, cleanLiveError, liveElapsed, liveErrorTextKey, looksLikeLiveThumbnail } from '../shared/live';
 import { GIF_MAX_SECONDS, normalizeSpeed, shiftMarkers, type TextPosition } from './editPlan';
@@ -446,6 +449,7 @@ class KineApp {
       onEnded: () => this.afterLive(),
       // Samočinná zkouška vysílá na místní RTMP server místo Kine.
       testUrl: process.env.KINE_TEST ? process.env.KINE_TEST_LIVE_URL ?? null : null,
+      saveRecording: (info) => this.saveStreamRecording(info),
     });
 
     this.uploader = new Uploader({
@@ -1225,6 +1229,87 @@ class KineApp {
     await this.live.publishRecording({ title: typeof opts?.title === 'string' ? opts.title : undefined, visibility, language: s.videoLanguage });
   }
 
+  /**
+   * Záznam vysílání do PC (karta skončeného vysílání -> Stáhnout do PC): MP4
+   * od Cloudflare do složky s klipy, náhled a do knihovny jako nahrávka.
+   * Stahuje se do ".part" a přejmenuje až celé - napůl stažený soubor se
+   * v knihovně nikdy neobjeví.
+   */
+  async saveStreamRecording(info: { url: string; title: string; endedAt: number; onProgress: (percent: number | null) => void }): Promise<string> {
+    const dir = this.settings.clipsDir();
+    mkdirSync(dir, { recursive: true });
+    const ended = new Date(info.endedAt);
+    const base = `${clipFileBase(ended, null)} ${safeFilePart(info.title || 'Kine', 40)} (${safeFilePart(this.t('liveRecordingFileWord'), 20)})`;
+    let file = join(dir, `${base}.mp4`);
+    for (let n = 2; existsSync(file); n++) file = join(dir, `${base} ${n}.mp4`);
+    const part = `${file}.part`;
+    const res = await fetch(info.url, { signal: AbortSignal.timeout(6 * 3600 * 1000) });
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    const total = Number(res.headers.get('content-length')) || 0;
+    let received = 0;
+    let reportedAt = 0;
+    // Počítadlo pro procenta; pipeline hlídá chyby na obou stranách (plný disk, zamčený soubor,
+    // přerušené spojení) - bez ní by zápis po chybě čekal donekonečna a karta visela.
+    const counter = new Transform({
+      transform(chunk: Buffer, _enc, done) {
+        received += chunk.length;
+        const now = Date.now();
+        if (now - reportedAt > 400) {
+          reportedAt = now;
+          info.onProgress(total > 0 ? Math.min(99, Math.round((received / total) * 100)) : null);
+        }
+        done(null, chunk);
+      },
+    });
+    try {
+      await pipeline(Readable.fromWeb(res.body as unknown as WebReadableStream<Uint8Array>), counter, createWriteStream(part));
+      if (total > 0 && received < total) throw new Error('download incomplete');
+      renameSync(part, file);
+    } catch (e) {
+      // Napůl stažený soubor pryč - v knihovně se nikdy neobjeví a nezabírá místo.
+      try {
+        rmSync(part, { force: true });
+      } catch {
+        // nic
+      }
+      throw e;
+    }
+    const probed = await probe(file);
+    const duration = probed.durationSeconds ?? 0;
+    const thumbsDir = join(app.getPath('userData'), 'thumbs');
+    mkdirSync(thumbsDir, { recursive: true });
+    const thumb = join(thumbsDir, `${basename(file, '.mp4')}-${Date.now().toString(36)}.jpg`);
+    const thumbOk = await makeThumbnail(file, thumb, Math.min(5, duration / 2));
+    const clip: Clip = {
+      id: randomUUID(),
+      file,
+      thumb: thumbOk ? thumb : null,
+      title: `${info.title || 'Kine'} · ${this.t('liveRecordingFileWord')}`.slice(0, 150),
+      game: null,
+      createdAt: new Date(Math.max(0, info.endedAt - duration * 1000)).toISOString(),
+      addedAt: new Date().toISOString(),
+      durationSeconds: duration,
+      sizeBytes: statSync(file).size,
+      width: probed.width,
+      height: probed.height,
+      sessionId: 'live-' + randomUUID(),
+      upload: null,
+      kind: 'recording',
+    };
+    this.library.add(clip);
+    this.pushStatus();
+    log(`záznam vysílání stažený: ${file} (${Math.round(duration)} s)`);
+    return file;
+  }
+
+  async downloadLiveRecording(): Promise<void> {
+    await this.live.downloadRecording();
+  }
+
+  async discardLiveRecording(): Promise<void> {
+    await this.live.discardRecording();
+  }
+
   /** Co se záznamem po skončení vysílání - nastavení žije na Kine (stejné jako ve studiu na webu). */
   async liveAfterStream(): Promise<LiveAfterStream | null> {
     if (!this.auth.current()) return null;
@@ -1991,9 +2076,13 @@ class KineApp {
     });
   }
 
+  /** Adresa patří ke Kine (stejný web; playkine.com a www.playkine.com jsou totéž). */
   private isKineUrl(url: string): boolean {
     try {
-      return new URL(url).origin === new URL(this.settings.get().siteUrl).origin;
+      const a = new URL(url);
+      const b = new URL(this.settings.get().siteUrl);
+      const host = (h: string) => h.toLowerCase().replace(/^www\./, '');
+      return a.protocol === b.protocol && a.port === b.port && host(a.hostname) === host(b.hostname);
     } catch {
       return false;
     }
@@ -2712,6 +2801,8 @@ class KineApp {
     ipcMain.handle('live:openChat', () => this.openLiveChat());
     ipcMain.handle('live:publishRecording', (_e, opts: { title?: unknown; visibility?: unknown }) => this.publishLiveRecording(opts ?? {}));
     ipcMain.handle('live:dismissEnded', () => this.live.dismissEnded());
+    ipcMain.handle('live:downloadRecording', () => this.downloadLiveRecording());
+    ipcMain.handle('live:discardRecording', () => this.discardLiveRecording());
     ipcMain.handle('live:openRecording', () => this.openLiveRecording());
     ipcMain.handle('live:afterStream', () => this.liveAfterStream());
     ipcMain.handle('live:setAfterStream', (_e, value: unknown) => this.setLiveAfterStream(value));

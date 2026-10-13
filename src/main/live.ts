@@ -37,7 +37,16 @@ export type LiveDeps = {
   onEnded?: () => void;
   /** Jen pro test (KINE_TEST_LIVE_URL): místo Kine místní RTMP server. */
   testUrl?: string | null;
+  /**
+   * Stáhne MP4 záznamu do složky s klipy a přidá ho do knihovny jako nahrávku
+   * (hlavní proces); vrací cestu k souboru.
+   */
+  saveRecording?: (info: { url: string; title: string; endedAt: number; onProgress: (percent: number | null) => void }) => Promise<string>;
 };
+
+/** Jak dlouho čekat, než Cloudflare MP4 vyrobí (hodiny vysílání = minuty). */
+const DOWNLOAD_PREPARE_MS = 25 * 60 * 1000;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const IDLE: LiveStatus = { state: 'idle', since: null, title: '', watchUrl: null, error: null, confirmed: null, scene: null, stats: null, viewers: null, cameraError: null, ended: null };
 
@@ -213,13 +222,18 @@ export class LiveController {
 
   /** Karta skončeného vysílání (záložka Živě). */
   private endedCard(title: string, duration: string): LiveEnded {
-    return { at: Date.now(), duration, title, autoPending: this.autoPublish && !this.deps.testUrl, video: null, publishing: false, error: null };
+    return { at: Date.now(), duration, title, autoPending: this.autoPublish && !this.deps.testUrl, video: null, publishing: false, error: null, recordingUid: null, download: null, discarded: false, discarding: false, discardError: null };
   }
 
   /** Kine odpověděla na "skončil jsem": záznam zveřejněný automaticky -> do karty a okénko s odkazem. */
   private onStoppedSignal(ended: LiveEnded | null, result: Awaited<ReturnType<KineApi['liveSignal']>> | null): void {
-    const card = this.status.ended;
+    let card = this.status.ended;
     if (!ended || !card || card.at !== ended.at) return; // mezitím nové vysílání / karta zavřená
+    // Který záznam patří k tomuhle vysílání (Stáhnout / Zahodit míří na něj, ne na "nejnovější").
+    if (result?.recordingUid && !card.recordingUid) {
+      card = { ...card, recordingUid: result.recordingUid };
+      this.set({ ended: card });
+    }
     if (result?.recording) {
       const url = `${this.deps.siteUrl()}/watch/${result.recording.videoId}`;
       this.set({ ended: { ...card, autoPending: false, video: { id: result.recording.videoId, url, status: result.recording.status, auto: true } } });
@@ -238,7 +252,7 @@ export class LiveController {
    */
   async publishRecording(options: { title?: string; visibility: Visibility; language?: string }): Promise<void> {
     const card = this.status.ended;
-    if (!card || card.publishing || card.video) return;
+    if (!card || card.publishing || card.video || card.discarded || card.discarding) return;
     this.set({ ended: { ...card, publishing: true, error: null } });
     const title = (options.title ?? '').trim().slice(0, 150) || card.title;
     try {
@@ -260,6 +274,98 @@ export class LiveController {
   /** Nastavení "Po skončení vysílání" se změnilo (i během vysílání) - karta po konci podle něj čeká na automatické zveřejnění. */
   setAutoPublish(on: boolean): void {
     this.autoPublish = on;
+  }
+
+  /** Karta pořád ta samá (mezitím nezačalo nové vysílání a nikdo ji nezavřel)? */
+  private sameCard(at: number): LiveEnded | null {
+    const now = this.status.ended;
+    return now && now.at === at ? now : null;
+  }
+
+  /**
+   * Stáhnout záznam do PC: Kine nechá u Cloudflare vyrobit MP4 (u dlouhého
+   * vysílání pár minut), appka ho stáhne do složky s klipy a přidá do knihovny
+   * jako nahrávku - jde pak přehrát, zkrátit i nahrát jako každý klip.
+   */
+  async downloadRecording(): Promise<void> {
+    const card = this.status.ended;
+    const save = this.deps.saveRecording;
+    if (!card || !save || card.discarded || card.discarding) return;
+    if (card.download && (card.download.state === 'preparing' || card.download.state === 'downloading')) return;
+    const at = card.at;
+    const progress = (download: NonNullable<LiveEnded['download']>, uid?: string) => {
+      const now = this.sameCard(at);
+      if (now) this.set({ ended: { ...now, ...(uid ? { recordingUid: uid } : {}), download } });
+      return !!now;
+    };
+    progress({ state: 'preparing', percent: null, file: null, error: null });
+    try {
+      let uid = card.recordingUid || 'latest';
+      let url: string | null = null;
+      const deadline = Date.now() + DOWNLOAD_PREPARE_MS;
+      while (!url) {
+        // Karta zavřená nebo nové vysílání - dál se neptat.
+        if (!this.sameCard(at)) return;
+        if (Date.now() > deadline) throw new Error('Cloudflare MP4 nestihl připravit - zkus to později ve studiu na Kine.');
+        let result: Awaited<ReturnType<KineApi['liveRecordingDownload']>>;
+        try {
+          result = await this.deps.api().liveRecordingDownload(uid);
+        } catch (e) {
+          const status = (e as { status?: unknown }).status;
+          // Záznam ještě není v seznamu u Cloudflare (minuta po konci vysílání) - zkusit znovu.
+          if (status === 404 && uid === 'latest') {
+            await sleep(5000);
+            continue;
+          }
+          throw e;
+        }
+        uid = result.uid;
+        if (result.status === 'ready' && result.url) url = result.url;
+        else {
+          if (!progress({ state: 'preparing', percent: result.percent, file: null, error: null }, uid)) return;
+          await sleep(3000);
+        }
+      }
+      if (!progress({ state: 'downloading', percent: 0, file: null, error: null }, uid)) return;
+      this.deps.log(`vysílání: stahuji záznam ${uid}`);
+      const file = await save({
+        url,
+        title: card.title,
+        endedAt: at,
+        onProgress: (percent) => void progress({ state: 'downloading', percent, file: null, error: null }),
+      });
+      this.deps.log(`vysílání: záznam stažený do knihovny (${file})`);
+      progress({ state: 'done', percent: 100, file, error: null });
+    } catch (e) {
+      this.deps.log(`vysílání: záznam se nepovedlo stáhnout: ${(e as Error).message}`);
+      progress({ state: 'error', percent: null, file: null, error: ((e as Error).message ?? '').slice(0, 200) });
+    }
+  }
+
+  /** Zahodit záznam: smaže se u Cloudflare, nikde se neuloží (jinak by se smazal sám po 30 dnech). */
+  async discardRecording(): Promise<void> {
+    const card = this.status.ended;
+    if (!card || card.video || card.discarded || card.discarding || card.publishing) return;
+    if (card.download && (card.download.state === 'preparing' || card.download.state === 'downloading')) return;
+    // Jen konkrétní záznam tohohle vysílání - "nejnovější" by mohl být jiný (mezitím vysílání z OBS).
+    if (!card.recordingUid) {
+      this.set({ ended: { ...card, discardError: 'unknown' } });
+      return;
+    }
+    this.set({ ended: { ...card, discarding: true, discardError: null } });
+    try {
+      const result = await this.deps.api().liveRecordingDiscard(card.recordingUid);
+      const now = this.sameCard(card.at);
+      if (!now) return;
+      this.deps.log(`vysílání: záznam zahozený (${result.uid})`);
+      this.set({ ended: { ...now, recordingUid: result.uid, discarding: false, discarded: true } });
+    } catch (e) {
+      const now = this.sameCard(card.at);
+      if (!now) return;
+      const status = typeof (e as { status?: unknown }).status === 'number' ? (e as { status: number }).status : 0;
+      this.deps.log(`vysílání: záznam se nepovedlo zahodit (${status}): ${(e as Error).message}`);
+      this.set({ ended: { ...now, discarding: false, discardError: ((e as Error).message ?? '').slice(0, 200) || String(status) } });
+    }
   }
 
   /** Karta skončeného vysílání pryč (✕). */

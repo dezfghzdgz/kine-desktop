@@ -1,6 +1,6 @@
-import { appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { request as httpRequest } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { basename, dirname, join } from 'node:path';
 import { BrowserWindow, app, clipboard, nativeImage } from 'electron';
 import { log } from './log';
@@ -863,7 +863,11 @@ export async function runTestDriver(kine: {
       // během ukládání nesmí uložit nahrávku podruhé (dřív se uložila tolikrát, kolikrát hráč klikl).
       const savingUi = await recWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-record'); return !!b && b.classList.contains('saving') && b.disabled && !document.querySelector('.side-record.recording'); })()`);
       await sleep(150);
-      const savingStatus = !!(kine as any).status().recordingSaving && !(kine as any).capture.recordingInfo();
+      // Stav "ukládám" bez "nahrávám" - nebo už uloženo: krátkou nahrávku rychlý disk uloží i do 150 ms.
+      // Napřed stav, pak knihovna (nahrávka je v knihovně dřív, než stav "ukládám" zmizí).
+      const savingNow = !!(kine as any).status().recordingSaving;
+      const savedAlready = kine.library.list().some((c) => !beforeStop.has(c.id) && c.kind === 'recording');
+      const savingStatus = (savingNow || savedAlready) && !(kine as any).capture.recordingInfo();
       // Jen dokud se ukládá (kdyby uložení stihlo doběhnout, další stisk by správně začal novou nahrávku).
       if ((kine as any).status().recordingSaving) await (kine as any).toggleRecording();
       await recWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-record.saving'); if (b) b.click(); return true; })()`);
@@ -874,7 +878,7 @@ export async function runTestDriver(kine: {
       }
       await sleep(2500);
       const recordingsAfterStop = kine.library.list().filter((c) => !beforeStop.has(c.id) && c.kind === 'recording').length;
-      result.recordingStopOnce = { savingUi, savingStatus, recordingsAfterStop, savingAfter: !!(kine as any).status().recordingSaving };
+      result.recordingStopOnce = { savingUi, savingStatus, savedAlready, recordingsAfterStop, savingAfter: !!(kine as any).status().recordingSaving };
       result.recordingStopOnceOk = savingUi && savingStatus && recordingsAfterStop === 1 && !(kine as any).status().recordingSaving;
       const badge = await recWin.webContents.executeJavaScript(`!!document.querySelector('.clip .thumb .kind-badge') && !document.querySelector('.side-record.recording')`);
       result.recordingClip = rec ? { durationSeconds: rec.durationSeconds, title: rec.title, file: rec.file } : null;
@@ -1065,14 +1069,70 @@ export async function runTestDriver(kine: {
         const brbFrames = frames.filter((f) => lum(f, 0, 0, 64, 10) < 30 && lum(f, 0, 26, 18, 36) < 30 && lum(f, 16, 13, 48, 19) > lum(f, 0, 0, 64, 10) + 12);
         // Kamera "large" vpravo dole = asi 21x12 px v rohu 64x36; falešná kamera Chromia je pestrá (ne černá).
         const camFrames = frames.filter((f) => !brbFrames.includes(f) && Math.abs(lum(f, 44, 23, 62, 34) - lum(f, 2, 2, 20, 13)) > 20);
+        // Záznam do PC (0.10.3): karta má Stáhnout / Zahodit a ukazuje stav stahování; skutečné stažení
+        // (místní HTTP server místo Cloudflare) skončí v knihovně jako nahrávka s náhledem.
+        let endedExtras = false;
+        let recordingSaved: Record<string, unknown> | null = null;
+        if (liveWin && !liveWin.isDestroyed() && existsSync(liveOut)) {
+          const base = { at: Date.now(), duration: '0:12', title: 'E2E live', autoPending: false, video: null, publishing: false, error: null, recordingUid: null, download: null, discarded: false, discarding: false };
+          kine.openSettings('live');
+          (kine as any).live.set({ ended: base });
+          await sleep(500);
+          const buttons = await liveWin.webContents.executeJavaScript(`(() => { const c = document.querySelector('.live-ended'); return !!c && !!c.querySelector('.live-ended-download') && !!c.querySelector('.live-ended-discard'); })()`);
+          (kine as any).live.set({ ended: { ...base, download: { state: 'preparing', percent: 42, file: null, error: null } } });
+          await sleep(400);
+          const preparing = await liveWin.webContents.executeJavaScript(`/42 %/.test(document.querySelector('.live-ended-progress')?.textContent ?? '')`);
+          await shot(liveWin, 'settings-live-ended-preparing');
+          const data = readFileSync(liveOut);
+          const server = createServer((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': data.length });
+            res.end(data);
+          });
+          await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+          const port = (server.address() as { port: number }).port;
+          const before = kine.library.list().length;
+          const progress: (number | null)[] = [];
+          let file: string | null = null;
+          try {
+            file = await (kine as any).saveStreamRecording({ url: `http://127.0.0.1:${port}/rec.mp4`, title: 'E2E live', endedAt: Date.now(), onProgress: (p: number | null) => progress.push(p) });
+          } catch (e) {
+            log(`e2e: stažení záznamu vysílání: ${(e as Error).message}`);
+          }
+          server.close();
+          const added = kine.library.list().find((c) => c.file === file);
+          recordingSaved = {
+            inClips: !!file && file.startsWith((kine as any).settings.clipsDir()),
+            exists: !!file && existsSync(file),
+            noPart: !!file && !existsSync(`${file}.part`),
+            kind: added?.kind ?? null,
+            thumb: !!added?.thumb && existsSync(added.thumb),
+            duration: added?.durationSeconds ?? null,
+            added: kine.library.list().length - before,
+            title: added?.title ?? null,
+          };
+          (kine as any).live.set({ ended: { ...base, download: { state: 'done', percent: 100, file, error: null } } });
+          await sleep(400);
+          const done = await liveWin.webContents.executeJavaScript(`!!document.querySelector('.live-ended-saved')`);
+          (kine as any).live.set({ ended: { ...base, discarded: true } });
+          await sleep(400);
+          const discarded = await liveWin.webContents.executeJavaScript(`!!document.querySelector('.live-ended-discarded') && !document.querySelector('.live-ended-publish')`);
+          await shot(liveWin, 'settings-live-ended-discarded');
+          (kine as any).live.dismissEnded();
+          endedExtras =
+            buttons && preparing && done && discarded &&
+            recordingSaved.inClips === true && recordingSaved.exists === true && recordingSaved.noPart === true && recordingSaved.kind === 'recording' &&
+            recordingSaved.thumb === true && Number(recordingSaved.duration) >= 5 && recordingSaved.added === 1;
+          // Stažený záznam z knihovny pryč, ať neplete další kroky.
+          if (added) (kine as any).library.purge(added.id);
+        }
         result.live = {
-          opened, liveState, sideLive, clipDuringLive, titleKept, brbOn, brbOff, micMuted, stoppingUi, withCamera, endedCard, endedPublished, endedClosed,
+          opened, liveState, sideLive, clipDuringLive, titleKept, brbOn, brbOff, micMuted, stoppingUi, withCamera, endedCard, endedPublished, endedClosed, endedExtras, recordingSaved,
           frames: frames.length, brbFrames: brbFrames.length, camFrames: camFrames.length, cameraError: (kine as any).live.current().cameraError,
           after: (kine as any).live.current().state, info, listenerLog: listenerLog.slice(-300),
         };
         result.liveOk =
           opened && liveState === 'live' && !!sideLive && clipDuringLive && titleKept && brbOn && brbOff && micMuted && stoppingUi && (kine as any).live.current().state === 'idle' &&
-          endedCard && endedPublished && endedClosed &&
+          endedCard && endedPublished && endedClosed && endedExtras &&
           !!info && (info.durationSeconds ?? 0) >= 8 && (info.height ?? 0) > 0 && (info.height ?? 0) <= 720 && info.hasAudio &&
           brbFrames.length >= 2 && (!withCamera || camFrames.length >= 2);
         kine.settings.update({ liveCamera: false });

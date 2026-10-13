@@ -630,6 +630,18 @@ export type LiveEnded = {
   publishing: boolean;
   /** Zveřejnit se nepovedlo: HTTP stav (404 = záznam ještě není, 409 = vysílání ještě běží, 0 = síť) a text. */
   error: { status: number; message: string } | null;
+  /** Id záznamu u Cloudflare - zjistí se při prvním kroku (stáhnout / zahodit) a další míří na stejný. */
+  recordingUid?: string | null;
+  /**
+   * Stáhnout do PC: Kine nechá u Cloudflare vyrobit MP4 (preparing), appka ho
+   * stáhne (downloading) a přidá do knihovny jako nahrávku (done, file).
+   */
+  download?: { state: 'preparing' | 'downloading' | 'done' | 'error'; percent: number | null; file: string | null; error: string | null } | null;
+  /** Záznam zahozený - smazaný u Cloudflare, nikde se neuloží. */
+  discarded?: boolean;
+  discarding?: boolean;
+  /** Zahodit se nepovedlo - text od Kine (nebo že appka neví, který záznam to byl). */
+  discardError?: string | null;
 };
 
 /** Co se záznamem po skončení vysílání (nastavení na Kine, sdílené se studiem): null = nechat ve studiu. */

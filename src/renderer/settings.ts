@@ -1169,6 +1169,62 @@ function endedErrorText(e: { status: number; message: string }): string {
  * Karta skončeného vysílání: záznam (Cloudflare ho nahrálo samo) jedním
  * klikem jako video na Kine - nebo odkaz, když se zveřejnil sám.
  */
+/** Ptá se karta skončeného vysílání "opravdu zahodit?" (id karty). */
+let endedDiscardAsk: number | null = null;
+
+/**
+ * Stáhnout do PC / Zahodit: řádek pod zveřejněním. Stahování ukazuje, jak daleko
+ * je Cloudflare s MP4 a pak samotné stahování; hotový soubor jde ukázat.
+ */
+function liveEndedExtras(ended: LiveEnded): HTMLElement | null {
+  if (ended.discarded) return h('p', { class: 'ok live-ended-discarded', style: 'margin:0' }, icon('check', 14), ' ', t('liveEndedDiscarded'));
+  const d = ended.download ?? null;
+  const pct = (p: number | null) => (p === null ? '…' : `${Math.round(p)} %`);
+  if (d && d.state === 'done' && d.file) {
+    const file = d.file;
+    return h(
+      'div',
+      { class: 'stack', style: 'gap:6px' },
+      h('p', { class: 'ok live-ended-saved', style: 'margin:0' }, icon('check', 14), ' ', t('liveEndedSaved')),
+      h(
+        'div',
+        { class: 'row', style: 'gap:8px;flex-wrap:wrap' },
+        h('button', { class: 'small', onclick: () => void kine.revealFile(file) }, icon('folder', 14), t('liveEndedShowFile')),
+        h('button', { class: 'small quiet', onclick: () => { tab = 'clips'; render(); } }, icon('film', 14), t('liveEndedOpenLibrary'))
+      )
+    );
+  }
+  const busy = !!d && (d.state === 'preparing' || d.state === 'downloading');
+  const row = h(
+    'div',
+    { class: 'row live-ended-extras', style: 'gap:8px;align-items:center;flex-wrap:wrap' },
+    h('span', { class: 'hint' }, t('liveEndedOr')),
+    busy
+      ? h('span', { class: 'hint live-ended-progress' }, h('span', { class: 'spin' }), ' ', d!.state === 'preparing' ? t('liveEndedPreparing', { percent: pct(d!.percent) }) : t('liveEndedDownloading', { percent: pct(d!.percent) }))
+      : h('button', { class: 'small live-ended-download', disabled: !status.account || ended.publishing || ended.discarding, onclick: () => void kine.downloadLiveRecording() }, icon('download', 14), t('liveEndedDownload')),
+    ended.video
+      ? null
+      : endedDiscardAsk === ended.at
+        ? h(
+            'span',
+            { class: 'row', style: 'gap:6px;align-items:center;flex-wrap:wrap' },
+            h('span', { class: 'hint warn-text' }, t('liveEndedDiscardConfirm')),
+            h('button', { class: 'small danger live-ended-discard-yes', disabled: ended.discarding, onclick: () => { endedDiscardAsk = null; void kine.discardLiveRecording(); } }, ended.discarding ? h('span', { class: 'spin' }) : icon('trash', 14), t('liveEndedDiscard')),
+            h('button', { class: 'small quiet', onclick: () => { endedDiscardAsk = null; render(); } }, t('cancel'))
+          )
+        : h('button', { class: 'small quiet live-ended-discard', disabled: !status.account || busy || ended.publishing || ended.discarding, onclick: () => { endedDiscardAsk = ended.at; render(); } }, icon('trash', 14), t('liveEndedDiscard'))
+  );
+  return h(
+    'div',
+    { class: 'stack', style: 'gap:6px' },
+    row,
+    d && d.state === 'error' ? h('p', { class: 'hint warn-text', style: 'margin:0' }, t('liveEndedDownloadFailed', { message: d.error ?? '' })) : null,
+    ended.discardError
+      ? h('p', { class: 'hint warn-text live-ended-discard-error', style: 'margin:0' }, ended.discardError === 'unknown' ? t('liveEndedDiscardUnknown') : t('liveEndedDiscardFailed', { message: ended.discardError }))
+      : null
+  );
+}
+
 function liveEndedCard(ended: LiveEnded) {
   // Vysílání viděli všichni - záznam je proto předvyplněný jako veřejný (jako na Twitchi), jde to změnit.
   if (!endedForm || endedForm.at !== ended.at) endedForm = { at: ended.at, title: ended.title, visibility: 'public' };
@@ -1188,8 +1244,12 @@ function liveEndedCard(ended: LiveEnded) {
       head,
       h('p', { class: 'ok', style: 'margin:0' }, icon('check', 14), ' ', t(ended.video.auto ? 'liveEndedPublishedAuto' : 'liveEndedPublished')),
       ended.video.status === 'processing' ? h('p', { class: 'hint', style: 'margin:0' }, t('liveEndedProcessing')) : null,
-      h('div', { class: 'row' }, h('button', { class: 'small primary live-ended-open', onclick: () => void kine.openLiveRecording() }, icon('play', 14), t('liveEndedOpen')), studio)
+      h('div', { class: 'row' }, h('button', { class: 'small primary live-ended-open', onclick: () => void kine.openLiveRecording() }, icon('play', 14), t('liveEndedOpen')), studio),
+      liveEndedExtras(ended)
     );
+  }
+  if (ended.discarded) {
+    return h('div', { class: 'panel stack live-ended' }, head, liveEndedExtras(ended));
   }
   if (ended.autoPending) {
     return h('div', { class: 'panel stack live-ended' }, head, h('p', { class: 'hint', style: 'margin:0' }, h('span', { class: 'spin' }), t('liveEndedAutoPending')));
@@ -1241,6 +1301,7 @@ function liveEndedCard(ended: LiveEnded) {
     ),
     !status.account ? h('p', { class: 'hint warn-text', style: 'margin:0' }, t('liveEndedLoginNeeded')) : null,
     ended.error ? h('p', { class: 'hint warn-text live-ended-error', style: 'margin:0' }, endedErrorText(ended.error)) : null,
+    liveEndedExtras(ended),
     h('div', {}, studio)
   );
 }

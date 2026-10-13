@@ -724,3 +724,31 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   (vyndá a hned vrátí - hraje dál). Okno při tom z celé obrazovky nevyskočí.
   Dvojklik do videa a F fungují dál; skryté jsou stahování, rychlost, obraz
   v obraze a přenos do TV (jinak by v rohu byla nabídka ⋮ místo ikony).
+
+## Novinky 0.10.3
+
+- **Záznam vysílání jen na přání.** Karta skončeného vysílání (záložka
+  Živě) má vedle „Nahrát na Kine" i **Stáhnout do PC** a **Zahodit**.
+  Stáhnout: Kine nechá u Cloudflare vyrobit MP4 (`/api/live/recordings`,
+  `/api/live/recordings/download` - u dlouhého vysílání pár minut, karta ukazuje
+  procenta), appka ho stáhne do složky s klipy (napřed do `.part`, pak
+  přejmenuje) a přidá do knihovny jako nahrávku s náhledem - jde přehrát,
+  zkrátit i nahrát jako každý klip (`LiveController.downloadRecording`,
+  `saveStreamRecording` v `main.ts` - stahuje přes `pipeline`, takže plný
+  disk nebo zamčený soubor skončí chybou na kartě, ne zaseknutím; `.part`
+  se smaže). Zahodit: po potvrzení se záznam u Cloudflare hned smaže
+  (`/api/live/recordings/discard`) a nikde se neuloží. Karta míří vždy na
+  záznam PRÁVĚ skončeného vysílání - Kine pošle jeho id v odpovědi na
+  „skončil jsem" (`recordingUid`), ne „nejnovější" (mezitím mohlo začít
+  vysílání z OBS). Stáhnout / Zahodit mají vlastní adresy: starší web na ně
+  odpoví 404 a nic neudělá (na `/api/live/recordings` by záznam zveřejnil).
+  Když hráč neudělá nic, nezveřejněný záznam se nikde neukazuje a Cloudflare
+  ho po 30 dnech smaže sám (jako dřív).
+- **Vlastní doména s přesměrováním.** Když Kine hlásí novou adresu
+  (`/api/desktop/config`) a ta přesměruje (holá doména → www), appka
+  přejde rovnou tam, kde web opravdu odpovídá (`checkSiteMove` čte
+  konečnou adresu odpovědi) - jinak by okno Kine bralo každý odkaz jako
+  cizí web a API by chodilo přes přesměrování, které zahodí přihlášení.
+  Appka na www zůstane (zpátky na holou doménu nikdy) a appka na holé doméně
+  (přesměrovává) přejde na www. `playkine.com` a `www.playkine.com` jsou
+  pro okno Kine totéž (`isKineUrl`).

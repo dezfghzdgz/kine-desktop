@@ -47,14 +47,22 @@ export function announcedSite(current: string, served: SiteConfig | null | undef
   return to;
 }
 
-type FetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; json: () => Promise<unknown> }>;
+type FetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; url?: string; json: () => Promise<unknown> }>;
 
-async function readConfig(site: string, fetchImpl: FetchLike): Promise<SiteConfig | null> {
+/** Konfigurace webu a adresa, kde opravdu odpověděl (po přesměrování, třeba playkine.com -> www.playkine.com). */
+async function readConfig(site: string, fetchImpl: FetchLike): Promise<{ config: SiteConfig; servedFrom: string | null } | null> {
   try {
     const res = await fetchImpl(`${site}/api/desktop/config`, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) return null;
     const body = await res.json();
-    return body && typeof body === 'object' ? (body as SiteConfig) : null;
+    if (!body || typeof body !== 'object') return null;
+    let servedFrom: string | null = null;
+    try {
+      servedFrom = res.url ? normalizeSite(new URL(res.url).origin) : null;
+    } catch {
+      servedFrom = null;
+    }
+    return { config: body as SiteConfig, servedFrom };
   } catch {
     return null;
   }
@@ -63,16 +71,30 @@ async function readConfig(site: string, fetchImpl: FetchLike): Promise<SiteConfi
 /**
  * Zeptá se webu na hlavní adresu; vrátí novou adresu, na kterou má appka
  * přejít, nebo null. Nová adresa musí odpovědět stejnou databází a sama
- * sebe potvrdit (jinak by šlo appku poslat kamkoli).
+ * sebe potvrdit (jinak by šlo appku poslat kamkoli). Když nová adresa
+ * přesměruje (holá doména -> www), appka jde rovnou tam, kde web opravdu
+ * odpovídá - jinak by každý odkaz v okně Kine bral jako cizí web.
  */
 export async function checkSiteMove(current: string, fetchImpl: FetchLike = fetch as unknown as FetchLike): Promise<string | null> {
   const here = normalizeSite(current);
   if (!here) return null;
-  const served = await readConfig(here, fetchImpl);
+  const mine = await readConfig(here, fetchImpl);
+  const served = mine?.config ?? null;
+  if (!served || typeof served.supabaseUrl !== 'string' || !served.supabaseUrl) return null;
+  // Současná adresa sama přesměrovává (holá doména -> www): API by tam chodilo přes
+  // přesměrování a fetch by při něm zahodil přihlášení - rovnou tam, kde web odpovídá.
+  const hereFinal = mine?.servedFrom ?? null;
+  if (hereFinal && hereFinal !== here && hereFinal.startsWith('https://') && announcedSite(here, { siteUrl: hereFinal }) === hereFinal) return hereFinal;
   const target = announcedSite(here, served);
-  if (!target || typeof served?.supabaseUrl !== 'string' || !served.supabaseUrl) return null;
+  if (!target) return null;
   const there = await readConfig(target, fetchImpl);
-  if (!there || there.supabaseUrl !== served.supabaseUrl) return null;
-  if (normalizeSite(there.siteUrl) !== target) return null;
+  if (!there || there.config.supabaseUrl !== served.supabaseUrl) return null;
+  if (normalizeSite(there.config.siteUrl) !== target) return null;
+  const final = there.servedFrom;
+  if (final && final !== target) {
+    // Hlášená adresa přesměruje sem, kde appka už je (www) - nic neměnit.
+    if (final === here) return null;
+    if (final.startsWith('https://') && announcedSite(here, { siteUrl: final }) === final) return final;
+  }
   return target;
 }

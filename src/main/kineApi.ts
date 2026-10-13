@@ -90,7 +90,14 @@ export type KineApi = {
    * toho ukáže vysílání jako živé hned, ne až když ho najde u Cloudflare.
    * `confirmed`: Cloudflare proud opravdu přijímá.
    */
-  liveSignal(action: 'started' | 'ping' | 'stopped'): Promise<{ confirmed: boolean; viewers: number | null; recording: { videoId: string; status: 'ready' | 'processing' } | null }>;
+  liveSignal(action: 'started' | 'ping' | 'stopped'): Promise<{ confirmed: boolean; viewers: number | null; recording: { videoId: string; status: 'ready' | 'processing' } | null; recordingUid?: string | null }>;
+  /**
+   * Záznam vysílání ke stažení do PC: Kine ho nechá u Cloudflare vyrobit jako
+   * MP4 - "inprogress" = zeptat se znovu za chvíli. videoUid "latest" = poslední.
+   */
+  liveRecordingDownload(videoUid: string): Promise<{ uid: string; status: 'ready' | 'inprogress'; url: string | null; percent: number | null }>;
+  /** Zahodit záznam vysílání (smaže se u Cloudflare, nikde se neuloží) - vždy konkrétní id, ne "latest". */
+  liveRecordingDiscard(videoUid: string): Promise<{ uid: string }>;
   /** Vlastní náhled přenosu (JPEG 1280×720) -> Kine; vrací jeho adresu. */
   liveSetThumbnail(jpeg: Uint8Array): Promise<{ thumbnailUrl: string | null }>;
   /** Náhled přenosu zase jako snímek z vysílání. */
@@ -214,7 +221,9 @@ export function createKineApi(deps: {
       // Po "stopped": záznam, který Kine zveřejnila sama (nastavení "Po skončení vysílání").
       const r = data?.recording;
       const recording = r && typeof r.videoId === 'string' ? { videoId: r.videoId as string, status: r.status === 'ready' ? ('ready' as const) : ('processing' as const) } : null;
-      return { confirmed: data?.confirmed === true, viewers, recording };
+      // Po "stopped": id záznamu právě skončeného vysílání (novější Kine) - Stáhnout / Zahodit míří na něj.
+      const recordingUid = typeof data?.recordingUid === 'string' && /^[a-z0-9]{6,64}$/i.test(data.recordingUid) ? (data.recordingUid as string) : null;
+      return { confirmed: data?.confirmed === true, viewers, recording, recordingUid };
     },
     async liveDetails(details) {
       await post('/api/live/me', { action: 'details', title: details.title.slice(0, 100), description: details.description.slice(0, 2000), category: details.category });
@@ -244,6 +253,18 @@ export function createKineApi(deps: {
       const res = await fetchImpl(`${deps.siteUrl()}/api/live/thumbnail`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20000) });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new KineApiError(typeof data?.error === 'string' ? data.error : `Kine odpověděla ${res.status}.`, res.status);
+    },
+    async liveRecordingDownload(videoUid) {
+      // Vlastní cesta: starší Kine na ni odpoví 404 (na /api/live/recordings by záznam zveřejnila).
+      const data: any = await post('/api/live/recordings/download', { videoUid: videoUid || 'latest' }, 30000);
+      if (typeof data?.uid !== 'string') throw new KineApiError('Kine záznam nenašla.', 404);
+      const url = typeof data.url === 'string' && /^https:\/\//.test(data.url) ? data.url : null;
+      return { uid: data.uid, status: data.status === 'ready' && url ? 'ready' : 'inprogress', url, percent: typeof data.percent === 'number' ? data.percent : null };
+    },
+    async liveRecordingDiscard(videoUid) {
+      const data: any = await post('/api/live/recordings/discard', { videoUid }, 30000);
+      if (typeof data?.uid !== 'string') throw new KineApiError('Kine záznam nesmazala.', 500);
+      return { uid: data.uid };
     },
     async livePublishRecording(options) {
       const data: any = await post(

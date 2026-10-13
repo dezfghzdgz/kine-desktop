@@ -60,3 +60,43 @@ test('stěhování: nová adresa musí odpovědět stejnou databází a potvrdit
   const offline = fakeFetch({});
   assert.equal(await checkSiteMove(OLD, offline), null);
 });
+
+test('stěhování s přesměrováním: holá doména -> www = appka jde rovnou na www', async () => {
+  const APEX = 'https://playkine.com';
+  const WWW = 'https://www.playkine.com';
+  // Web hlásí holou doménu, ta přesměruje na www (fetch vrátí konečnou adresu v res.url).
+  const redirecting = async (url) => {
+    const site = url.replace(/\/api\/desktop\/config$/, '');
+    if (site === OLD) return { ok: true, url, json: async () => ({ supabaseUrl: SUPA, siteUrl: APEX }) };
+    if (site === APEX) return { ok: true, url: `${WWW}/api/desktop/config`, json: async () => ({ supabaseUrl: SUPA, siteUrl: APEX }) };
+    return { ok: false, json: async () => ({}) };
+  };
+  assert.equal(await checkSiteMove(OLD, redirecting), WWW);
+  // Hlášená adresa přesměruje zpátky tam, kde appka je (vercel.app): web tedy opravdu
+  // odpovídá tady - nic neměnit (jinak by appka chodila přes přesměrování bez přihlášení).
+  const back = async (url) => {
+    const site = url.replace(/\/api\/desktop\/config$/, '');
+    if (site === OLD) return { ok: true, url, json: async () => ({ supabaseUrl: SUPA, siteUrl: APEX }) };
+    return { ok: true, url: `${OLD}/api/desktop/config`, json: async () => ({ supabaseUrl: SUPA, siteUrl: APEX }) };
+  };
+  assert.equal(await checkSiteMove(OLD, back), null);
+  // Bez res.url (starší fetch) jako dřív.
+  const plain = fakeFetch({ [OLD]: { supabaseUrl: SUPA, siteUrl: APEX }, [APEX]: { supabaseUrl: SUPA, siteUrl: APEX } });
+  assert.equal(await checkSiteMove(OLD, plain), APEX);
+});
+
+test('stěhování s přesměrováním: appka na www zůstane na www; z holé domény jde na www', async () => {
+  const APEX = 'https://playkine.com';
+  const WWW = 'https://www.playkine.com';
+  // Web hlásí holou doménu (nejkratší), ta přesměruje na www.
+  const site = async (url) => {
+    const s = url.replace(/\/api\/desktop\/config$/, '');
+    if (s === APEX) return { ok: true, url: `${WWW}/api/desktop/config`, json: async () => ({ supabaseUrl: SUPA, siteUrl: APEX }) };
+    if (s === WWW) return { ok: true, url, json: async () => ({ supabaseUrl: SUPA, siteUrl: APEX }) };
+    if (s === OLD) return { ok: true, url, json: async () => ({ supabaseUrl: SUPA, siteUrl: APEX }) };
+    return { ok: false, json: async () => ({}) };
+  };
+  assert.equal(await checkSiteMove(OLD, site), WWW, 'z vercel.app rovnou na www');
+  assert.equal(await checkSiteMove(WWW, site), null, 'na www už je - zpátky na holou ne');
+  assert.equal(await checkSiteMove(APEX, site), WWW, 'z holé domény (přesměrovává) na www');
+});

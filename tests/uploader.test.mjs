@@ -397,3 +397,28 @@ test('náhled přenosu: JPEG jde na Kine jako tělo s přihlášením; nastaven�
   assert.equal(setup.stream.thumbnailUrl, null);
   server.close();
 });
+
+test('Zahodit záznam: podle id, nebo okno vysílání + hodiny appky (server si okno posune na svůj čas)', async () => {
+  const seen = [];
+  const server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+    seen.push({ path: req.url, body });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (body.videoUid) return res.end(JSON.stringify({ uid: body.videoUid, uids: [body.videoUid], discarded: true }));
+    res.end(JSON.stringify({ uid: 'a1', uids: ['a1', 'b2'], discarded: true }));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${server.address().port}`, getToken: async () => 'token-123' });
+  assert.deepEqual(await api.liveRecordingDiscard('rec123'), { uid: 'rec123', uids: ['rec123'] });
+  assert.deepEqual(seen[0], { path: '/api/live/recordings/discard', body: { videoUid: 'rec123' } });
+  const before = Date.now();
+  assert.deepEqual(await api.liveRecordingDiscard({ since: 1000.4, until: 5000.6 }), { uid: 'a1', uids: ['a1', 'b2'] });
+  const sent = seen[1].body;
+  assert.equal(sent.since, 1000);
+  assert.equal(sent.until, 5001);
+  assert.ok(typeof sent.clientNow === 'number' && sent.clientNow >= before && sent.clientNow <= Date.now(), JSON.stringify(sent));
+  assert.equal(sent.videoUid, undefined);
+  server.close();
+});

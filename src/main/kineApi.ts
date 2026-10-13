@@ -14,9 +14,12 @@ import type { Visibility } from '../shared/types';
  */
 
 export class KineApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  /** Kine říká "zkus to znovu za chvíli" (záznam vysílání ještě není / se uzavírá). */
+  readonly retry: boolean;
+  constructor(message: string, readonly status: number, retry = false) {
     super(message);
     this.name = 'KineApiError';
+    this.retry = retry;
   }
 }
 
@@ -55,6 +58,8 @@ export type LiveSetup = {
     category: string | null;
     /** Vlastní náhled přenosu (null = snímek z vysílání; undefined = starší Kine to neumí). */
     thumbnailUrl?: string | null;
+    /** HLS vysílání u Cloudflare - appka podle něj hlídá, že diváci obraz vidí (null = starší Kine / neznámý kód). */
+    hlsUrl?: string | null;
   } | null;
   /** Co se záznamem po skončení (null = nechat ve studiu). */
   recordingVisibility: Visibility | null;
@@ -97,7 +102,11 @@ export type KineApi = {
    */
   liveRecordingDownload(videoUid: string): Promise<{ uid: string; status: 'ready' | 'inprogress'; url: string | null; percent: number | null }>;
   /** Zahodit záznam vysílání (smaže se u Cloudflare, nikde se neuloží) - vždy konkrétní id, ne "latest". */
-  liveRecordingDiscard(videoUid: string): Promise<{ uid: string }>;
+  /**
+   * Zahodit záznam: podle id, nebo (appka id nezná) všechny záznamy z okna vysílání
+   * `since`-`until` (ms). Chyba se `retry` = záznam ještě není / vysílání se ještě uzavírá.
+   */
+  liveRecordingDiscard(target: string | { since: number; until: number }): Promise<{ uid: string; uids: string[] }>;
   /** Vlastní náhled přenosu (JPEG 1280×720) -> Kine; vrací jeho adresu. */
   liveSetThumbnail(jpeg: Uint8Array): Promise<{ thumbnailUrl: string | null }>;
   /** Náhled přenosu zase jako snímek z vysílání. */
@@ -125,6 +134,8 @@ function liveSetupFrom(data: any): LiveSetup {
             category: typeof s.category === 'string' ? s.category : null,
             // Starší Kine pole vůbec nepošle (undefined) - appka pak náhled nenabízí jako uložený.
             ...(s.thumbnailUrl === undefined ? {} : { thumbnailUrl: typeof s.thumbnailUrl === 'string' && /^https:\/\//.test(s.thumbnailUrl) ? s.thumbnailUrl : null }),
+            // Jen HLS od Cloudflare (appka ho čte jako divák - nic jiného tudy nepouští).
+            hlsUrl: typeof s.hlsUrl === 'string' && /^https:\/\/customer-[a-z0-9]+\.cloudflarestream\.com\//i.test(s.hlsUrl) ? s.hlsUrl : null,
           }
         : null,
     recordingVisibility: visibilityFrom(data?.recordingVisibility),
@@ -149,7 +160,7 @@ export function createKineApi(deps: {
       ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new KineApiError(typeof data?.error === 'string' ? data.error : `Kine odpověděla ${res.status}.`, res.status);
+    if (!res.ok) throw new KineApiError(typeof data?.error === 'string' ? data.error : `Kine odpověděla ${res.status}.`, res.status, data?.retry === true);
     return data;
   }
 
@@ -261,10 +272,13 @@ export function createKineApi(deps: {
       const url = typeof data.url === 'string' && /^https:\/\//.test(data.url) ? data.url : null;
       return { uid: data.uid, status: data.status === 'ready' && url ? 'ready' : 'inprogress', url, percent: typeof data.percent === 'number' ? data.percent : null };
     },
-    async liveRecordingDiscard(videoUid) {
-      const data: any = await post('/api/live/recordings/discard', { videoUid }, 30000);
+    async liveRecordingDiscard(target) {
+      // clientNow: hodiny počítače - server si podle nich okno posune na svůj čas (hodiny se můžou lišit).
+      const body = typeof target === 'string' ? { videoUid: target } : { since: Math.round(target.since), until: Math.round(target.until), clientNow: Date.now() };
+      const data: any = await post('/api/live/recordings/discard', body, 30000);
       if (typeof data?.uid !== 'string') throw new KineApiError('Kine záznam nesmazala.', 500);
-      return { uid: data.uid };
+      const uids = Array.isArray(data.uids) ? data.uids.filter((u: unknown): u is string => typeof u === 'string') : [data.uid];
+      return { uid: data.uid, uids };
     },
     async livePublishRecording(options) {
       const data: any = await post(

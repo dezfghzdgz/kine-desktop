@@ -150,6 +150,11 @@ export type Settings = {
   /** Na obrazovce "Hned jsem zpět" ztlumit mikrofon (diváci neslyší, co se děje u stolu). */
   liveBrbMuteMic: boolean;
   /**
+   * Kompatibilní režim vysílání: ffmpeg obraz kóduje znovu (víc práce pro procesor). Zapne se
+   * sám, když diváci viděli zamrzlý obraz a kompatibilní režim to spravil - pak platí napořád.
+   */
+  liveCompat: boolean;
+  /**
    * Po spuštění appky: 'auto' = nahrávat podle režimu (pořád / s hrou),
    * 'game' = i v režimu "pořád" počkat na první hru, 'paused' = nenahrávat,
    * dokud to hráč sám nezapne (tlačítkem, zkratkou, v liště).
@@ -609,6 +614,13 @@ export type LiveStatus = {
   cameraError: string | null;
   /** Poslední skončené vysílání (karta v záložce Živě: záznam na Kine); null = žádné / zavřené. */
   ended: LiveEnded | null;
+  /**
+   * Vidí diváci obraz? Appka čte HLS vysílání u Cloudflare jako divák (main/liveHealth.ts):
+   * checking = ještě se neví, ok = obraz běží, stalled = u diváků stojí, unknown / null = nejde ověřit.
+   */
+  health?: 'checking' | 'ok' | 'stalled' | 'unknown' | null;
+  /** Kompatibilní režim: ffmpeg obraz kóduje znovu (zapne se sám, když diváci viděli zamrzlý obraz). */
+  compat?: boolean;
 };
 
 /**
@@ -619,6 +631,8 @@ export type LiveStatus = {
 export type LiveEnded = {
   /** Kdy vysílání skončilo (ms od epochy) - zároveň id karty. */
   at: number;
+  /** Kdy začalo (ms od epochy) - Zahodit bez id záznamu hledá záznamy z tohohle okna. */
+  since?: number | null;
   /** Jak dlouho trvalo ("1:02:03"). */
   duration: string;
   title: string;

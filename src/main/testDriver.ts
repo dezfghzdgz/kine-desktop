@@ -1203,6 +1203,42 @@ export async function runTestDriver(kine: {
           !!info && (info.durationSeconds ?? 0) >= 8 && (info.height ?? 0) > 0 && (info.height ?? 0) <= 720 && info.hasAudio &&
           brbFrames.length >= 2 && (!withCamera || camFrames.length >= 2);
         kine.settings.update({ liveCamera: false });
+
+        // Kompatibilní režim (0.10.5): ffmpeg obraz zakóduje znovu (x264) - klíčový snímek přesně
+        // každé 2 s a pevných 30 snímků za sekundu, i když recorder dává snímky nepravidelně.
+        {
+          const compatOut = join(outDir, 'live-compat.flv');
+          rmSync(compatOut, { force: true });
+          const listener2 = spawnFfmpeg(['-loglevel', 'error', '-y', '-listen', '1', '-timeout', '60', '-i', liveUrl, '-c', 'copy', '-f', 'flv', compatOut]);
+          const closed2 = new Promise<void>((resolve) => listener2.on('close', () => resolve()));
+          await sleep(800);
+          const openPageBefore = kine.settings.get().liveOpenPage;
+          kine.settings.update({ liveCompat: true, liveOpenPage: false });
+          let compatState = '';
+          let compatOn = false;
+          try {
+            await (kine as any).startLive({ title: 'E2E compat', quality: '720p30' });
+            for (let i = 0; i < 60 && compatState !== 'live'; i++) {
+              await sleep(500);
+              compatState = (kine as any).live.current().state;
+            }
+            compatOn = (kine as any).live.current().compat === true;
+            await sleep(7000);
+          } catch (e) {
+            log(`e2e: kompatibilní režim: ${(e as Error).message}`);
+          }
+          await (kine as any).stopLive();
+          (kine as any).live.dismissEnded();
+          kine.settings.update({ liveCompat: false, liveOpenPage: openPageBefore });
+          await Promise.race([closed2, sleep(8000)]);
+          if (listener2.exitCode === null) listener2.kill();
+          const keyframes = existsSync(compatOut) ? await keyframeTimes(compatOut) : [];
+          const cinfo = existsSync(compatOut) ? await probe(compatOut).catch(() => null) : null;
+          const gaps = keyframes.slice(1).map((at, i) => at - keyframes[i]);
+          result.liveCompat = { state: compatState, compatOn, keyframes: keyframes.slice(0, 6), gaps: gaps.slice(0, 5), fps: cinfo?.fps ?? null, duration: cinfo?.durationSeconds ?? null, audio: cinfo?.hasAudio ?? null };
+          result.liveCompatOk =
+            compatState === 'live' && compatOn && keyframes.length >= 3 && gaps.every((g) => Math.abs(g - 2) < 0.15) && Math.abs((cinfo?.fps ?? 0) - 30) < 0.6 && cinfo?.hasAudio === true;
+        }
       }
     }
 
@@ -1673,7 +1709,7 @@ export async function runTestDriver(kine: {
       'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'clipToastInstant', 'recordingStopOnceOk', 'updateProgressOk', 'playerFullscreenOk', 'lookOk', 'lookSizesOk', 'lookFollowOk',
       'updateIssueOk', 'settingsSectionsOk', 'compressOk',
     ];
-    if (process.env.KINE_TEST_LIVE_URL) common.push('liveOk');
+    if (process.env.KINE_TEST_LIVE_URL) common.push('liveOk', 'liveCompatOk');
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];
     if (process.env.KINE_TEST_FAKE_AUDIO) checks.push('fakeAudioMeter', 'fakeAudioClip');
     if (process.env.KINE_TEST_FAKE_LOOPBACK) checks.push('nativeLoopbackMeter', 'nativeLoopbackClip');
@@ -1685,6 +1721,20 @@ export async function runTestDriver(kine: {
   }
   process.stdout.write(`KINE_TEST_RESULT ${JSON.stringify(result)}\n`);
   setTimeout(() => app.exit(result.ok ? 0 : 1), 500);
+}
+
+/** Časy klíčových snímků videa (s) - ffmpeg dekóduje jen klíčové snímky a showinfo vypíše jejich čas. */
+async function keyframeTimes(file: string): Promise<number[]> {
+  return new Promise((resolve) => {
+    const child = spawnFfmpeg(['-hide_banner', '-skip_frame', 'nokey', '-i', file, '-map', '0:v:0', '-vf', 'showinfo', '-f', 'null', '-']);
+    let stderr = '';
+    child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
+    child.on('close', () => {
+      const times = [...stderr.matchAll(/pts_time:\s*([0-9.]+)/g)].map((m) => Number(m[1])).filter((n) => Number.isFinite(n));
+      resolve(times);
+    });
+    child.on('error', () => resolve([]));
+  });
 }
 
 /** Snímky videa jako surové RGB (zmenšené), `fps` za sekundu - pro kontrolu obsahu vysílání v testu. */

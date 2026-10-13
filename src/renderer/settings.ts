@@ -684,6 +684,8 @@ function maxClip(): number {
 }
 
 function plusLink(label?: string) {
+  // Placení na Kine zatím neběží (nic se nedá koupit): "Připravujeme" místo odkazu.
+  if (status.account && !status.account.plusAvailable) return h('span', { class: 'plan-pill coming-soon-pill', title: t('comingSoonPlusHint') }, t('comingSoon'));
   return h('button', { class: 'small quiet plus-link', onclick: () => void kine.openKine('/plus') }, icon('sparkle', 14), label ?? t('plusLearnMore'));
 }
 
@@ -1204,7 +1206,9 @@ function liveEndedExtras(ended: LiveEnded): HTMLElement | null {
       : h('button', { class: 'small live-ended-download', disabled: !status.account || ended.publishing || ended.discarding, onclick: () => void kine.downloadLiveRecording() }, icon('download', 14), t('liveEndedDownload')),
     ended.video
       ? null
-      : endedDiscardAsk === ended.at
+      : ended.discarding
+        ? h('span', { class: 'hint live-ended-discarding' }, h('span', { class: 'spin' }), ' ', t('liveEndedDiscarding'))
+        : endedDiscardAsk === ended.at
         ? h(
             'span',
             { class: 'row', style: 'gap:6px;align-items:center;flex-wrap:wrap' },
@@ -1437,20 +1441,31 @@ function renderLive() {
       stats && onAir && statsText
         ? h('p', { class: `hint live-stats ${slow ? 'warn' : ''}`, style: 'margin:0' }, slow ? icon('warning', 14) : icon('gauge', 14), ' ', statsText)
         : null,
-      live.state === 'live' && live.confirmed !== null
+      // Vidí diváci obraz? Appka čte playlist vysílání u Cloudflare jako divák (main/liveHealth.ts).
+      live.state === 'live' && live.health && live.health !== 'unknown'
         ? h(
             'p',
-            { class: live.confirmed ? 'ok' : 'hint warn', style: 'margin:0' },
-            live.confirmed ? icon('check', 14) : icon('timer', 14),
+            { class: `live-health ${live.health === 'ok' ? 'ok' : live.health === 'stalled' ? 'hint warn' : 'hint'}`, style: 'margin:0' },
+            live.health === 'ok' ? icon('check', 14) : live.health === 'stalled' ? icon('warning', 14) : icon('timer', 14),
             ' ',
-            live.confirmed
-              ? t('liveConfirmedOk')
-              : // Kine nepotvrzený přenos po 3 minutách z "Živě" stáhne - po 90 s je čas to říct naplno.
-                live.since !== null && Date.now() - live.since > 90_000
-                ? t('liveConfirmedLong')
-                : t('liveConfirmedWait')
+            live.health === 'ok' ? t('liveHealthOk') : live.health === 'stalled' ? t('liveHealthStalled') : t('liveHealthChecking'),
+            live.compat ? h('span', { class: 'plan-pill live-compat-pill', title: t('liveCompatHint') }, t('liveCompatOn')) : null
           )
-        : null,
+        : live.state === 'live' && live.confirmed !== null
+          ? h(
+              'p',
+              { class: live.confirmed ? 'ok' : 'hint warn', style: 'margin:0' },
+              live.confirmed ? icon('check', 14) : icon('timer', 14),
+              ' ',
+              live.confirmed
+                ? t('liveConfirmedOk')
+                : // Kine nepotvrzený přenos po 3 minutách z "Živě" stáhne - po 90 s je čas to říct naplno.
+                  live.since !== null && Date.now() - live.since > 90_000
+                  ? t('liveConfirmedLong')
+                  : t('liveConfirmedWait'),
+              live.compat ? h('span', { class: 'plan-pill live-compat-pill', title: t('liveCompatHint') }, t('liveCompatOn')) : null
+            )
+          : null,
       live.cameraError ? h('p', { class: 'hint warn', style: 'margin:0' }, icon('camera', 14), ' ', cameraErrorMessage(live.cameraError)) : null
     );
   }
@@ -1647,7 +1662,8 @@ function renderLive() {
           )
         )
       ),
-      checkbox('liveOpenPage', t('liveOpenPage'), { icon: 'external' })
+      checkbox('liveOpenPage', t('liveOpenPage'), { icon: 'external' }),
+      checkbox('liveCompat', t('liveCompatSetting'), { icon: 'gauge', disabled: locked, help: t('liveCompatHint') })
     ),
 
     h('div', {}, h('button', { class: 'small quiet live-studio', onclick: () => void kine.openKine('/live') }, icon('external', 14), t('liveDialogStudio')))

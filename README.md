@@ -784,3 +784,34 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   skóre, režimy, spojování, zapnutí a vrácení konfigurace, kódování), e2e:
   falešný server Stats API (cizí gól nic, můj gól = jeden klip „Goal · 1:1")
   a falešná instalace z Epicu s konfigurací v UTF-16 (zapnutí a přesné vrácení).
+
+## Novinky 0.10.5
+
+- **Vidí diváci obraz?** (`liveHealth.ts`, `live.ts`): appka během vysílání čte
+  HLS playlist vysílání u Cloudflare (adresu `stream.hlsUrl` dá Kine v
+  `/api/live/me`) - jen playlist, žádné video, každých 5 s - a hlídá, že
+  přibývají nové kousky. V záložce Živě: „Diváci tě vidí" / „Ověřuji…" /
+  „Diváci vidí zamrzlý obraz". Playlist je, ale nepřibývá (minutu od startu,
+  nebo 25 s po posledním kousku) = zamrzlý obraz -> **kompatibilní režim**:
+  nové spojení (Cloudflare přenos minutu drží, diváci zůstávají), ve kterém
+  ffmpeg obraz zakóduje znovu (`livePlan.ts`: x264 veryfast/zerolatency,
+  `-r` pevné snímky, klíčový snímek přesně každé 2 s, CBR, bez B-snímků).
+  Když pomůže, zapamatuje se (`liveCompat` v nastavení; jde i ručně: Živě ->
+  Jak vysílat). Playlist nejde přečíst vůbec: s potvrzením od Kine „nejde
+  ověřit" (nic se nepřepíná), bez potvrzení po 90 s zamrzlý obraz.
+- **Zahodit záznam** vždycky smaže: id záznamu appka zná už z „pořád
+  vysílám" (Kine ho posílá s potvrzením od Cloudflare); bez id pošle okno
+  vysílání (`since`-`until` + `clientNow` = hodiny počítače, server si okno
+  posune na svůj čas) a Kine smaže záznamy z něj. Záznam, který
+  Cloudflare ještě zakládá / uzavírá (odpověď `retry`), zkouší znovu po 10 s
+  až 3 minuty („Mažu záznam…"); id, které u vstupu není, -> okno vysílání.
+- **„Skončil jsem"** se při chybě sítě pošle znovu (3 pokusy), ať Kine po
+  konci neukazuje vysílání jako živé.
+- **Placení na Kine zatím neběží**: místo odkazu na Kine Plus štítek
+  „Připravujeme" (`plusAvailable` od Kine je false).
+- Testy: `tests/live.test.mjs` (kompatibilní režim, playlisty HLS, verdikt
+  hlídání, přepnutí při zamrzlém obrazu a zapamatování, Zahodit podle okna
+  a opakování, id nesedí -> okno, zveřejněný záznam = chyba),
+  `tests/uploader.test.mjs` (co appka posílá při Zahodit), e2e: vysílání
+  v kompatibilním režimu na místní RTMP server (klíčové snímky přesně po 2 s,
+  30 snímků za sekundu, zvuk).

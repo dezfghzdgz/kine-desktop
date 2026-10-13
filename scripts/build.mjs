@@ -75,6 +75,7 @@ await build({
     upload: 'src/shared/upload.ts',
     live: 'src/shared/live.ts',
     livePlan: 'src/main/livePlan.ts',
+    liveHealth: 'src/main/liveHealth.ts',
     liveController: 'src/main/live.ts',
     liveLayout: 'src/shared/liveLayout.ts',
     storage: 'src/shared/storage.ts',

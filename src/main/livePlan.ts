@@ -23,8 +23,37 @@ export function maskLiveUrl(url: string): string {
   return `${url.slice(0, i + 1)}${key.slice(0, 4)}…`;
 }
 
-/** Argumenty ffmpeg: WebM z roury -> FLV na RTMP(S), obraz beze změny, zvuk AAC 160k. Průběh na stdout. */
-export function liveFfmpegArgs(url: string): string[] {
+/**
+ * Kompatibilní režim: obraz se v ffmpeg zakóduje znovu (x264), tak jak ho
+ * Cloudflare chce - pevný počet snímků za sekundu (chybějící se zopakují),
+ * klíčový snímek přesně každé 2 s, stálý datový tok, bez B-snímků. Stojí
+ * to procesor navíc, proto jen když diváci viděli zamrzlý obraz
+ * (liveHealth.ts) - třeba když grafika v recorderu klíčové snímky nedává.
+ */
+export type LiveCompat = { fps: number; kbps: number };
+
+/** Argumenty ffmpeg: WebM z roury -> FLV na RTMP(S), obraz beze změny (v kompatibilním režimu x264), zvuk AAC 160k. Průběh na stdout. */
+export function liveFfmpegArgs(url: string, compat: LiveCompat | null = null): string[] {
+  const fps = compat ? Math.max(1, Math.min(60, Math.round(compat.fps) || 30)) : 0;
+  const kbps = compat ? Math.max(500, Math.min(12000, Math.round(compat.kbps) || 3000)) : 0;
+  const video = compat
+    ? [
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-tune', 'zerolatency',
+        '-profile:v', 'main',
+        '-pix_fmt', 'yuv420p',
+        '-r', String(fps),
+        '-g', String(fps * 2),
+        '-keyint_min', String(fps * 2),
+        '-sc_threshold', '0',
+        '-bf', '0',
+        '-b:v', `${kbps}k`,
+        '-maxrate', `${kbps}k`,
+        '-bufsize', `${kbps * 2}k`,
+        '-x264-params', 'nal-hrd=cbr',
+      ]
+    : ['-c:v', 'copy'];
   return [
     '-loglevel', 'error',
     // Hlavička proudu je hned v prvním kousku - ffmpeg nemusí čekat 5 s na rozbor.
@@ -34,7 +63,7 @@ export function liveFfmpegArgs(url: string): string[] {
     '-i', 'pipe:0',
     '-map', '0:v:0',
     '-map', '0:a:0?',
-    '-c:v', 'copy',
+    ...video,
     '-c:a', 'aac',
     '-b:a', '160k',
     '-ar', '48000',

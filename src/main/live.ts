@@ -1,7 +1,8 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { CaptureCommand, CaptureEvent, CaptureState, LiveAudio, LiveEnded, LiveQuality, LiveScene, LiveStatus, Settings, Visibility } from '../shared/types';
 import { LIVE_PRESETS, liveElapsed, liveErrorKind, livePresetFor } from '../shared/live';
-import { LIVE_MAX_BACKLOG_BYTES, createProgressReader, liveFfmpegArgs, liveProgressSeconds, liveRetryDelay, maskLiveUrl, rtmpUrl } from './livePlan';
+import { LIVE_MAX_BACKLOG_BYTES, createProgressReader, liveFfmpegArgs, liveProgressSeconds, liveRetryDelay, maskLiveUrl, rtmpUrl, type LiveCompat } from './livePlan';
+import { HlsWatch, parsePlaylist, pickVariant, type MediaPlaylist } from './liveHealth';
 import type { KineApi } from './kineApi';
 
 /**
@@ -31,8 +32,17 @@ export type LiveDeps = {
   spawn: (args: string[]) => ChildProcessWithoutNullStreams;
   log: (message: string) => void;
   onChange: (status: LiveStatus) => void;
-  /** Hlášky hráči: jsi živě / výpadek / konec / spadlo / upload nestíhá / záznam je na Kine. */
-  notify: (kind: 'live' | 'reconnecting' | 'ended' | 'failed' | 'slow' | 'recording', info: { error?: string; duration?: string; url?: string }) => void;
+  /** Hlášky hráči: jsi živě / výpadek / konec / spadlo / upload nestíhá / záznam je na Kine / kompatibilní režim. */
+  notify: (kind: 'live' | 'reconnecting' | 'ended' | 'failed' | 'slow' | 'recording' | 'compat', info: { error?: string; duration?: string; url?: string }) => void;
+  /**
+   * Přečte text z adresy (HLS playlist vysílání u Cloudflare) - appka podle něj hlídá,
+   * že diváci obraz opravdu vidí (liveHealth.ts). Bez toho se nehlídá.
+   */
+  fetchText?: (url: string, timeoutMs: number) => Promise<{ status: number; text: string }>;
+  /** Kompatibilní režim spravil zamrzlý obraz - zapamatovat (nastavení liveCompat). */
+  rememberCompat?: () => void;
+  /** Jen pro test: kratší čekání (opakované Zahodit, hlídání obrazu). */
+  timing?: { discardRetryGapMs?: number; healthPollMs?: number; healthFirstMs?: number; healthStallMs?: number; healthNothingMs?: number };
   /** Vysílání skončilo (hráč ho ukončil, nebo se vzdalo) - hlavní proces srovná zásobník. */
   onEnded?: () => void;
   /** Jen pro test (KINE_TEST_LIVE_URL): místo Kine místní RTMP server. */
@@ -46,9 +56,14 @@ export type LiveDeps = {
 
 /** Jak dlouho čekat, než Cloudflare MP4 vyrobí (hodiny vysílání = minuty). */
 const DOWNLOAD_PREPARE_MS = 25 * 60 * 1000;
+/** Zahodit záznam, který Cloudflare ještě nemá / uzavírá: zkouší se tak dlouho, po tolika. */
+const DISCARD_RETRY_MS = 3 * 60 * 1000;
+const DISCARD_RETRY_GAP_MS = 10 * 1000;
+/** Jak často se čte playlist vysílání (hlídání, že diváci obraz vidí). */
+const HEALTH_POLL_MS = 5000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const IDLE: LiveStatus = { state: 'idle', since: null, title: '', watchUrl: null, error: null, confirmed: null, scene: null, stats: null, viewers: null, cameraError: null, ended: null };
+const IDLE: LiveStatus = { state: 'idle', since: null, title: '', watchUrl: null, error: null, confirmed: null, scene: null, stats: null, viewers: null, cameraError: null, ended: null, health: null, compat: false };
 
 export class LiveController {
   private status: LiveStatus = { ...IDLE };
@@ -81,8 +96,25 @@ export class LiveController {
   private slowWarned = false;
   /** Kine záznam po skončení zveřejní sama (nastavení "Po skončení vysílání" - zjistí se při startu). */
   private autoPublish = false;
+  /** Záznam běžícího vysílání u Cloudflare (Kine ho řekne v odpovědi na "pořád vysílám") - Zahodit míří na něj. */
+  private recordingUid: string | null = null;
+  /** HLS vysílání u Cloudflare (z Kine) - podle něj appka hlídá, že diváci obraz vidí. */
+  private hlsUrl: string | null = null;
+  /** Mediální playlist (varianta z hlavního) - čte se opakovaně. */
+  private hlsMediaUrl: string | null = null;
+  private health: HlsWatch;
+  private healthTimer: ReturnType<typeof setInterval> | null = null;
+  private healthBusy = false;
+  /** Kompatibilní režim (ffmpeg kóduje obraz znovu - livePlan.ts). */
+  private compat = false;
+  /** Kompatibilní režim zapnutý kvůli zamrzlému obrazu v tomhle vysílání - když pomůže, zapamatuje se. */
+  private compatAuto = false;
+  /** Jen pro test: HLS místo toho od Kine (místní server). */
+  testHlsUrl: string | null = null;
 
-  constructor(private deps: LiveDeps) {}
+  constructor(private deps: LiveDeps) {
+    this.health = new HlsWatch({ firstMs: deps.timing?.healthFirstMs, stallMs: deps.timing?.healthStallMs, nothingMs: deps.timing?.healthNothingMs });
+  }
 
   current(): LiveStatus {
     const ended = this.status.ended;
@@ -125,11 +157,19 @@ export class LiveController {
     this.scene = opts.scene ?? null;
     const title = opts.title.trim().slice(0, 100);
     this.autoPublish = false;
+    this.recordingUid = null;
+    this.hlsUrl = null;
+    this.hlsMediaUrl = null;
+    this.health.reset();
+    // Kompatibilní režim, když ho appka už jednou potřebovala (zamrzlý obraz) - nastavení liveCompat.
+    this.compat = this.deps.settings().liveCompat === true;
+    this.compatAuto = false;
     // Nové vysílání: karta minulého záznamu zmizí (nezveřejněný záznam zůstává 30 dní ve studiu na Kine).
-    this.set({ ...IDLE, state: 'starting', title, scene: this.scene });
+    this.set({ ...IDLE, state: 'starting', title, scene: this.scene, compat: this.compat });
     try {
       if (this.deps.testUrl) {
         this.url = this.deps.testUrl;
+        this.hlsUrl = this.testHlsUrl;
       } else {
         const api = this.deps.api();
         let setup = await api.liveSetup();
@@ -138,6 +178,7 @@ export class LiveController {
         if (!setup.input) setup = await api.liveCreate();
         if (!setup.input) throw new Error('live-not-configured');
         this.url = rtmpUrl(setup.input.rtmpsUrl, setup.input.streamKey);
+        this.hlsUrl = setup.stream?.hlsUrl ?? null;
         this.autoPublish = setup.recordingAutoSupported && setup.recordingVisibility !== null;
         if (setup.stream?.ownerId) this.set({ watchUrl: `${this.deps.siteUrl()}/live/${setup.stream.ownerId}` });
         // Název, popis a kategorii vidí diváci. Co hráč nevyplnil v appce (popis), zůstává ze studia na Kine.
@@ -182,11 +223,13 @@ export class LiveController {
     const wasLive = this.status.since !== null;
     const duration = liveElapsed(this.status.since);
     const title = this.status.title;
+    const since = this.status.since;
     this.wanted = false;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
     this.stopWatchdog();
     this.stopPing();
+    this.stopHealth();
     this.set({ state: 'stopping' });
     this.deps.capture.sendLive({ type: 'live-stop' });
     const child = this.ffmpeg;
@@ -207,12 +250,12 @@ export class LiveController {
     this.scene = null;
     this.stopPing(); // pro jistotu - kdyby ho mezitím něco znovu pustilo
     this.deps.log(`vysílání ukončeno${wasLive ? ` (${duration})` : ''}`);
-    const ended = wasLive ? this.endedCard(title, duration) : null;
+    const ended = wasLive ? this.endedCard(title, duration, since) : null;
     this.set({ ...IDLE, ended });
     // Kine ať přestane ukazovat "živě" hned (při ukončení appky nejvýš 1,5 s čekání). Odpověď
     // (záznam zveřejněný automaticky) se do karty dopíše, i když přijde až po čekání.
     if (wasLive) {
-      const stopped = this.signal('stopped');
+      const stopped = this.signalStopped(reason === 'quit' ? 1 : 3);
       void stopped.then((result) => this.onStoppedSignal(ended, result));
       await Promise.race([stopped, new Promise((r) => setTimeout(r, reason === 'quit' ? 1500 : 4000))]);
     }
@@ -220,9 +263,39 @@ export class LiveController {
     this.deps.onEnded?.();
   }
 
-  /** Karta skončeného vysílání (záložka Živě). */
-  private endedCard(title: string, duration: string): LiveEnded {
-    return { at: Date.now(), duration, title, autoPending: this.autoPublish && !this.deps.testUrl, video: null, publishing: false, error: null, recordingUid: null, download: null, discarded: false, discarding: false, discardError: null };
+  /** Karta skončeného vysílání (záložka Živě). Id záznamu, když ho Kine během vysílání řekla. */
+  private endedCard(title: string, duration: string, since: number | null): LiveEnded {
+    return {
+      at: Date.now(),
+      since,
+      duration,
+      title,
+      autoPending: this.autoPublish && !this.deps.testUrl,
+      video: null,
+      publishing: false,
+      error: null,
+      recordingUid: this.recordingUid,
+      download: null,
+      discarded: false,
+      discarding: false,
+      discardError: null,
+    };
+  }
+
+  /**
+   * "Skončil jsem" musí na Kine dojít - jinak tam vysílání visí jako živé. Při
+   * chybě sítě se zkusí znovu (nejvýš `attempts`krát), ne když mezitím začalo nové vysílání.
+   */
+  private async signalStopped(attempts: number): Promise<Awaited<ReturnType<KineApi['liveSignal']>> | null> {
+    if (this.deps.testUrl) return null;
+    const waits = [0, 3000, 8000].slice(0, Math.max(1, attempts));
+    for (const wait of waits) {
+      if (wait) await sleep(wait);
+      if (this.wanted) return null;
+      const result = await this.signal('stopped');
+      if (result) return result;
+    }
+    return null;
   }
 
   /** Kine odpověděla na "skončil jsem": záznam zveřejněný automaticky -> do karty a okénko s odkazem. */
@@ -342,29 +415,54 @@ export class LiveController {
     }
   }
 
-  /** Zahodit záznam: smaže se u Cloudflare, nikde se neuloží (jinak by se smazal sám po 30 dnech). */
+  /**
+   * Zahodit záznam: smaže se u Cloudflare, nikde se neuloží (jinak by se smazal sám po 30 dnech).
+   * Konkrétní záznam tohohle vysílání; když jeho id appka nezná (Cloudflare přenos za vysílání
+   * nepotvrdil), záznamy z okna tohohle vysílání - "nejnovější" ne, mezitím mohlo začít jiné
+   * vysílání třeba z OBS. Záznam, který Cloudflare po konci ještě zakládá nebo uzavírá, se
+   * zkouší smazat znovu (DISCARD_RETRY_MS) - dřív stačilo "nevím, který záznam" a nesmazalo se nic.
+   */
   async discardRecording(): Promise<void> {
     const card = this.status.ended;
     if (!card || card.video || card.discarded || card.discarding || card.publishing) return;
     if (card.download && (card.download.state === 'preparing' || card.download.state === 'downloading')) return;
-    // Jen konkrétní záznam tohohle vysílání - "nejnovější" by mohl být jiný (mezitím vysílání z OBS).
-    if (!card.recordingUid) {
+    const window = card.since ? { since: card.since, until: card.at } : null;
+    if (!card.recordingUid && !window) {
       this.set({ ended: { ...card, discardError: 'unknown' } });
       return;
     }
     this.set({ ended: { ...card, discarding: true, discardError: null } });
-    try {
-      const result = await this.deps.api().liveRecordingDiscard(card.recordingUid);
-      const now = this.sameCard(card.at);
-      if (!now) return;
-      this.deps.log(`vysílání: záznam zahozený (${result.uid})`);
-      this.set({ ended: { ...now, recordingUid: result.uid, discarding: false, discarded: true } });
-    } catch (e) {
-      const now = this.sameCard(card.at);
-      if (!now) return;
-      const status = typeof (e as { status?: unknown }).status === 'number' ? (e as { status: number }).status : 0;
-      this.deps.log(`vysílání: záznam se nepovedlo zahodit (${status}): ${(e as Error).message}`);
-      this.set({ ended: { ...now, discarding: false, discardError: ((e as Error).message ?? '').slice(0, 200) || String(status) } });
+    const deadline = Date.now() + DISCARD_RETRY_MS;
+    let target: string | { since: number; until: number } = card.recordingUid || window!;
+    for (;;) {
+      try {
+        const result = await this.deps.api().liveRecordingDiscard(target);
+        const now = this.sameCard(card.at);
+        if (!now) return;
+        this.deps.log(`vysílání: záznam zahozený (${result.uids.join(', ') || result.uid})`);
+        this.set({ ended: { ...now, recordingUid: result.uid, discarding: false, discarded: true, discardError: null } });
+        return;
+      } catch (e) {
+        const now = this.sameCard(card.at);
+        if (!now) return;
+        const status = typeof (e as { status?: unknown }).status === 'number' ? (e as { status: number }).status : 0;
+        const retry = (e as { retry?: unknown }).retry === true || status === 0;
+        // Id nesedí (záznam u vstupu není): okno vysílání.
+        if (status === 404 && !retry && typeof target === 'string' && window) {
+          target = window;
+          continue;
+        }
+        if (retry && Date.now() < deadline) {
+          const gap = this.deps.timing?.discardRetryGapMs ?? DISCARD_RETRY_GAP_MS;
+          this.deps.log(`vysílání: záznam zatím nejde zahodit (${status}: ${(e as Error).message}) - znovu za ${gap / 1000} s`);
+          await sleep(gap);
+          if (!this.sameCard(card.at)) return;
+          continue;
+        }
+        this.deps.log(`vysílání: záznam se nepovedlo zahodit (${status}): ${(e as Error).message}`);
+        this.set({ ended: { ...now, discarding: false, discardError: ((e as Error).message ?? '').slice(0, 200) || String(status) } });
+        return;
+      }
     }
   }
 
@@ -436,8 +534,11 @@ export class LiveController {
     this.lastProgressAt = 0;
     this.lastChunkAt = Date.now();
     this.connectedAt = null;
-    this.deps.log(`vysílání: připojuji ${maskLiveUrl(this.url)} (pokus ${this.attempts + 1}, gen ${gen})`);
-    const child = this.deps.spawn(liveFfmpegArgs(this.url));
+    this.health.reset();
+    const preset = livePresetFor(this.quality, this.bitrateKbps);
+    const compat: LiveCompat | null = this.compat ? { fps: preset.fps, kbps: preset.videoKbps } : null;
+    this.deps.log(`vysílání: připojuji ${maskLiveUrl(this.url)} (pokus ${this.attempts + 1}, gen ${gen}${compat ? ', kompatibilní režim' : ''})`);
+    const child = this.deps.spawn(liveFfmpegArgs(this.url, compat));
     this.ffmpeg = child;
     let out = '';
     const readStats = createProgressReader();
@@ -474,7 +575,7 @@ export class LiveController {
       this.stderr += `\n${e.message}`;
       exit(-1);
     });
-    const command = { type: 'live-start' as const, generation: gen, preset: livePresetFor(this.quality, this.bitrateKbps), audio: { ...this.audio }, ...(this.scene ? { scene: this.scene } : {}) };
+    const command = { type: 'live-start' as const, generation: gen, preset, audio: { ...this.audio }, ...(this.scene ? { scene: this.scene } : {}) };
     if (!this.deps.capture.sendLive(command)) {
       this.onFailure(gen, 'capture-off');
     }
@@ -508,6 +609,7 @@ export class LiveController {
       }
       this.startPing();
     }
+    this.startHealth();
     // Minuta bez výpadku = další výpadek začíná počítat pokusy od nuly.
     if (this.connectedAt && Date.now() - this.connectedAt > 60_000) this.attempts = 0;
   }
@@ -526,14 +628,15 @@ export class LiveController {
       this.deps.log(`vysílání se vzdává (${this.attempts} pokusů): ${reason}`);
       const duration = liveElapsed(this.status.since);
       const wasLive = this.status.since !== null;
-      const ended = wasLive ? this.endedCard(this.status.title, duration) : null;
+      const ended = wasLive ? this.endedCard(this.status.title, duration, this.status.since) : null;
       this.wanted = false;
       this.stopWatchdog();
       this.stopPing();
+      this.stopHealth();
       this.scene = null;
       this.set({ ...IDLE, error: reason, ended });
       // I spadlé vysílání má záznam (do pádu) - karta ho nabídne.
-      if (wasLive) void this.signal('stopped').then((result) => this.onStoppedSignal(ended, result));
+      if (wasLive) void this.signalStopped(3).then((result) => this.onStoppedSignal(ended, result));
       this.deps.notify('failed', { error: reason, duration });
       this.deps.onEnded?.();
       return;
@@ -590,6 +693,8 @@ export class LiveController {
     if (this.deps.testUrl) return null;
     try {
       const result = await this.deps.api().liveSignal(action);
+      // Záznam tohohle vysílání (Kine ho zná, jakmile přenos potvrdí Cloudflare).
+      if (action !== 'stopped' && this.wanted && result.recordingUid) this.recordingUid = result.recordingUid;
       if (action !== 'stopped' && this.wanted && this.status.state === 'live') {
         const viewers = typeof result.viewers === 'number' ? result.viewers : null;
         if (this.status.confirmed !== result.confirmed || this.status.viewers !== viewers) this.set({ confirmed: result.confirmed, viewers });
@@ -612,6 +717,113 @@ export class LiveController {
   private stopPing(): void {
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = null;
+  }
+
+  // ---- vidí diváci obraz? ---------------------------------------------------------------
+
+  private startHealth(): void {
+    if (this.healthTimer) return;
+    if (!this.hlsUrl || !this.deps.fetchText) {
+      if (this.status.health !== 'unknown' && this.status.state === 'live') this.set({ health: 'unknown' });
+      return;
+    }
+    if (!this.status.health) this.set({ health: 'checking' });
+    this.healthTimer = setInterval(() => void this.checkHealth(), this.deps.timing?.healthPollMs ?? HEALTH_POLL_MS);
+    this.healthTimer.unref?.();
+    void this.checkHealth();
+  }
+
+  private stopHealth(): void {
+    if (this.healthTimer) clearInterval(this.healthTimer);
+    this.healthTimer = null;
+    this.health.reset();
+    this.hlsMediaUrl = null;
+  }
+
+  /** Mediální playlist vysílání u Cloudflare (null = ještě není / nejde přečíst). */
+  private async readMediaPlaylist(): Promise<MediaPlaylist | null> {
+    const fetchText = this.deps.fetchText;
+    const hls = this.hlsUrl;
+    if (!fetchText || !hls) return null;
+    try {
+      if (!this.hlsMediaUrl) {
+        const res = await fetchText(hls, 4000);
+        if (res.status !== 200) return null;
+        const parsed = parsePlaylist(res.text, hls);
+        if (!parsed) return null;
+        if (parsed.kind === 'media') {
+          this.hlsMediaUrl = hls;
+          return parsed;
+        }
+        this.hlsMediaUrl = pickVariant(parsed);
+        if (!this.hlsMediaUrl) return null;
+      }
+      const res = await fetchText(this.hlsMediaUrl, 4000);
+      if (res.status !== 200) {
+        // Varianta zmizela (nové spojení u Cloudflare) - příště znovu z hlavního playlistu.
+        this.hlsMediaUrl = null;
+        return null;
+      }
+      const parsed = parsePlaylist(res.text, this.hlsMediaUrl);
+      return parsed && parsed.kind === 'media' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Jedna kontrola: přibývají u Cloudflare nové kousky? Když ne, kompatibilní režim. */
+  private async checkHealth(): Promise<void> {
+    if (this.healthBusy || !this.wanted || this.status.state !== 'live') return;
+    const gen = this.gen;
+    const since = this.connectedAt;
+    if (!gen || !since) return;
+    this.healthBusy = true;
+    let media: MediaPlaylist | null = null;
+    try {
+      media = await this.readMediaPlaylist();
+    } finally {
+      this.healthBusy = false;
+    }
+    if (gen !== this.gen || !this.wanted || this.status.state !== 'live') return;
+    const now = Date.now();
+    this.health.observe(media, now);
+    const verdict = this.health.verdict(since, now, this.status.confirmed);
+    if (verdict !== this.status.health) {
+      this.deps.log(`vysílání: diváci ${verdict === 'ok' ? 'obraz vidí' : verdict === 'stalled' ? 'vidí zamrzlý obraz' : verdict === 'unknown' ? '- nejde ověřit (playlist u Cloudflare nejde přečíst)' : '- čeká se na první kousky u Cloudflare'}`);
+      this.set({ health: verdict });
+    }
+    if (verdict === 'ok' && this.compatAuto) {
+      // Kompatibilní režim zamrzlý obraz spravil - příští vysílání rovnou v něm.
+      this.compatAuto = false;
+      this.deps.log('vysílání: kompatibilní režim pomohl - zapamatováno pro další vysílání');
+      this.deps.rememberCompat?.();
+    }
+    if (verdict === 'stalled') this.onStalled();
+  }
+
+  /**
+   * Obraz u diváků stojí: nové spojení v kompatibilním režimu (Cloudflare přenos
+   * minutu drží, diváci zůstávají). Když stojí i v něm, víc appka sama neudělá -
+   * hráč to vidí v záložce Živě (síť / kvalita).
+   */
+  private onStalled(): void {
+    if (this.compat || !this.wanted) return;
+    this.deps.log('vysílání: u Cloudflare nepřibývají nové kousky (diváci vidí zamrzlý obraz) - přepínám na kompatibilní režim');
+    this.compat = true;
+    this.compatAuto = true;
+    this.deps.notify('compat', {});
+    this.set({ compat: true, health: 'checking' });
+    this.gen = 0;
+    this.killProcess();
+    this.deps.capture.sendLive({ type: 'live-stop' });
+    this.health.reset();
+    this.hlsMediaUrl = null;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      if (this.wanted) this.launch();
+    }, 1000);
+    this.retryTimer.unref?.();
   }
 
   private killProcess(): void {

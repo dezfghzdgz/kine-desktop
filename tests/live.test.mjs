@@ -5,6 +5,7 @@ import { PassThrough } from 'node:stream';
 import { LIVE_PRESETS, LIVE_QUALITIES, LIVE_THUMBNAIL_MAX_BYTES, cleanLiveError, coverRect, liveBitrate, liveElapsed, liveErrorKind, liveErrorTextKey, livePresetFor, livePresetLabel, liveUploadMbps, looksLikeLiveThumbnail } from '../dist/esm/live.js';
 import { LIVE_MAX_ATTEMPTS, liveFfmpegArgs, liveProgressSeconds, liveRetryDelay, maskLiveUrl, rtmpUrl } from '../dist/esm/livePlan.js';
 import { LiveController } from '../dist/esm/liveController.js';
+import { HEALTH_FIRST_MS, HEALTH_STALL_MS, HlsWatch, parsePlaylist, pickVariant } from '../dist/esm/liveHealth.js';
 import { sanitizeSettings, DEFAULT_SETTINGS } from '../dist/esm/settingsSchema.js';
 
 test('vysílání: adresa RTMPS z Cloudflare + klíč, klíč se do protokolu nepíše celý', () => {
@@ -78,7 +79,7 @@ function fakeChild() {
   return child;
 }
 
-function makeController(apiImpl = null) {
+function makeController(apiImpl = null, extra = {}) {
   const commands = [];
   const children = [];
   const notices = [];
@@ -111,6 +112,7 @@ function makeController(apiImpl = null) {
     notify: (kind) => notices.push(kind),
     onEnded: () => (ended += 1),
     testUrl: 'rtmp://127.0.0.1:1935/live/test',
+    ...extra,
   });
   return { live, capture, commands, children, notices, statuses, ended: () => ended };
 }
@@ -373,6 +375,160 @@ test('vysílání: záznam ještě není (404) -> chyba v kartě a jde to zkusit
   assert.equal(ended.video.status, 'ready');
   ctx.live.dismissEnded();
   assert.equal(ctx.live.current().ended, null);
+});
+
+const waitFor = async (cond, ms = 3000) => {
+  const until = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > until) throw new Error('nedočkal se');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+};
+
+test('vysílání: kompatibilní režim - x264, pevné snímky, klíčový snímek každé 2 s, stálý tok', () => {
+  const s = liveFfmpegArgs('rtmp://x/live/k', { fps: 30, kbps: 3000 }).join(' ');
+  assert.ok(s.includes('-c:v libx264'));
+  assert.ok(!s.includes('-c:v copy'));
+  assert.ok(s.includes('-r 30 -g 60 -keyint_min 60 -sc_threshold 0 -bf 0'), s);
+  assert.ok(s.includes('-b:v 3000k -maxrate 3000k -bufsize 6000k'), s);
+  assert.ok(s.includes('-c:a aac -b:a 160k'));
+  assert.ok(liveFfmpegArgs('rtmp://x/live/k', { fps: 60, kbps: 6000 }).join(' ').includes('-g 120'));
+  // běžný režim beze změny (jen přebalení)
+  assert.ok(liveFfmpegArgs('rtmp://x/live/k').join(' ').includes('-c:v copy'));
+});
+
+test('hlídání obrazu: playlisty HLS (hlavní -> varianta, mediální kousky)', () => {
+  const master = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720\nhi/video.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nlo/video.m3u8?x=1\n';
+  const m = parsePlaylist(master, 'https://customer-abc.cloudflarestream.com/in1/manifest/video.m3u8');
+  assert.equal(m.kind, 'master');
+  assert.equal(pickVariant(m), 'https://customer-abc.cloudflarestream.com/in1/manifest/lo/video.m3u8?x=1');
+  const media = parsePlaylist('#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:41\n#EXTINF:2.0,\nseg41.ts\n#EXTINF:2.0,\nseg42.ts\n', 'https://x.test/a/b.m3u8');
+  assert.deepEqual(media, { kind: 'media', sequence: 41, segments: ['seg41.ts', 'seg42.ts'], ended: false });
+  assert.equal(parsePlaylist('<html>404</html>', 'https://x.test/'), null);
+  assert.equal(parsePlaylist('', 'https://x.test/'), null);
+});
+
+test('hlídání obrazu: přibývají kousky = ok, stojí = zamrzlý obraz, nejde přečíst = neví se', () => {
+  const T = 1_000_000;
+  const pl = (seq, n) => ({ sequence: seq, segments: Array.from({ length: n }, (_, i) => `s${seq + i}.ts`) });
+  const w = new HlsWatch();
+  assert.equal(w.verdict(T, T + 5000, null), 'checking');
+  w.observe(pl(1, 3), T + 10000);
+  assert.equal(w.verdict(T, T + 10000, null), 'checking', 'první playlist ještě nic nedokazuje');
+  w.observe(pl(2, 3), T + 15000);
+  assert.equal(w.verdict(T, T + 15000, null), 'ok');
+  w.observe(pl(2, 3), T + 20000);
+  assert.equal(w.verdict(T, T + 15000 + HEALTH_STALL_MS - 1, null), 'ok');
+  assert.equal(w.verdict(T, T + 15000 + HEALTH_STALL_MS, null), 'stalled');
+  // playlist je, ale od začátku nepřibývá: po minutě zamrzlý obraz
+  const frozen = new HlsWatch();
+  frozen.observe(pl(5, 2), T + 5000);
+  frozen.observe(pl(5, 2), T + 10000);
+  assert.equal(frozen.verdict(T, T + HEALTH_FIRST_MS - 1, null), 'checking');
+  assert.equal(frozen.verdict(T, T + HEALTH_FIRST_MS, null), 'stalled');
+  // playlist nejde přečíst nikdy: Kine potvrzuje -> nejde ověřit (nic se nepřepíná); nepotvrzuje -> po 90 s zamrzlý
+  const none = new HlsWatch();
+  none.observe(null, T + 5000);
+  assert.equal(none.verdict(T, T + HEALTH_FIRST_MS + 1000, true), 'unknown');
+  assert.equal(none.verdict(T, T + HEALTH_FIRST_MS + 1000, false), 'checking');
+  assert.equal(none.verdict(T, T + 90000, false), 'stalled');
+  w.reset();
+  assert.equal(w.verdict(T + 100000, T + 100000, null), 'checking');
+});
+
+test('vysílání: diváci vidí zamrzlý obraz -> kompatibilní režim (nové spojení s x264); když pomůže, zapamatuje se', async () => {
+  let advancing = false;
+  let seq = 1;
+  let remembered = 0;
+  const fetchText = async (url) => {
+    if (url.endsWith('master.m3u8')) return { status: 200, text: '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nmedia.m3u8\n' };
+    if (advancing) seq += 1;
+    return { status: 200, text: `#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:${seq}\n#EXTINF:2,\na${seq}.ts\n` };
+  };
+  const ctx = makeController(null, { fetchText, rememberCompat: () => (remembered += 1), timing: { healthPollMs: 20, healthFirstMs: 150, healthStallMs: 100, healthNothingMs: 200 } });
+  ctx.live.testHlsUrl = 'https://customer-abc.cloudflarestream.com/in/master.m3u8';
+  await ctx.live.start({ title: 'x', quality: '720p30' });
+  assert.ok(ctx.children[0].args.includes('copy'), 'začíná se bez překódování');
+  ctx.children[0].stdout.write('out_time_us=1500000\n');
+  await waitFor(() => ctx.children.length === 2, 4000);
+  assert.ok(ctx.children[1].args.join(' ').includes('-c:v libx264'), 'nové spojení v kompatibilním režimu');
+  assert.notEqual(ctx.children[0].exitCode, null, 'staré spojení ukončené');
+  assert.ok(ctx.notices.includes('compat'));
+  assert.equal(ctx.live.current().compat, true);
+  assert.equal(ctx.live.current().state, 'live', 'diváci zůstávají - žádné "znovu se připojuji"');
+  advancing = true;
+  ctx.children[1].stdout.write('out_time_us=1500000\n');
+  await waitFor(() => ctx.live.current().health === 'ok', 4000);
+  assert.equal(remembered, 1);
+  await ctx.live.stop('quit');
+  assert.equal(ctx.live.current().health, null);
+});
+
+test('vysílání: kompatibilní režim z nastavení hned od startu; bez HLS se nic nehlídá', async () => {
+  const ctx = makeController(null, { settings: () => ({ ...DEFAULT_SETTINGS, liveCompat: true }) });
+  await ctx.live.start({ title: 'x', quality: '1080p60' });
+  assert.ok(ctx.children[0].args.join(' ').includes('-c:v libx264 '));
+  assert.ok(ctx.children[0].args.join(' ').includes('-r 60 -g 120'));
+  ctx.children[0].stdout.write('out_time_us=1500000\n');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(ctx.live.current().health, 'unknown');
+  assert.equal(ctx.live.current().compat, true);
+  await ctx.live.stop('quit');
+});
+
+test('vysílání: Zahodit bez id záznamu -> okno vysílání; záznam ještě není -> zkouší znovu, pak smazáno', async () => {
+  const calls = [];
+  const api = {
+    liveRecordingDiscard: async (target) => {
+      calls.push(target);
+      if (calls.length === 1) {
+        const e = new Error('Záznam vysílání zatím není');
+        e.status = 404;
+        e.retry = true;
+        throw e;
+      }
+      return { uid: 'rec1', uids: ['rec1'] };
+    },
+  };
+  const ctx = makeController(api, { timing: { discardRetryGapMs: 20 } });
+  await streamAndStop(ctx);
+  const card = ctx.live.current().ended;
+  assert.ok(card.since && card.since <= card.at, 'karta zná začátek vysílání');
+  assert.equal(card.recordingUid, null);
+  await ctx.live.discardRecording();
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0], { since: card.since, until: card.at });
+  const ended = ctx.live.current().ended;
+  assert.equal(ended.discarded, true);
+  assert.equal(ended.discarding, false);
+  assert.equal(ended.recordingUid, 'rec1');
+});
+
+test('vysílání: Zahodit - id nesedí -> okno vysílání; záznam už je video (409) -> chyba bez opakování', async () => {
+  const calls = [];
+  const api = {
+    liveRecordingDiscard: async (target) => {
+      calls.push(target);
+      if (typeof target === 'string') {
+        const e = new Error('Záznam nenalezen.');
+        e.status = 404;
+        throw e;
+      }
+      const e = new Error('Záznam už je video na Kine - smaž ho v Tvoje videa.');
+      e.status = 409;
+      throw e;
+    },
+  };
+  const ctx = makeController(api, { timing: { discardRetryGapMs: 20 } });
+  await streamAndStop(ctx);
+  ctx.live['status'] = { ...ctx.live['status'], ended: { ...ctx.live['status'].ended, recordingUid: 'spatne' } };
+  await ctx.live.discardRecording();
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0], 'spatne');
+  assert.equal(typeof calls[1], 'object');
+  const ended = ctx.live.current().ended;
+  assert.equal(ended.discarded, false);
+  assert.match(ended.discardError, /video na Kine/);
 });
 
 test('náhled přenosu: ořez na 16:9 jako object-fit: cover a jen rozumný JPEG', () => {

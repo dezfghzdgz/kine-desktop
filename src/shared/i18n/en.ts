@@ -855,6 +855,16 @@ export const en = {
   autoClipsRlNote: 'Rocket League (official Stats API, Steam and Epic): your goals, hat tricks and epic saves; with "Every kill" also saves and demolitions - the clip name carries the score ("Goal · 2:1").',
   autoClipsRlRestart: 'Rocket League reads the setting when it starts - if it\'s running now, restart it once.',
   autoClipsRlNoAccess: 'Rocket League: the app can\'t turn on the game\'s Stats API (the game folder is protected). Open {file} in Notepad as administrator, set PacketSendRate=5 and restart the game - then goals clip themselves.',
+  toastLiveCompat: 'Viewers saw a frozen picture - streaming in compatibility mode now.',
+  liveHealthOk: 'Viewers can see you.',
+  liveHealthChecking: 'Checking that viewers can see the picture…',
+  liveHealthStalled: 'Viewers see a frozen picture. Check your connection or lower the stream quality.',
+  liveCompatOn: 'Compatibility mode',
+  liveCompatSetting: 'Compatibility mode for streaming',
+  liveCompatHint: 'ffmpeg encodes the stream picture again (steady frame rate, keyframe every 2 s) - a bit more work for the CPU. Turns on by itself when viewers see a frozen picture.',
+  liveEndedDiscarding: 'Deleting the recording… (Cloudflare finishes it a moment after the stream)',
+  comingSoon: 'Coming soon',
+  comingSoonPlusHint: 'Kine Plus is coming soon - payments on Kine aren\'t running yet.',
 } as const;
 
 export type Key = keyof typeof en;

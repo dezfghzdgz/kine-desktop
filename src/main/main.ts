@@ -454,6 +454,15 @@ class KineApp {
       // Samočinná zkouška vysílá na místní RTMP server místo Kine.
       testUrl: process.env.KINE_TEST ? process.env.KINE_TEST_LIVE_URL ?? null : null,
       saveRecording: (info) => this.saveStreamRecording(info),
+      // Playlist vysílání u Cloudflare (jako divák) - vidí diváci obraz? (live.ts, liveHealth.ts)
+      fetchText: async (url, timeoutMs) => {
+        const res = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(timeoutMs) });
+        const text = res.ok ? await res.text() : '';
+        return { status: res.status, text: text.slice(0, 200_000) };
+      },
+      rememberCompat: () => {
+        if (!this.settings.get().liveCompat) this.settings.update({ liveCompat: true });
+      },
     });
 
     this.uploader = new Uploader({
@@ -1461,8 +1470,9 @@ class KineApp {
     return this.t(key, key === 'liveErrOther' ? { message: clean.slice(0, 160) } : {});
   }
 
-  private onLiveNotice(kind: 'live' | 'reconnecting' | 'ended' | 'failed' | 'slow' | 'recording', info: { error?: string; duration?: string; url?: string }): void {
+  private onLiveNotice(kind: 'live' | 'reconnecting' | 'ended' | 'failed' | 'slow' | 'recording' | 'compat', info: { error?: string; duration?: string; url?: string }): void {
     if (kind === 'live') void this.toast.show(this.t('toastLiveStarted'), 'ok', { notification: true, onClick: () => this.openLivePage() });
+    else if (kind === 'compat') void this.toast.show(this.t('toastLiveCompat'), 'warn', { onClick: () => this.openSettings('live') });
     else if (kind === 'reconnecting') void this.toast.show(this.t('toastLiveReconnecting'), 'warn');
     else if (kind === 'ended') {
       // Klik vede na kartu záznamu v záložce Živě (zveřejnit na Kine / otevřít).

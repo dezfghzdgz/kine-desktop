@@ -832,4 +832,12 @@ export const fr: Record<Key, string> = {
   liveEndedOr: 'Ou :',
   liveEndedDiscardUnknown: 'Je ne sais pas quel enregistrement c\'était - jette-le dans le studio sur Kine (Enregistrements).',
   liveEndedDiscardFailed: 'Impossible de le jeter : {message}',
+  autoClipGoal: 'But',
+  autoClipHatTrick: 'Coup du chapeau',
+  autoClipEpicSave: 'Arrêt épique',
+  autoClipSave: 'Arrêt',
+  autoClipDemo: 'Démolition',
+  autoClipsRlNote: 'Rocket League (Stats API officielle, Steam et Epic) : tes buts, coups du chapeau et arrêts épiques ; avec « Chaque kill » aussi les arrêts et démolitions - le nom du clip porte le score (« But · 2:1 »).',
+  autoClipsRlRestart: 'Rocket League lit le réglage au démarrage - s\'il tourne maintenant, redémarre-le une fois.',
+  autoClipsRlNoAccess: 'Rocket League : l\'appli ne peut pas activer la Stats API du jeu (le dossier du jeu est protégé). Ouvre {file} dans le Bloc-notes en administrateur, mets PacketSendRate=5 et redémarre le jeu - les buts seront alors clippés tout seuls.',
 };

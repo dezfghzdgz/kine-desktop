@@ -832,4 +832,12 @@ export const sk: Record<Key, string> = {
   liveEndedOr: 'Alebo:',
   liveEndedDiscardUnknown: 'Neviem isto, ktorý záznam to bol - zahoď ho v štúdiu na Kine (Záznamy vysielania).',
   liveEndedDiscardFailed: 'Zahodiť sa nepodarilo: {message}',
+  autoClipGoal: 'Gól',
+  autoClipHatTrick: 'Hetrik',
+  autoClipEpicSave: 'Skvelý zákrok',
+  autoClipSave: 'Zákrok',
+  autoClipDemo: 'Demolácia',
+  autoClipsRlNote: 'Rocket League (oficiálne Stats API, Steam aj Epic): tvoje góly, hetriky a skvelé zákroky; s voľbou „Každé zabitie“ aj obyčajné zákroky a demolácie - názov klipu nesie skóre („Gól · 2:1“).',
+  autoClipsRlRestart: 'Rocket League nastavenie načíta pri štarte - keď teraz beží, raz ho reštartuj.',
+  autoClipsRlNoAccess: 'Rocket League: appka nemôže zapnúť Stats API hry (priečinok hry je chránený). Otvor {file} v Poznámkovom bloku ako správca, nastav PacketSendRate=5 a hru reštartuj - potom sa góly klipujú samé.',
 };

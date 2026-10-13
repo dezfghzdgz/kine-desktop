@@ -832,4 +832,12 @@ export const es: Record<Key, string> = {
   liveEndedOr: 'O bien:',
   liveEndedDiscardUnknown: 'No sé seguro qué grabación era: descártala en el estudio de Kine (Grabaciones).',
   liveEndedDiscardFailed: 'No se pudo descartar: {message}',
+  autoClipGoal: 'Gol',
+  autoClipHatTrick: 'Hat-trick',
+  autoClipEpicSave: 'Parada épica',
+  autoClipSave: 'Parada',
+  autoClipDemo: 'Demolición',
+  autoClipsRlNote: 'Rocket League (Stats API oficial, Steam y Epic): tus goles, hat-tricks y paradas épicas; con «Cada baja» también paradas y demoliciones - el nombre del clip lleva el marcador («Gol · 2:1»).',
+  autoClipsRlRestart: 'Rocket League lee el ajuste al iniciarse: si está abierto ahora, reinícialo una vez.',
+  autoClipsRlNoAccess: 'Rocket League: la app no puede activar la Stats API del juego (la carpeta del juego está protegida). Abre {file} en el Bloc de notas como administrador, pon PacketSendRate=5 y reinicia el juego: entonces los goles se recortan solos.',
 };

@@ -394,7 +394,7 @@ export type Status = {
   /** Která appka to je ("Kine" nebo "Kine Clipper"). */
   variant: Variant;
   /** Hra, která právě posílá události pro automatické klipy (CS2 / LoL / Dota 2 / Minecraft), nebo null. */
-  autoClipsLive: 'cs2' | 'lol' | 'dota2' | 'minecraft' | null;
+  autoClipsLive: 'cs2' | 'lol' | 'dota2' | 'minecraft' | 'rocketleague' | null;
   /** Běží nahrávání celého zápasu? Od kdy (ms od epochy). */
   recordingSince: number | null;
   /**

@@ -1,6 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { KillStreak, cs2Events, cs2GsiConfig, lolEvents, streakLabelKey } from '../dist/esm/gameEventsParse.js';
+import {
+  JsonStreamFramer,
+  KillStreak,
+  RlMoments,
+  cs2Events,
+  cs2GsiConfig,
+  decodeIni,
+  encodeIni,
+  lolEvents,
+  rlConfigEnable,
+  rlConfigRestore,
+  rlContext,
+  rlDecode,
+  rlEvents,
+  rlInitialState,
+  rlLabelKey,
+  rlMomentAllowed,
+  streakLabelKey,
+} from '../dist/esm/gameEventsParse.js';
 
 const ME = '76561198000000001';
 const gsi = (roundKills, matchKills, extra = {}) => ({
@@ -200,4 +218,152 @@ test('Minecraft: jméno hráče ze startu logu, smrt / PvP zabití / pokrok z [C
   assert.equal(minecraftGameDir('javaw -Xmx2G --gameDir C:\\Hry\\mc --assetsDir x'), 'C:\\Hry\\mc');
   assert.equal(minecraftGameDir('javaw --gameDir "C:\\Moje hry\\mc" --version 1.21'), 'C:\\Moje hry\\mc');
   assert.equal(minecraftGameDir('javaw -jar server.jar'), null);
+});
+
+// ---- Rocket League (Stats API) ----------------------------------------------------------
+
+/** Zpráva jako ji posílá hra: Data je znovu zakódovaný text JSON. */
+const rlMsg = (event, data) => JSON.stringify({ Event: event, Data: JSON.stringify(data) });
+const tick = (target, teams = [0, 0], replay = false) =>
+  rlDecode(rlMsg('UpdateState', { MatchGuid: 'm1', Players: [], Game: { Teams: [{ TeamNum: 0, Score: teams[0] }, { TeamNum: 1, Score: teams[1] }], bReplay: replay, bHasTarget: !!target, Target: target ?? undefined } }));
+const HRAC = { Name: 'Hráč "1"', Shortcut: 1, TeamNum: 1 };
+const JINY = { Name: 'Bot', Shortcut: 2, TeamNum: 0 };
+
+test('RL: souvislý proud JSON bez oddělovače, rozseknutý kdekoli; uvozovky a závorky v textu nevadí', () => {
+  const framer = new JsonStreamFramer();
+  const a = rlMsg('GoalScored', { Scorer: { Name: 'A {b} "c"' } });
+  const b = rlMsg('MatchEnded', { WinnerTeamNum: 1 });
+  const stream = `${a}\r\n${b}${a}`;
+  const out = [];
+  for (let i = 0; i < stream.length; i += 7) out.push(...framer.push(stream.slice(i, i + 7)));
+  assert.equal(out.length, 3);
+  assert.equal(rlDecode(out[0]).data.Scorer.Name, 'A {b} "c"');
+  assert.equal(rlDecode(out[1]).event, 'MatchEnded');
+  assert.equal(rlDecode(out[1]).data.WinnerTeamNum, 1);
+  // Data jako objekt (kdyby to hra jednou poslala bez zakódování) i nesmysl.
+  assert.equal(rlDecode('{"Event":"X","Data":{"a":1}}').data.a, 1);
+  assert.equal(rlDecode('{"nic":1}'), null);
+  assert.equal(rlDecode('{rozbité'), null);
+});
+
+test('RL: "já" = koho kamera sleduje (Target) mimo opakované záběry; až po 10 hlasech a s většinou', () => {
+  let s = rlInitialState();
+  for (let i = 0; i < 9; i++) s = rlEvents(s, tick(HRAC)).state;
+  assert.equal(s.me, null, 'málo hlasů');
+  s = rlEvents(s, tick(HRAC)).state;
+  assert.equal(s.me.name, 'Hráč "1"');
+  // Opakovaný záběr gólu (kamera na střelci) se nepočítá.
+  for (let i = 0; i < 30; i++) s = rlEvents(s, tick(JINY, [0, 0], true)).state;
+  assert.equal(s.me.name, 'Hráč "1"');
+  // Divák přepínající mezi hráči žádné "já" nemá.
+  let d = rlInitialState();
+  for (let i = 0; i < 10; i++) d = rlEvents(d, tick(i % 2 ? HRAC : JINY)).state;
+  assert.equal(d.me, null);
+  // Nový zápas začíná od nuly.
+  assert.equal(rlEvents(s, rlDecode(rlMsg('MatchCreated', {}))).state.me, null);
+});
+
+test('RL: jen MOJE góly a zákroky; třetí gól = i hattrick; skóre z pohledu mého týmu', () => {
+  let s = rlInitialState();
+  for (let i = 0; i < 12; i++) s = rlEvents(s, tick(HRAC, [0, 0])).state;
+  let r = rlEvents(s, rlDecode(rlMsg('GoalScored', { GoalSpeed: 98.5, Scorer: { Name: 'Bot', Shortcut: 2, TeamNum: 0 } })));
+  assert.deepEqual(r.moments, [], 'cizí gól');
+  r = rlEvents(r.state, rlDecode(rlMsg('GoalScored', { Scorer: { Name: 'Hráč "1"', Shortcut: 1, TeamNum: 1 } })));
+  assert.deepEqual(r.moments, ['goal']);
+  r = rlEvents(r.state, tick(HRAC, [1, 1]));
+  r = rlEvents(r.state, rlDecode(rlMsg('GoalScored', { Scorer: HRAC })));
+  r = rlEvents(r.state, rlDecode(rlMsg('GoalScored', { Scorer: HRAC })));
+  assert.deepEqual(r.moments, ['goal', 'hatTrick']);
+  r = rlEvents(r.state, tick(HRAC, [1, 3]));
+  assert.equal(rlContext(r.state), '3:1', 'oranžový tým: moje skóre první');
+  // Statfeed: zákroky a demolice jen moje.
+  assert.deepEqual(rlEvents(r.state, rlDecode(rlMsg('StatfeedEvent', { EventName: 'EpicSave', Type: 'Epic Save', MainTarget: HRAC }))).moments, ['epicSave']);
+  assert.deepEqual(rlEvents(r.state, rlDecode(rlMsg('StatfeedEvent', { EventName: 'Demolish', Type: 'Demolition', MainTarget: HRAC, SecondaryTarget: JINY }))).moments, ['demo']);
+  assert.deepEqual(rlEvents(r.state, rlDecode(rlMsg('StatfeedEvent', { EventName: 'Demolish', MainTarget: JINY, SecondaryTarget: HRAC }))).moments, [], 'mě zdemolovali - to klip není');
+  assert.deepEqual(rlEvents(r.state, rlDecode(rlMsg('StatfeedEvent', { EventName: 'Shot', MainTarget: HRAC }))).moments, [], 'střela bez gólu ne');
+  // Bez "já" (divák) se nic neklipuje.
+  assert.deepEqual(rlEvents(rlInitialState(), rlDecode(rlMsg('GoalScored', { Scorer: HRAC }))).moments, []);
+});
+
+test('RL: režimy - multi jen góly, hattrick a skvělé zákroky; every vše; off nic', () => {
+  assert.ok(rlMomentAllowed('goal', 'multi') && rlMomentAllowed('epicSave', 'multi') && rlMomentAllowed('hatTrick', 'multi'));
+  assert.ok(!rlMomentAllowed('save', 'multi') && !rlMomentAllowed('demo', 'multi'));
+  assert.ok(rlMomentAllowed('demo', 'every') && rlMomentAllowed('save', 'every'));
+  assert.ok(!rlMomentAllowed('goal', 'off'));
+  assert.equal(rlLabelKey('goal'), 'autoClipGoal');
+  assert.equal(rlLabelKey('hatTrick'), 'autoClipHatTrick');
+});
+
+test('RL: momenty těsně za sebou = jeden klip s nejdůležitějším názvem, po uklidnění', async () => {
+  const clips = [];
+  const m = new RlMoments({ mode: () => 'every', onClip: (k) => clips.push(k), quietMs: 40, maxMs: 500 });
+  m.add('save');
+  m.add('goal');
+  m.add('demo');
+  assert.deepEqual(clips, []);
+  await new Promise((r) => setTimeout(r, 90));
+  assert.deepEqual(clips, ['goal']);
+  const multi = new RlMoments({ mode: () => 'multi', onClip: (k) => clips.push(k), quietMs: 20 });
+  multi.add('demo');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(clips, ['goal'], 'v multi demolice klip není');
+});
+
+test('RL: zapnutí Stats API v konfiguraci a vrácení zpět (jen to, co zapnula appka)', () => {
+  const shipped = '[TAGame.MatchStatsExporter_TA]\r\nPacketSendRate=0\r\nPort=49123\r\n';
+  const on = rlConfigEnable(shipped);
+  assert.ok(on.changed);
+  assert.equal(on.port, 49123);
+  assert.match(on.text, /^PacketSendRate=5$/m);
+  assert.match(on.text, /puvodne 0/);
+  assert.equal(rlConfigEnable(on.text).changed, false, 'podruhé nic');
+  const back = rlConfigRestore(on.text);
+  assert.ok(back.changed);
+  assert.equal(back.text.replace(/\r\n/g, '\n').trim(), shipped.replace(/\r\n/g, '\n').trim());
+  // Zapnuté jiným programem (overlay): nesahá, jen převezme port.
+  const other = '[TAGame.MatchStatsExporter_TA]\r\nPacketSendRate=30\r\nPort=50000\r\n';
+  const kept = rlConfigEnable(other);
+  assert.equal(kept.changed, false);
+  assert.equal(kept.port, 50000);
+  assert.equal(rlConfigRestore(other).changed, false);
+  // Prázdný / chybějící soubor: celý oddíl; vrácení ho vypne.
+  const fresh = rlConfigEnable(null);
+  assert.match(fresh.text, /\[TAGame\.MatchStatsExporter_TA\][\s\S]*PacketSendRate=5[\s\S]*Port=49123/);
+  assert.doesNotMatch(rlConfigRestore(fresh.text).text, /PacketSendRate=5/);
+  // TCP vypnuté (Port=0): appka dá výchozí port.
+  assert.equal(rlConfigEnable('[TAGame.MatchStatsExporter_TA]\nPacketSendRate=0\nPort=0\n').port, 49123);
+  // Jiné oddíly zůstanou.
+  const mixed = '[Other]\r\nA=1\r\n[TAGame.MatchStatsExporter_TA]\r\nPacketSendRate=0\r\n[Next]\r\nB=2\r\n';
+  const mixedOn = rlConfigEnable(mixed).text;
+  assert.match(mixedOn, /\[Other\]\r\nA=1/);
+  assert.match(mixedOn, /\[Next\]\r\nB=2/);
+  assert.match(mixedOn, /PacketSendRate=5\r\nPort=49123\r\n\[Next\]/);
+});
+
+test('RL: konfigurace v UTF-16 / s BOM zůstane ve svém kódování', () => {
+  const shipped = '[TAGame.MatchStatsExporter_TA]\r\nPacketSendRate=0\r\nPort=49123\r\n';
+  const variants = [
+    ['UTF-16 s BOM', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(shipped, 'utf16le')])],
+    ['UTF-16 bez BOM', Buffer.from(shipped, 'utf16le')],
+    ['UTF-8 s BOM', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(shipped, 'utf8')])],
+    ['UTF-8', Buffer.from(shipped, 'utf8')],
+  ];
+  for (const [name, bytes] of variants) {
+    const read = decodeIni(bytes);
+    assert.equal(read.text, shipped, name);
+    const on = rlConfigEnable(read.text);
+    assert.ok(on.changed, name);
+    const written = encodeIni(on.text, read.encoding);
+    // Stejné kódování: BOM na začátku zůstal, text se dá přečíst zpátky.
+    const bomLen = bytes[0] === 0xff ? 2 : bytes[0] === 0xef ? 3 : 0;
+    assert.deepEqual([...written.subarray(0, bomLen)], [...bytes.subarray(0, bomLen)], name);
+    if (bomLen === 0) assert.notEqual(written[0], 0xef, name);
+    const again = decodeIni(written);
+    assert.deepEqual(again.encoding, read.encoding, name);
+    assert.match(again.text, /^PacketSendRate=5$/m, name);
+    const back = encodeIni(rlConfigRestore(again.text).text, again.encoding);
+    assert.equal(decodeIni(back).text.trim(), shipped.trim(), name);
+  }
+  // Nový soubor: UTF-8 bez BOM.
+  assert.equal(encodeIni('x').toString('utf8'), 'x');
 });

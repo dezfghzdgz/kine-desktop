@@ -1,6 +1,7 @@
 import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createServer, request as httpRequest } from 'node:http';
+import { createServer as createNetServer } from 'node:net';
 import { basename, dirname, join } from 'node:path';
 import { BrowserWindow, app, clipboard, nativeImage } from 'electron';
 import { log } from './log';
@@ -503,6 +504,72 @@ export async function runTestDriver(kine: {
         ge.onGame(null, null);
         result.minecraftTitles = mcClips.map((c) => c.title);
         result.minecraftClip = mcLive && mcClips.length === 2 && mcClips.some((c) => /Death$/.test(c.title)) && mcClips.some((c) => /Advancement$/.test(c.title)) && ge.live() !== 'minecraft';
+
+        // Rocket League: Stats API po TCP (objekty JSON za sebou bez oddělovače, rozsekané kdekoli,
+        // Data jako zakódovaný text). Hráč = koho kamera sleduje; cizí gól nic, můj gól = "Goal · 1:0".
+        {
+          const rlMsg = (event: string, data: unknown) => JSON.stringify({ Event: event, Data: JSON.stringify(data) });
+          const me = { Name: 'Tester', Shortcut: 1, TeamNum: 0 };
+          const tick = (blue: number, orange: number) =>
+            rlMsg('UpdateState', { Players: [], Game: { bHasTarget: true, Target: me, bReplay: false, Teams: [{ TeamNum: 0, Score: blue }, { TeamNum: 1, Score: orange }] } });
+          const stream = [
+            rlMsg('MatchCreated', {}),
+            ...Array.from({ length: 12 }, () => tick(0, 0)),
+            rlMsg('GoalScored', { GoalSpeed: 80, Scorer: { Name: 'Bot', Shortcut: 2, TeamNum: 1 } }),
+            tick(0, 1),
+            rlMsg('GoalScored', { GoalSpeed: 112.5, Scorer: me }),
+            tick(1, 1),
+          ].join('\r\n');
+          const rlServer = createNetServer((sock) => {
+            let at = 0;
+            const timer = setInterval(() => {
+              if (at >= stream.length) return clearInterval(timer);
+              sock.write(stream.slice(at, at + 37));
+              at += 37;
+            }, 4);
+            sock.on('error', () => clearInterval(timer));
+            sock.on('close', () => clearInterval(timer));
+          });
+          await new Promise<void>((resolve) => rlServer.listen(0, '127.0.0.1', () => resolve()));
+          const rlTestPort = (rlServer.address() as { port: number }).port;
+          (ge as any).rlPort = rlTestPort;
+          // Konfigurace hry: falešná instalace z Epicu (manifest launcheru s BOM), soubor
+          // v UTF-16 s BOM a vypnutým Stats API. Appka ho při startu hry zapne a kódování nechá.
+          const rlDir = join(outDir, 'rl');
+          const rlManifests = join(rlDir, 'Manifests');
+          const rlIni = join(rlDir, 'TAGame', 'Config', 'DefaultStatsAPI.ini');
+          mkdirSync(dirname(rlIni), { recursive: true });
+          mkdirSync(rlManifests, { recursive: true });
+          const shippedIni = `[TAGame.MatchStatsExporter_TA]\r\nPacketSendRate=0\r\nPort=${rlTestPort}\r\n`;
+          const utf16 = (text: string) => Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, 'utf16le')]);
+          writeFileSync(rlIni, utf16(shippedIni));
+          writeFileSync(join(rlManifests, 'RocketLeague.item'), '﻿' + JSON.stringify({ DisplayName: 'Rocket League®', LaunchExecutable: 'Binaries/Win64/RocketLeague.exe', InstallLocation: rlDir }));
+          (ge as any).deps.epicManifestsDir = () => rlManifests;
+          (ge as any).rlConfigFiles = [];
+          const known4 = new Set(kine.library.list().map((c) => c.id));
+          ge.onGame('rocketleague.exe', 'Rocket League');
+          let rlClips: any[] = [];
+          for (let i = 0; i < 40 && rlClips.length === 0; i++) {
+            await sleep(500);
+            rlClips = kine.library.list().filter((c) => !known4.has(c.id));
+          }
+          await sleep(1500);
+          rlClips = kine.library.list().filter((c) => !known4.has(c.id));
+          const rlLive = ge.live() === 'rocketleague';
+          ge.onGame(null, null);
+          await new Promise<void>((resolve) => rlServer.close(() => resolve()));
+          result.rocketLeagueTitles = rlClips.map((c) => c.title);
+          // Jediný klip (cizí gól ne) se skóre z pohledu hráče po gólu.
+          result.rocketLeagueClip = rlClips.length === 1 && /Goal · 1:1$/.test(rlClips[0].title) && rlLive && ge.live() !== 'rocketleague';
+          // Konfigurace: zapnutá v UTF-16 (BOM zůstal, port hry převzatý); vypnutí klipů ze hry ji vrátí přesně.
+          const iniOn = readFileSync(rlIni);
+          const iniOnText = iniOn.subarray(2).toString('utf16le');
+          const cfgOn = iniOn[0] === 0xff && iniOn[1] === 0xfe && /^PacketSendRate=5\r$/m.test(iniOnText) && iniOnText.includes(`Port=${rlTestPort}`) && (ge as any).rlPort === rlTestPort;
+          (ge as any).removeRlConfigs();
+          const cfgBack = readFileSync(rlIni).equals(utf16(shippedIni));
+          result.rocketLeagueConfig = cfgOn && cfgBack;
+          if (!result.rocketLeagueConfig) log(`test: RL konfigurace ${JSON.stringify({ cfgOn, cfgBack, iniOnText })}`);
+        }
       }
 
       // Přepsání původního klipu (bez zvuku): stejný soubor, kratší, nový náhled.
@@ -1602,7 +1669,7 @@ export async function runTestDriver(kine: {
       'inlinePlayer', 'gridUntouched', 'trimPanel', 'trimNewClip', 'trimReplace', 'vertical', 'verticalUi', 'autoClip', 'overlayClosed', 'filters',
       'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks', 'reviewMerge', 'updateUi',
       'playerNav', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
-      'autoClipContext', 'dota2Clip', 'minecraftClip', 'verticalBlur', 'trash', 'trashUndoOk', 'trashDoubleOk', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
+      'autoClipContext', 'dota2Clip', 'minecraftClip', 'rocketLeagueClip', 'rocketLeagueConfig', 'verticalBlur', 'trash', 'trashUndoOk', 'trashDoubleOk', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
       'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'clipToastInstant', 'recordingStopOnceOk', 'updateProgressOk', 'playerFullscreenOk', 'lookOk', 'lookSizesOk', 'lookFollowOk',
       'updateIssueOk', 'settingsSectionsOk', 'compressOk',
     ];

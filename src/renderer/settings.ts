@@ -2931,7 +2931,7 @@ function autoClipsPanel() {
   return h(
     'div',
     { class: 'panel stack auto-clips' },
-    ...panelTitle('bolt', t('autoClipsTitle'), { id: 'autoClips', help: t('autoClipsHint') + ' ' + t('autoClipsCs2Note') }),
+    ...panelTitle('bolt', t('autoClipsTitle'), { id: 'autoClips', help: t('autoClipsHint') + ' ' + t('autoClipsRlNote') + ' ' + t('autoClipsCs2Note') + ' ' + t('autoClipsRlRestart') }),
     h(
       'div',
       { class: 'radio-group' },
@@ -2939,7 +2939,7 @@ function autoClipsPanel() {
       radio('autoClips', 'every', t('autoClipsEvery')),
       radio('autoClips', 'off', t('autoClipsOff'))
     ),
-    live ? h('p', { class: 'ok', style: 'margin:0' }, icon('dot', 12), ' ', t('autoClipsLive', { game: { cs2: 'Counter-Strike 2', lol: 'League of Legends', dota2: 'Dota 2', minecraft: 'Minecraft' }[live] })) : null
+    live ? h('p', { class: 'ok', style: 'margin:0' }, icon('dot', 12), ' ', t('autoClipsLive', { game: { cs2: 'Counter-Strike 2', lol: 'League of Legends', dota2: 'Dota 2', minecraft: 'Minecraft', rocketleague: 'Rocket League' }[live] })) : null
   );
 }
 

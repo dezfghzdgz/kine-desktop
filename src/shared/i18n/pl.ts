@@ -832,4 +832,12 @@ export const pl: Record<Key, string> = {
   liveEndedOr: 'Albo:',
   liveEndedDiscardUnknown: 'Nie wiem na pewno, które to było nagranie - odrzuć je w studiu na Kine (Nagrania transmisji).',
   liveEndedDiscardFailed: 'Nie udało się odrzucić: {message}',
+  autoClipGoal: 'Gol',
+  autoClipHatTrick: 'Hat-trick',
+  autoClipEpicSave: 'Epicka obrona',
+  autoClipSave: 'Obrona',
+  autoClipDemo: 'Demolka',
+  autoClipsRlNote: 'Rocket League (oficjalne Stats API, Steam i Epic): twoje gole, hat-tricki i epickie obrony; z opcją „Każde zabójstwo” także zwykłe obrony i demolki - nazwa klipu zawiera wynik („Gol · 2:1”).',
+  autoClipsRlRestart: 'Rocket League wczytuje ustawienie przy starcie - jeśli teraz działa, uruchom go raz ponownie.',
+  autoClipsRlNoAccess: 'Rocket League: aplikacja nie może włączyć Stats API gry (folder gry jest chroniony). Otwórz {file} w Notatniku jako administrator, ustaw PacketSendRate=5 i uruchom grę ponownie - wtedy gole same trafią do klipów.',
 };

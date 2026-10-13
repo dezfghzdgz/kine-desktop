@@ -832,4 +832,12 @@ export const uk: Record<Key, string> = {
   liveEndedOr: 'Або:',
   liveEndedDiscardUnknown: 'Не знаю точно, який це був запис - відкинь його в студії на Kine (Записи трансляцій).',
   liveEndedDiscardFailed: 'Не вдалося відкинути: {message}',
+  autoClipGoal: 'Гол',
+  autoClipHatTrick: 'Хет-трик',
+  autoClipEpicSave: 'Епічний сейв',
+  autoClipSave: 'Сейв',
+  autoClipDemo: 'Знищення',
+  autoClipsRlNote: 'Rocket League (офіційний Stats API, Steam і Epic): твої голи, хет-трики та епічні сейви; з варіантом «Кожне вбивство» також звичайні сейви й знищення - назва кліпу містить рахунок («Гол · 2:1»).',
+  autoClipsRlRestart: 'Rocket League читає налаштування під час запуску - якщо зараз запущено, перезапусти його один раз.',
+  autoClipsRlNoAccess: 'Rocket League: застосунок не може ввімкнути Stats API гри (папка гри захищена). Відкрий {file} у Блокноті від імені адміністратора, постав PacketSendRate=5 і перезапусти гру - тоді голи кліпуватимуться самі.',
 };

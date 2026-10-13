@@ -426,6 +426,10 @@ class KineApp {
       onStateChange: () => this.pushStatus(),
       lolPollMs: () => this.profile().lolPollMs,
       minecraftCommandLine: () => this.games.minecraftCommandLine(),
+      onRlConfigBlocked: (file) => {
+        if (file) this.addNotice({ id: 'rl-config', text: this.t('autoClipsRlNoAccess', { file }), kind: 'warn', tab: 'games' });
+        else this.dismissNotice('rl-config');
+      },
     });
 
     this.hotkeys = new HotkeyManager({

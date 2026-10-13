@@ -1,30 +1,44 @@
 import { createServer, type Server } from 'node:http';
 import { request as httpsRequest } from 'node:https';
+import { connect as netConnect, type Socket } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Settings } from '../shared/types';
 import { log } from './log';
 import {
+  JsonStreamFramer,
   KillStreak,
+  RL_DEFAULT_PORT,
+  RlMoments,
   cs2Context,
   cs2Events,
   cs2GsiConfig,
+  decodeIni,
   dota2Context,
   dota2Events,
   dota2GsiConfig,
+  encodeIni,
   isDota2Payload,
   lolEvents,
   minecraftGameDir,
   minecraftLogEvent,
   minecraftUserFromLog,
+  rlConfigEnable,
+  rlConfigRestore,
+  rlContext,
+  rlDecode,
+  rlEvents,
+  rlInitialState,
+  rlLabelKey,
   streakLabelKey,
   type Cs2State,
   type Dota2State,
   type EventGame,
   type GameEvent,
   type LolPlayer,
+  type RlState,
 } from './gameEventsParse';
 
 /**
@@ -53,8 +67,13 @@ const DOTA2_CFG_DIR = ['steamapps', 'common', 'dota 2 beta', 'game', 'dota', 'cf
 const LOL_POLL_MS = 2000;
 /** Jak často se čte logs/latest.log Minecraftu. */
 const MINECRAFT_POLL_MS = 1500;
+/** Rocket League: složka s konfigurací Stats API v instalaci hry. */
+const RL_CONFIG_DIR = ['TAGame', 'Config'];
+const RL_CONFIG_FILES = ['TAStatsAPI.ini', 'DefaultStatsAPI.ini'];
+/** Znovu se připojit ke hře (Stats API běží jen během zápasu). */
+const RL_RETRY_MS = 3000;
 
-export type AutoClipLabelKey = ReturnType<typeof streakLabelKey> | 'autoClipDeath' | 'autoClipAdvancement';
+export type AutoClipLabelKey = ReturnType<typeof streakLabelKey> | ReturnType<typeof rlLabelKey> | 'autoClipDeath' | 'autoClipAdvancement';
 
 export class GameEvents {
   private server: Server | null = null;
@@ -72,6 +91,13 @@ export class GameEvents {
   private lastMinecraftAt = 0;
   private streak: KillStreak;
   private cfgPaths: string[] = [];
+  /** Rocket League: spojení se Stats API hry (jen dokud hra běží). */
+  private rl: { socket: Socket | null; retry: ReturnType<typeof setTimeout> | null; framer: JsonStreamFramer; state: RlState } | null = null;
+  private rlMoments: RlMoments;
+  /** Port Stats API podle konfigurace hry (zjistí installRlConfigs). */
+  private rlPort = RL_DEFAULT_PORT;
+  private rlConfigFiles: string[] = [];
+  private lastRlAt = 0;
 
   constructor(
     private deps: {
@@ -85,8 +111,19 @@ export class GameEvents {
       lolPollMs?: () => number;
       /** Příkazová řádka Minecraftu (kvůli --gameDir), prázdné = výchozí složka. */
       minecraftCommandLine?: () => string;
+      /** Složky, kde můžou být hry z Epic Games (manifesty launcheru); v základu ProgramData. */
+      epicManifestsDir?: () => string;
+      /** Konfiguraci Rocket League nejde zapsat (chráněná složka) - soubor; null = v pořádku. */
+      onRlConfigBlocked?: (file: string | null) => void;
     }
   ) {
+    this.rlMoments = new RlMoments({
+      mode: () => this.deps.settings().autoClips,
+      onClip: (kind) => {
+        this.streak.flush();
+        this.deps.onClip(1, rlLabelKey(kind), 'rocketleague', rlContext(this.rl?.state ?? null));
+      },
+    });
     let lastGame: EventGame = 'cs2';
     this.streak = new KillStreak({
       mode: () => this.deps.settings().autoClips,
@@ -122,6 +159,7 @@ export class GameEvents {
       ['cs2', this.lastCs2At],
       ['dota2', this.lastDota2At],
       ['minecraft', this.minecraft ? this.lastMinecraftAt : 0],
+      ['rocketleague', this.rl ? this.lastRlAt : 0],
     ];
     const latest = seen.filter(([, at]) => at > 0 && now - at < 30000).sort((a, b) => b[1] - a[1])[0];
     return latest ? latest[0] : null;
@@ -131,12 +169,15 @@ export class GameEvents {
     if (this.deps.settings().autoClips === 'off') return;
     await this.startGsiServer();
     await this.installGsiConfigs();
+    await this.installRlConfigs();
   }
 
   async stop(): Promise<void> {
     this.stopLol();
     this.stopMinecraft();
+    this.stopRl();
     this.streak.reset();
+    this.rlMoments.reset();
     if (this.server) {
       await new Promise<void>((r) => this.server!.close(() => r()));
       this.server = null;
@@ -154,6 +195,7 @@ export class GameEvents {
     if (next.autoClips === 'off') {
       await this.stop();
       this.removeGsiConfigs();
+      this.removeRlConfigs();
     } else if (!this.server) {
       await this.start();
     }
@@ -168,6 +210,9 @@ export class GameEvents {
     const minecraft = name === 'Minecraft' && (exe === 'javaw.exe' || exe === 'java.exe');
     if (minecraft && !this.minecraft && on) this.startMinecraft();
     if (!minecraft && this.minecraft) this.stopMinecraft();
+    const rocketLeague = exe === 'rocketleague.exe';
+    if (rocketLeague && !this.rl && on) this.startRl();
+    if (!rocketLeague && this.rl) this.stopRl();
   }
 
   // ---- CS2 ------------------------------------------------------------------------------
@@ -366,6 +411,152 @@ export class GameEvents {
       if (e.kind === 'kill') this.handle({ game: 'minecraft', kind: 'kill', count: 1 });
       else this.handle({ game: 'minecraft', kind: e.kind, count: 1 });
     }
+  }
+
+  // ---- Rocket League ------------------------------------------------------------------
+
+  /**
+   * Instalace Rocket League: Steam (steamapps/common/rocketleague) a Epic Games
+   * (manifesty launcheru v ProgramData - InstallLocation u hry "Rocket League").
+   */
+  private async rocketLeagueDirs(): Promise<string[]> {
+    const dirs: string[] = [];
+    try {
+      for (const lib of await this.deps.steamLibraries()) dirs.push(join(lib, 'steamapps', 'common', 'rocketleague'));
+    } catch {
+      // bez Steamu
+    }
+    const manifests = this.deps.epicManifestsDir?.() ?? join(process.env.ProgramData ?? 'C:\\ProgramData', 'Epic', 'EpicGamesLauncher', 'Data', 'Manifests');
+    try {
+      for (const name of readdirSync(manifests)) {
+        if (!name.toLowerCase().endsWith('.item')) continue;
+        try {
+          const item = JSON.parse(readFileSync(join(manifests, name), 'utf8').replace(/^﻿/, ''));
+          const title = `${item?.DisplayName ?? ''} ${item?.LaunchExecutable ?? ''}`;
+          if (/rocket\s*league/i.test(title) && typeof item?.InstallLocation === 'string') dirs.push(item.InstallLocation);
+        } catch {
+          // rozbitý manifest
+        }
+      }
+    } catch {
+      // Epic není
+    }
+    return [...new Set(dirs)].filter((d) => existsSync(join(d, ...RL_CONFIG_DIR)));
+  }
+
+  /**
+   * Zapne Stats API v nalezených instalacích (TAStatsAPI.ini, když je, jinak
+   * DefaultStatsAPI.ini - ten hra čte, když TAStatsAPI.ini chybí). Mění jen
+   * vypnutý PacketSendRate a nad řádek si dá značku s původní hodnotou -
+   * vypnutí klipů ze hry ji vrátí. Hra konfiguraci čte při startu.
+   */
+  private async installRlConfigs(): Promise<void> {
+    this.rlConfigFiles = [];
+    let blocked: string | null = null;
+    for (const dir of await this.rocketLeagueDirs()) {
+      const configDir = join(dir, ...RL_CONFIG_DIR);
+      const existing = RL_CONFIG_FILES.map((f) => join(configDir, f)).filter((f) => existsSync(f));
+      // Žádný soubor (starší hra): založit DefaultStatsAPI.ini.
+      const targets = existing.length > 0 ? existing : [join(configDir, RL_CONFIG_FILES[1])];
+      for (const file of targets) {
+        try {
+          // Kódování (UTF-8 / UTF-16, BOM) zůstane, jaké bylo.
+          const before = existsSync(file) ? decodeIni(readFileSync(file)) : null;
+          const { text, changed, port } = rlConfigEnable(before ? before.text : null);
+          // Port platí z TAStatsAPI.ini (má přednost), jinak z DefaultStatsAPI.ini.
+          if (file === targets[0]) this.rlPort = port;
+          if (changed) {
+            writeFileSync(file, encodeIni(text, before?.encoding));
+            log(`herní události: zapnuto Stats API v ${file} (Rocket League ho načte při příštím startu)`);
+          }
+          this.rlConfigFiles.push(file);
+        } catch (e) {
+          const code = (e as NodeJS.ErrnoException).code;
+          log(`herní události: ${file} nejde zapsat: ${(e as Error).message}`);
+          if (code === 'EACCES' || code === 'EPERM') blocked ??= file;
+        }
+      }
+    }
+    // Hráč se to dozví v okně (Hry) - jak to zapnout ručně; po úspěchu upozornění zmizí.
+    this.deps.onRlConfigBlocked?.(blocked);
+  }
+
+  private removeRlConfigs(): void {
+    for (const file of this.rlConfigFiles) {
+      try {
+        if (!existsSync(file)) continue;
+        const current = decodeIni(readFileSync(file));
+        const { text, changed } = rlConfigRestore(current.text);
+        if (changed) writeFileSync(file, encodeIni(text, current.encoding));
+      } catch {
+        // nechat být
+      }
+    }
+    this.rlConfigFiles = [];
+  }
+
+  private startRl(): void {
+    this.rl = { socket: null, retry: null, framer: new JsonStreamFramer(), state: rlInitialState() };
+    log(`herní události: Rocket League běží - připojuji se ke Stats API (127.0.0.1:${this.rlPort})`);
+    // Hra nainstalovaná až po spuštění appky: konfigurace se zapne teď (projeví se po restartu hry).
+    if (this.rlConfigFiles.length === 0) void this.installRlConfigs();
+    this.connectRl();
+  }
+
+  private stopRl(): void {
+    const rl = this.rl;
+    if (!rl) return;
+    this.rl = null;
+    if (rl.retry) clearTimeout(rl.retry);
+    rl.socket?.destroy();
+    this.rlMoments.flush();
+    if (this.lastRlAt) {
+      this.lastRlAt = 0;
+      this.deps.onStateChange?.();
+    }
+  }
+
+  /** TCP ke hře; Stats API posílá jen během zápasu - spadlé spojení se zkouší znovu, dokud hra běží. */
+  private connectRl(): void {
+    const rl = this.rl;
+    if (!rl || rl.socket) return;
+    const socket = netConnect({ host: '127.0.0.1', port: this.rlPort });
+    rl.socket = socket;
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk: string) => {
+      if (this.rl !== rl) return;
+      for (const raw of rl.framer.push(chunk)) {
+        const msg = rlDecode(raw);
+        if (!msg) continue;
+        const first = this.lastRlAt === 0;
+        this.lastRlAt = Date.now();
+        if (first) {
+          log('herní události: Rocket League posílá události');
+          this.deps.onStateChange?.();
+        }
+        const { state, moments } = rlEvents(rl.state, msg);
+        if (!rl.state.me && state.me) log(`herní události: Rocket League hráč ${state.me.name}`);
+        rl.state = state;
+        for (const m of moments) {
+          log(`herní události: Rocket League ${m}`);
+          this.rlMoments.add(m);
+        }
+      }
+    });
+    const retry = () => {
+      if (this.rl !== rl) return;
+      rl.socket?.destroy();
+      rl.socket = null;
+      rl.framer = new JsonStreamFramer();
+      if (!rl.retry) {
+        rl.retry = setTimeout(() => {
+          rl.retry = null;
+          this.connectRl();
+        }, RL_RETRY_MS);
+      }
+    };
+    socket.on('error', retry);
+    socket.on('close', retry);
   }
 
   // ---- League of Legends --------------------------------------------------------------

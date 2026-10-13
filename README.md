@@ -752,3 +752,35 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   Appka na www zůstane (zpátky na holou doménu nikdy) a appka na holé doméně
   (přesměrovává) přejde na www. `playkine.com` a `www.playkine.com` jsou
   pro okno Kine totéž (`isKineUrl`).
+
+## Novinky 0.10.4
+
+- **Klipy samy z Rocket League** (`gameEventsParse.ts` - `JsonStreamFramer`,
+  `rlDecode`, `rlEvents`, `RlMoments`, `rlConfigEnable`; `gameEvents.ts`):
+  oficiální **Stats API** Psyonixu (rocketleague.com/developer/stats-api),
+  bez zásahu do hry. Appka v instalaci hry (Steam `steamapps/common/rocketleague`,
+  Epic podle manifestů launcheru v `ProgramData\Epic\EpicGamesLauncher\Data\Manifests`)
+  zapne v `TAGame/Config` (TAStatsAPI.ini, jinak DefaultStatsAPI.ini) oddíl
+  `[TAGame.MatchStatsExporter_TA]`: `PacketSendRate=5` jen když je vypnutý
+  (0) - nad řádek si dá značku s původní hodnotou a vypnutí klipů ze hry ji
+  vrátí; zapnutý jiným programem (overlay) nechá být a převezme jeho `Port`.
+  Hra konfiguraci čte při startu. Když `rocketleague.exe` běží, appka se
+  připojí na `127.0.0.1:<Port>` (TCP, v základu 49123; Stats API posílá jen
+  během zápasu - spojení se zkouší znovu po 3 s). Proud jsou objekty JSON za
+  sebou bez oddělovače (rámování podle závorek s ohledem na texty v uvozovkách),
+  `Data` je znovu zakódovaný JSON. **Kdo jsem já:** API hráče neoznačuje -
+  `Game.Target` je ten, koho kamera sleduje (při hraní vlastní auto); hlasuje
+  se přes zápas mimo opakované záběry, platí od 10 hlasů s většinou 60 %
+  (divák přepínající hráče žádné „já" nemá → žádné klipy). Klipy: můj **gól**
+  (`GoalScored.Scorer`), třetí gól = **hattrick**, **skvělý zákrok**
+  (`StatfeedEvent` EpicSave), s volbou „Každé zabití" i **zákrok** (Save)
+  a **demolice** (Demolish, MainTarget = já). Momenty těsně za sebou = jeden
+  klip s nejdůležitějším názvem, 3 s po posledním (výbuch po gólu je v klipu).
+  Název nese skóre z pohledu hráče: „Gól · 2:1". Konfigurace se čte i zapisuje
+  ve svém kódování (`decodeIni` / `encodeIni`: UTF-8 i UTF-16, s BOM i bez).
+  Když složku hry nejde zapsat (chráněná instalace), appka to ukáže
+  v záložce Hry (`autoClipsRlNoAccess`). Testy: `tests/gameEvents.test.mjs`
+  (rámování proudu rozsekaného kdekoli, „já", jen moje momenty, hattrick,
+  skóre, režimy, spojování, zapnutí a vrácení konfigurace, kódování), e2e:
+  falešný server Stats API (cizí gól nic, můj gól = jeden klip „Goal · 1:1")
+  a falešná instalace z Epicu s konfigurací v UTF-16 (zapnutí a přesné vrácení).

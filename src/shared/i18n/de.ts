@@ -832,4 +832,12 @@ export const de: Record<Key, string> = {
   liveEndedOr: 'Oder:',
   liveEndedDiscardUnknown: 'Nicht sicher, welche Aufnahme das war - verwirf sie im Studio auf Kine (Stream-Aufnahmen).',
   liveEndedDiscardFailed: 'Verwerfen fehlgeschlagen: {message}',
+  autoClipGoal: 'Tor',
+  autoClipHatTrick: 'Hattrick',
+  autoClipEpicSave: 'Epische Parade',
+  autoClipSave: 'Parade',
+  autoClipDemo: 'Zerstörung',
+  autoClipsRlNote: 'Rocket League (offizielle Stats API, Steam und Epic): deine Tore, Hattricks und epischen Paraden; mit „Jeder Kill“ auch Paraden und Zerstörungen - der Clipname enthält den Spielstand („Tor · 2:1“).',
+  autoClipsRlRestart: 'Rocket League liest die Einstellung beim Start - wenn es gerade läuft, starte es einmal neu.',
+  autoClipsRlNoAccess: 'Rocket League: Die App kann die Stats API des Spiels nicht einschalten (der Spielordner ist geschützt). Öffne {file} im Editor als Administrator, setze PacketSendRate=5 und starte das Spiel neu - dann werden Tore von selbst geclippt.',
 };

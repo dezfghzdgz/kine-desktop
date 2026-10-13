@@ -847,6 +847,14 @@ export const en = {
   liveEndedOr: 'Or:',
   liveEndedDiscardUnknown: 'Not sure which recording this was - discard it in the studio on Kine (Stream recordings).',
   liveEndedDiscardFailed: 'Couldn\'t discard it: {message}',
+  autoClipGoal: 'Goal',
+  autoClipHatTrick: 'Hat trick',
+  autoClipEpicSave: 'Epic save',
+  autoClipSave: 'Save',
+  autoClipDemo: 'Demolition',
+  autoClipsRlNote: 'Rocket League (official Stats API, Steam and Epic): your goals, hat tricks and epic saves; with "Every kill" also saves and demolitions - the clip name carries the score ("Goal · 2:1").',
+  autoClipsRlRestart: 'Rocket League reads the setting when it starts - if it\'s running now, restart it once.',
+  autoClipsRlNoAccess: 'Rocket League: the app can\'t turn on the game\'s Stats API (the game folder is protected). Open {file} in Notepad as administrator, set PacketSendRate=5 and restart the game - then goals clip themselves.',
 } as const;
 
 export type Key = keyof typeof en;

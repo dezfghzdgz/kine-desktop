@@ -63,7 +63,7 @@ const DISCARD_RETRY_GAP_MS = 10 * 1000;
 const HEALTH_POLL_MS = 5000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const IDLE: LiveStatus = { state: 'idle', since: null, title: '', watchUrl: null, error: null, confirmed: null, scene: null, stats: null, viewers: null, cameraError: null, ended: null, health: null, compat: false };
+const IDLE: LiveStatus = { state: 'idle', since: null, title: '', watchUrl: null, error: null, confirmed: null, scene: null, stats: null, viewers: null, cameraError: null, ended: null, health: null, compat: false, onKine: null };
 
 export class LiveController {
   private status: LiveStatus = { ...IDLE };
@@ -109,6 +109,8 @@ export class LiveController {
   private compat = false;
   /** Kompatibilní režim zapnutý kvůli zamrzlému obrazu v tomhle vysílání - když pomůže, zapamatuje se. */
   private compatAuto = false;
+  /** Poslední zápis "co říká Kine / Cloudflare" do deníku (zapisuje se jen změna). */
+  private lastSignalLine = '';
   /** Jen pro test: HLS místo toho od Kine (místní server). */
   testHlsUrl: string | null = null;
 
@@ -164,6 +166,7 @@ export class LiveController {
     // Kompatibilní režim, když ho appka už jednou potřebovala (zamrzlý obraz) - nastavení liveCompat.
     this.compat = this.deps.settings().liveCompat === true;
     this.compatAuto = false;
+    this.lastSignalLine = '';
     // Nové vysílání: karta minulého záznamu zmizí (nezveřejněný záznam zůstává 30 dní ve studiu na Kine).
     this.set({ ...IDLE, state: 'starting', title, scene: this.scene, compat: this.compat });
     try {
@@ -697,7 +700,20 @@ export class LiveController {
       if (action !== 'stopped' && this.wanted && result.recordingUid) this.recordingUid = result.recordingUid;
       if (action !== 'stopped' && this.wanted && this.status.state === 'live') {
         const viewers = typeof result.viewers === 'number' ? result.viewers : null;
-        if (this.status.confirmed !== result.confirmed || this.status.viewers !== viewers) this.set({ confirmed: result.confirmed, viewers });
+        // Je přenos na Kine živě? (starší Kine to neposílá - pak podle potvrzení)
+        const onKine = typeof result.live === 'boolean' ? result.live : result.confirmed ? true : this.status.onKine ?? null;
+        if (this.status.confirmed !== result.confirmed || this.status.viewers !== viewers || this.status.onKine !== onKine) {
+          this.set({ confirmed: result.confirmed, viewers, onKine });
+        }
+        // Do deníku, jen když se něco změní (Nastavení -> O appce -> diagnostika): co Kine a Cloudflare
+        // o přenosu říkají - bez toho se "diváci tě vidí, na Kine nikdo nevysílá" nedalo dohledat.
+        const yn = (v: boolean | null | undefined) => (v === true ? 'ano' : v === false ? 'ne' : '?');
+        const cf = result.cloudflare;
+        const line = `Kine živě ${yn(result.live)}, potvrzeno ${yn(result.confirmed)}${cf ? `; Cloudflare: lifecycle ${yn(cf.lifecycle)}, běžící záznam ${yn(cf.listed)}, HLS ${yn(cf.hls)}` : ''}`;
+        if (line !== this.lastSignalLine) {
+          this.lastSignalLine = line;
+          this.deps.log(`vysílání (${action}): ${line}`);
+        }
       }
       return result;
     } catch (e) {

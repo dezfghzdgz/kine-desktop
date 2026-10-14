@@ -850,4 +850,7 @@ export const cs: Record<Key, string> = {
   liveEndedDiscarding: 'Mažu záznam… (Cloudflare ho chvíli po konci uzavírá)',
   comingSoon: 'Připravujeme',
   comingSoonPlusHint: 'Kine Plus připravujeme - placení na Kine zatím neběží.',
+  liveOnKineOk: 'Na Kine jsi živě.',
+  liveOnKinePending: 'Na Kine jsi živě - Cloudflare přenos ještě potvrzuje.',
+  liveOnKineNo: 'Kine tě teď neukazuje (Cloudflare přenos nepotvrdil) - appka to zkouší dál.',
 };

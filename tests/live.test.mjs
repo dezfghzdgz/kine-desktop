@@ -546,3 +546,31 @@ test('náhled přenosu: ořez na 16:9 jako object-fit: cover a jen rozumný JPEG
   big.set([0xff, 0xd8, 0xff]);
   assert.equal(looksLikeLiveThumbnail(big), false);
 });
+
+test('vysílání: appka ví, jestli je přenos na Kine živě, a co o vstupu řekl Cloudflare zapíše do deníku', async () => {
+  const logs = [];
+  let reply = { confirmed: false, viewers: null, recording: null, recordingUid: null, live: false, cloudflare: { lifecycle: null, listed: false, hls: true } };
+  const api = { liveSignal: async () => reply };
+  const { live } = makeController(api, { testUrl: undefined, log: (m) => logs.push(m) });
+  // Jako by vysílání běželo (bez spouštění ffmpeg - jen odpověď Kine na "pořád vysílám").
+  live.wanted = true;
+  live.set({ state: 'live', since: Date.now() - 60000 });
+  await live.signal('ping');
+  assert.equal(live.current().onKine, false);
+  assert.equal(live.current().confirmed, false);
+  assert.equal(logs.filter((l) => l.includes('Kine živě ne') && l.includes('HLS ano')).length, 1, logs.join('\n'));
+  // stejná odpověď znovu: do deníku nic nového
+  await live.signal('ping');
+  assert.equal(logs.filter((l) => l.startsWith('vysílání (ping)')).length, 1);
+  // Kine přenos potvrdila
+  reply = { ...reply, confirmed: true, live: true, recordingUid: 'abc123def', cloudflare: { lifecycle: true, listed: true, hls: null } };
+  await live.signal('ping');
+  assert.equal(live.current().onKine, true);
+  assert.equal(live.current().confirmed, true);
+  assert.ok(logs.some((l) => l.includes('Kine živě ano, potvrzeno ano; Cloudflare: lifecycle ano, běžící záznam ano, HLS ?')), logs.join('\n'));
+  // starší Kine (bez "live"): podle potvrzení
+  reply = { confirmed: true, viewers: 3, recording: null, recordingUid: null };
+  await live.signal('ping');
+  assert.equal(live.current().onKine, true);
+  assert.equal(live.current().viewers, 3);
+});

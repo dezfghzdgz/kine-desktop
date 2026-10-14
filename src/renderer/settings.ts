@@ -1,5 +1,5 @@
 import type { KineBridge } from '../preload/preload';
-import type { AppNotice, AudioDevice, AudioLevels, Clip, DisplayInfo, GameSource, GlassBackdrop, Lang, LiveAfterStream, LiveEnded, LiveQuality, ProcessInfo, ResourceUsage, Settings, Status, UploadRequest, Visibility } from '../shared/types';
+import type { AppNotice, AudioDevice, AudioLevels, Clip, DisplayInfo, GameSource, GlassBackdrop, Lang, LiveAfterStream, LiveEnded, LiveQuality, LiveStatus, ProcessInfo, ResourceUsage, Settings, Status, UploadRequest, Visibility } from '../shared/types';
 import { CATEGORY_KEYS, GLASS_BACKDROPS, LANGS, LOOK_CORNERS, LOOK_SIZES, STORAGE_LIMITS_GB, TRASH_DAYS, VISIBILITIES } from '../shared/types';
 import { LANG_NAMES, makeT, type Key } from '../shared/i18n';
 import { HotkeyRecorder, formatHotkey, hotkeyLabel } from '../shared/hotkeys';
@@ -681,6 +681,39 @@ function lowLoadActive(): boolean {
 
 function maxClip(): number {
   return status.account ? maxClipSecondsFor(status.account) : 60;
+}
+
+/** Řádek "na Kine jsi živě / Kine tě neukazuje" v záložce Live (novější Kine posílá onKine, starší jen potvrzení). */
+function kineLine(live: LiveStatus): HTMLElement | null {
+  const compatPill = () =>
+    live.compat && !(live.health && live.health !== 'unknown') ? h('span', { class: 'plan-pill live-compat-pill', title: t('liveCompatHint') }, t('liveCompatOn')) : null;
+  if (live.onKine === true) {
+    return h(
+      'p',
+      { class: `live-on-kine ${live.confirmed ? 'ok' : 'hint'}`, style: 'margin:0' },
+      live.confirmed ? icon('check', 14) : icon('timer', 14),
+      ' ',
+      live.confirmed ? t('liveOnKineOk') : t('liveOnKinePending'),
+      compatPill()
+    );
+  }
+  if (live.onKine === false) {
+    return h('p', { class: 'live-on-kine hint warn', style: 'margin:0' }, icon('warning', 14), ' ', t('liveOnKineNo'), compatPill());
+  }
+  if (live.confirmed === null) return null;
+  return h(
+    'p',
+    { class: live.confirmed ? 'ok' : 'hint warn', style: 'margin:0' },
+    live.confirmed ? icon('check', 14) : icon('timer', 14),
+    ' ',
+    live.confirmed
+      ? t('liveConfirmedOk')
+      : // Kine nepotvrzený přenos po 3 minutách z "Živě" stáhne - po 90 s je čas to říct naplno.
+        live.since !== null && Date.now() - live.since > 90_000
+        ? t('liveConfirmedLong')
+        : t('liveConfirmedWait'),
+    compatPill()
+  );
 }
 
 function plusLink(label?: string) {
@@ -1451,21 +1484,10 @@ function renderLive() {
             live.health === 'ok' ? t('liveHealthOk') : live.health === 'stalled' ? t('liveHealthStalled') : t('liveHealthChecking'),
             live.compat ? h('span', { class: 'plan-pill live-compat-pill', title: t('liveCompatHint') }, t('liveCompatOn')) : null
           )
-        : live.state === 'live' && live.confirmed !== null
-          ? h(
-              'p',
-              { class: live.confirmed ? 'ok' : 'hint warn', style: 'margin:0' },
-              live.confirmed ? icon('check', 14) : icon('timer', 14),
-              ' ',
-              live.confirmed
-                ? t('liveConfirmedOk')
-                : // Kine nepotvrzený přenos po 3 minutách z "Živě" stáhne - po 90 s je čas to říct naplno.
-                  live.since !== null && Date.now() - live.since > 90_000
-                  ? t('liveConfirmedLong')
-                  : t('liveConfirmedWait'),
-              live.compat ? h('span', { class: 'plan-pill live-compat-pill', title: t('liveCompatHint') }, t('liveCompatOn')) : null
-            )
-          : null,
+        : null,
+      // Je přenos na Kine živě (Živě, stránka přenosu)? Zvlášť od "diváci tě vidí" - dřív appka
+      // hlásila jen to první a na Kine přitom "nikdo nevysílá".
+      live.state === 'live' ? kineLine(live) : null,
       live.cameraError ? h('p', { class: 'hint warn', style: 'margin:0' }, icon('camera', 14), ' ', cameraErrorMessage(live.cameraError)) : null
     );
   }

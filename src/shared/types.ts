@@ -621,7 +621,15 @@ export type LiveStatus = {
   health?: 'checking' | 'ok' | 'stalled' | 'unknown' | null;
   /** Kompatibilní režim: ffmpeg obraz kóduje znovu (zapne se sám, když diváci viděli zamrzlý obraz). */
   compat?: boolean;
+  /**
+   * Je přenos teď na Kine živě (řada Živě, stránka přenosu)? null = neví se (starší Kine,
+   * ještě se neozvala). Dřív appka hlásila "diváci tě vidí" a na Kine přitom "nikdo nevysílá".
+   */
+  onKine?: boolean | null;
 };
+
+/** Co o vstupu naposledy řekl Cloudflare serveru Kine (do deníku appky - diagnostika). */
+export type LiveCloudflareSeen = { lifecycle: boolean | null; listed: boolean; hls: boolean | null };
 
 /**
  * Skončené vysílání a jeho záznam. Cloudflare každé vysílání nahrává samo;

@@ -850,4 +850,7 @@ export const uk: Record<Key, string> = {
   liveEndedDiscarding: 'Видаляю запис… (Cloudflare завершує його невдовзі після кінця)',
   comingSoon: 'Готуємо',
   comingSoonPlusHint: 'Kine Plus готуємо - платежі на Kine ще не працюють.',
+  liveOnKineOk: 'Ти в ефірі на Kine.',
+  liveOnKinePending: 'Ти в ефірі на Kine - Cloudflare ще підтверджує трансляцію.',
+  liveOnKineNo: 'Kine зараз тебе не показує (Cloudflare не підтвердив трансляцію) - застосунок пробує далі.',
 };

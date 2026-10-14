@@ -850,4 +850,7 @@ export const pl: Record<Key, string> = {
   liveEndedDiscarding: 'Usuwam nagranie… (Cloudflare chwilę po końcu je zamyka)',
   comingSoon: 'Wkrótce',
   comingSoonPlusHint: 'Kine Plus jest w przygotowaniu - płatności na Kine jeszcze nie działają.',
+  liveOnKineOk: 'Jesteś na żywo na Kine.',
+  liveOnKinePending: 'Jesteś na żywo na Kine - Cloudflare jeszcze potwierdza transmisję.',
+  liveOnKineNo: 'Kine teraz cię nie pokazuje (Cloudflare nie potwierdził transmisji) - aplikacja próbuje dalej.',
 };

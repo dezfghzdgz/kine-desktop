@@ -1062,6 +1062,7 @@ export async function runTestDriver(kine: {
         let endedCard = false;
         let endedPublished = false;
         let endedClosed = false;
+        let onKineLine = false;
         // Kamera (falešná kamera Chromia při KINE_TEST_FAKE_AUDIO) vpravo dole, velká, obdélník.
         const withCamera = !!process.env.KINE_TEST_FAKE_AUDIO;
         kine.settings.update({ liveCamera: withCamera, liveCameraPosition: 'bottom-right', liveCameraSize: 'large', liveCameraShape: 'rect', liveCameraMirror: false, liveBrbText: 'E2E BRB' });
@@ -1085,6 +1086,26 @@ export async function runTestDriver(kine: {
           await sleep(4000);
           sideLive = await liveWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-live.on .live-time'); return b ? b.textContent : null; })()`);
           await shot(liveWin, 'settings-live');
+          // Řádek "na Kine jsi živě / Kine tě neukazuje" vedle "diváci tě vidí" (0.10.6) - dřív appka
+          // hlásila jen to druhé a na Kine přitom "nikdo nevysílá". Test vysílá na místní RTMP bez
+          // playlistu HLS, takže hlídání "diváci tě vidí" by stav hned přepsalo na "nejde ověřit" -
+          // na dobu kontroly se vypne (metoda na instanci zakryje tu ze třídy, delete ji vrátí).
+          const liveCtl = (kine as any).live;
+          liveCtl.startHealth = () => {};
+          try {
+            liveCtl.set({ health: 'ok', onKine: false, confirmed: false });
+            await sleep(400);
+            const onKineNo = await liveWin.webContents.executeJavaScript(`!!document.querySelector('.live-health.ok') && !!document.querySelector('.live-on-kine.warn')`);
+            await shot(liveWin, 'settings-live-onkine-no');
+            liveCtl.set({ onKine: true, confirmed: true });
+            await sleep(400);
+            const onKineOk = await liveWin.webContents.executeJavaScript(`!!document.querySelector('.live-health.ok') && !!document.querySelector('.live-on-kine.ok') && !document.querySelector('.live-on-kine.warn')`);
+            await shot(liveWin, 'settings-live-onkine-ok');
+            onKineLine = onKineNo && onKineOk;
+          } finally {
+            delete liveCtl.startHealth;
+            liveCtl.set({ onKine: null, confirmed: null });
+          }
           clipDuringLive = !!(await (kine as any).onClipHotkey());
           await sleep(1500);
           // "Hned jsem zpět": hra i kamera pryč, jen tmavá obrazovka s textem; pak zpět. Mikrofon ve vysílání ztlumit.
@@ -1193,13 +1214,13 @@ export async function runTestDriver(kine: {
           if (added) (kine as any).library.purge(added.id);
         }
         result.live = {
-          opened, liveState, sideLive, clipDuringLive, titleKept, brbOn, brbOff, micMuted, stoppingUi, withCamera, endedCard, endedPublished, endedClosed, endedExtras, recordingSaved,
+          opened, liveState, sideLive, clipDuringLive, titleKept, brbOn, brbOff, micMuted, stoppingUi, withCamera, endedCard, endedPublished, endedClosed, endedExtras, recordingSaved, onKineLine,
           frames: frames.length, brbFrames: brbFrames.length, camFrames: camFrames.length, cameraError: (kine as any).live.current().cameraError,
           after: (kine as any).live.current().state, info, listenerLog: listenerLog.slice(-300),
         };
         result.liveOk =
           opened && liveState === 'live' && !!sideLive && clipDuringLive && titleKept && brbOn && brbOff && micMuted && stoppingUi && (kine as any).live.current().state === 'idle' &&
-          endedCard && endedPublished && endedClosed && endedExtras &&
+          endedCard && endedPublished && endedClosed && endedExtras && onKineLine &&
           !!info && (info.durationSeconds ?? 0) >= 8 && (info.height ?? 0) > 0 && (info.height ?? 0) <= 720 && info.hasAudio &&
           brbFrames.length >= 2 && (!withCamera || camFrames.length >= 2);
         kine.settings.update({ liveCamera: false });

@@ -850,4 +850,7 @@ export const sk: Record<Key, string> = {
   liveEndedDiscarding: 'Mažem záznam… (Cloudflare ho chvíľu po konci uzatvára)',
   comingSoon: 'Pripravujeme',
   comingSoonPlusHint: 'Kine Plus pripravujeme - platby na Kine zatiaľ nefungujú.',
+  liveOnKineOk: 'Na Kine si naživo.',
+  liveOnKinePending: 'Na Kine si naživo - Cloudflare prenos ešte potvrdzuje.',
+  liveOnKineNo: 'Kine ťa teraz neukazuje (Cloudflare prenos nepotvrdil) - appka to skúša ďalej.',
 };

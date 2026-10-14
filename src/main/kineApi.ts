@@ -1,4 +1,4 @@
-import type { Visibility } from '../shared/types';
+import type { LiveCloudflareSeen, Visibility } from '../shared/types';
 
 /**
  * Volání na Kine (stejné cesty, jaké používá webová appka při nahrávání).
@@ -95,7 +95,16 @@ export type KineApi = {
    * toho ukáže vysílání jako živé hned, ne až když ho najde u Cloudflare.
    * `confirmed`: Cloudflare proud opravdu přijímá.
    */
-  liveSignal(action: 'started' | 'ping' | 'stopped'): Promise<{ confirmed: boolean; viewers: number | null; recording: { videoId: string; status: 'ready' | 'processing' } | null; recordingUid?: string | null }>;
+  liveSignal(action: 'started' | 'ping' | 'stopped'): Promise<{
+    confirmed: boolean;
+    viewers: number | null;
+    recording: { videoId: string; status: 'ready' | 'processing' } | null;
+    recordingUid?: string | null;
+    /** Je přenos na Kine živě (novější Kine; starší null). */
+    live?: boolean | null;
+    /** Co o vstupu řekl Cloudflare (novější Kine) - do deníku. */
+    cloudflare?: LiveCloudflareSeen | null;
+  }>;
   /**
    * Záznam vysílání ke stažení do PC: Kine ho nechá u Cloudflare vyrobit jako
    * MP4 - "inprogress" = zeptat se znovu za chvíli. videoUid "latest" = poslední.
@@ -234,7 +243,12 @@ export function createKineApi(deps: {
       const recording = r && typeof r.videoId === 'string' ? { videoId: r.videoId as string, status: r.status === 'ready' ? ('ready' as const) : ('processing' as const) } : null;
       // Po "stopped": id záznamu právě skončeného vysílání (novější Kine) - Stáhnout / Zahodit míří na něj.
       const recordingUid = typeof data?.recordingUid === 'string' && /^[a-z0-9]{6,64}$/i.test(data.recordingUid) ? (data.recordingUid as string) : null;
-      return { confirmed: data?.confirmed === true, viewers, recording, recordingUid };
+      // Novější Kine: je přenos na Kine živě a co o vstupu říká Cloudflare (starší nic - null).
+      const live = typeof data?.live === 'boolean' ? (data.live as boolean) : null;
+      const c = data?.cloudflare;
+      const tri = (v: unknown): boolean | null => (typeof v === 'boolean' ? v : null);
+      const cloudflare: LiveCloudflareSeen | null = c && typeof c === 'object' ? { lifecycle: tri(c.lifecycle), listed: c.listed === true, hls: tri(c.hls) } : null;
+      return { confirmed: data?.confirmed === true, viewers, recording, recordingUid, live, cloudflare };
     },
     async liveDetails(details) {
       await post('/api/live/me', { action: 'details', title: details.title.slice(0, 100), description: details.description.slice(0, 2000), category: details.category });

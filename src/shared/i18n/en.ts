@@ -865,6 +865,9 @@ export const en = {
   liveEndedDiscarding: 'Deleting the recording… (Cloudflare finishes it a moment after the stream)',
   comingSoon: 'Coming soon',
   comingSoonPlusHint: 'Kine Plus is coming soon - payments on Kine aren\'t running yet.',
+  liveOnKineOk: 'You\'re live on Kine.',
+  liveOnKinePending: 'You\'re live on Kine - Cloudflare is still confirming the stream.',
+  liveOnKineNo: 'Kine isn\'t showing you right now (Cloudflare hasn\'t confirmed the stream) - the app keeps trying.',
 } as const;
 
 export type Key = keyof typeof en;

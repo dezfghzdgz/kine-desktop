@@ -815,3 +815,18 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   `tests/uploader.test.mjs` (co appka posílá při Zahodit), e2e: vysílání
   v kompatibilním režimu na místní RTMP server (klíčové snímky přesně po 2 s,
   30 snímků za sekundu, zvuk).
+
+## Novinky 0.10.6
+
+- **Na Kine živě?** (`live.ts`, `kineApi.ts`, `settings.ts`): Kine teď v odpovědi
+  na „začal jsem / pořád vysílám" posílá, jestli je přenos na Kine opravdu
+  živě (`live`) a co o vstupu řekl Cloudflare (`cloudflare`: lifecycle, běžící
+  záznam vstupu, HLS). Záložka Live ukazuje dva řádky: „Diváci tě vidí"
+  (appka si sama čte HLS) a „Na Kine jsi živě" / „Kine tě teď neukazuje" -
+  dřív bylo vidět jen to první a na webu přitom „nikdo nevysílá". Změny se
+  zapisují do deníku (O appce -> Kopírovat diagnostiku).
+- Server Kine (stejné kolo) přenos potvrzuje i podle seznamu videí vstupu
+  a HLS vstupu, a „pořád vysílám" vrátí přenos, který Kine stáhla, jakmile
+  ho Cloudflare vidí.
+- Testy: `tests/live.test.mjs` (stav „na Kine", zápis do deníku jen při
+  změně, starší Kine bez `live`), e2e: oba řádky v záložce Live.

@@ -33,9 +33,14 @@ declare const window: Window & { kine: KineBridge };
 const kine = window.kine;
 const app = document.getElementById('app') as HTMLDivElement;
 
-type Tab = 'kine' | 'clips' | 'live' | 'settings' | 'games' | 'upload' | 'account' | 'about';
-const TABS: Tab[] = ['kine', 'clips', 'live', 'settings', 'games', 'upload', 'account', 'about'];
-const TAB_KEYS: Record<Tab, Key> = { kine: 'tabKine', clips: 'tabClips', live: 'tabLive', settings: 'tabSettings', games: 'tabGames', upload: 'tabUpload', account: 'tabAccount', about: 'tabAbout' };
+/**
+ * Záložky postranního panelu. "settings" = Záznam (zkratky, kvalita, zvuk, výkon, úložiště),
+ * "app" = Appka (vzhled, obecné, o appce) - dřív byl vzhled a obecné mezi nastavením záznamu,
+ * kam nepatří. Staré cíle ("about", "settings:look", "settings:general") vedou sem (resolveTarget).
+ */
+type Tab = 'kine' | 'clips' | 'live' | 'settings' | 'games' | 'upload' | 'account' | 'app';
+const TABS: Tab[] = ['kine', 'clips', 'live', 'settings', 'games', 'upload', 'account', 'app'];
+const TAB_KEYS: Record<Tab, Key> = { kine: 'tabKine', clips: 'tabClips', live: 'tabLive', settings: 'tabSettings', games: 'tabGames', upload: 'tabUpload', account: 'tabAccount', app: 'tabApp' };
 /** Barvy jako na webu (components/BrandLogo.tsx). */
 const PRESET_COLORS = ['#00c9a7', '#4f8ef7', '#f7484f', '#f7b84f', '#a34ff7', '#f74fd6', '#4ff77c', '#ffffff'];
 
@@ -114,10 +119,10 @@ async function init() {
   currentGame = await kine.currentGame();
   const wanted = params.get('tab');
   if (!settings.onboarded || wanted === 'wizard') wizardStep = 0;
-  else if (wanted && visibleTabs().includes(wanted.split(':')[0] as Tab)) {
-    tab = wanted.split(':')[0] as Tab;
-    const section = wanted.split(':')[1];
-    if (tab === 'settings' && isSection(section)) setSection(section);
+  else if (wanted && resolveTarget(wanted)) {
+    const target = resolveTarget(wanted)!;
+    tab = target.tab;
+    applySection(target);
   }
   else if (settings.appMode === 'full') tab = 'kine';
   document.documentElement.lang = settings.lang;
@@ -779,7 +784,7 @@ const TAB_ICONS: Record<Tab, string> = {
   games: '<path d="M7 8h10a4.5 4.5 0 0 1 4.5 4.5V15a2.6 2.6 0 0 1-4.7 1.5L15.4 14.5H8.6L7.2 16.5A2.6 2.6 0 0 1 2.5 15v-2.5A4.5 4.5 0 0 1 7 8z"/><path d="M8 10.5v3M6.5 12h3"/><circle cx="15.5" cy="11.2" r=".9" fill="currentColor" stroke="none"/><circle cx="17.5" cy="13" r=".9" fill="currentColor" stroke="none"/>',
   upload: '<path d="M12 15V5M8 9l4-4 4 4"/><path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15"/>',
   account: '<circle cx="12" cy="8" r="4"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/>',
-  about: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.8h.01"/>',
+  app: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/>',
 };
 
 function tabIcon(name: Tab): Element {
@@ -1748,9 +1753,9 @@ function renderSide() {
       status.batterySaverActive ? h('div', { class: 'side-sub side-line', title: t('batterySaverHint') }, icon('battery', 14), t('sideBatterySaver')) : null,
       // Aktualizace: stahuje se (procenta) / stažená - klik vede do O appce (tam je "Aktualizovat teď").
       status.update?.phase === 'downloading'
-        ? h('button', { class: 'side-sub side-update side-line', onclick: () => { tab = 'about'; render(); } }, icon('download', 14), t('sideUpdateDownloading', { percent: status.update.percent ?? 0 }))
+        ? h('button', { class: 'side-sub side-update side-line', onclick: () => void navigateTo('app:about') }, icon('download', 14), t('sideUpdateDownloading', { percent: status.update.percent ?? 0 }))
         : status.update?.phase === 'ready'
-          ? h('button', { class: 'side-sub side-update side-line ready', onclick: () => { tab = 'about'; render(); } }, icon('refresh', 14), t('sideUpdateReady', { version: status.update.version ?? '' }))
+          ? h('button', { class: 'side-sub side-update side-line ready', onclick: () => void navigateTo('app:about') }, icon('refresh', 14), t('sideUpdateReady', { version: status.update.version ?? '' }))
           : null,
       // Upozornění, která appka neukázala okénkem (zkratka nejde, mikrofon…) - klik vede tam, kde se to řeší.
       ...status.notices.map((n) => noticeRow(n)),
@@ -1876,8 +1881,8 @@ function renderTab() {
       return renderUpload();
     case 'account':
       return renderAccount();
-    case 'about':
-      return renderAbout();
+    case 'app':
+      return renderApp();
   }
 }
 
@@ -2032,34 +2037,48 @@ function variantPanel() {
 // ---- nastavení po oddílech -------------------------------------------------------------
 
 /**
- * Nastavení (záložka Záznam) po oddílech: nahoře řada ikon (zkratky,
- * kvalita, zvuk, výkon, úložiště, vzhled, obecné), pod ní jen ten jeden
- * oddíl - žádná dlouhá stěna textu. Vysvětlení jsou pod otazníčky.
+ * Nastavení po oddílech: nahoře řada ikon, pod ní jen ten jeden oddíl - žádná
+ * dlouhá stěna textu. Vysvětlení jsou pod otazníčky. Dvě záložky:
+ *  - Záznam (settings): zkratky, kvalita, zvuk, výkon, úložiště - jak se nahrává,
+ *  - Appka (app): vzhled, obecné (jazyk, start s Windows, oznámení…), o appce.
+ * Dřív byl vzhled a obecné mezi nastavením záznamu - nedávalo to smysl.
  */
-type SettingsSection = 'hotkeys' | 'quality' | 'audio' | 'performance' | 'storage' | 'look' | 'general';
+type SettingsSection = 'hotkeys' | 'quality' | 'audio' | 'performance' | 'storage';
+type AppSection = 'look' | 'general' | 'about';
 const SETTINGS_SECTIONS: { id: SettingsSection; icon: IconName; key: Key }[] = [
   { id: 'hotkeys', icon: 'keyboard', key: 'hotkeysTitle' },
   { id: 'quality', icon: 'quality', key: 'qualityTitle' },
   { id: 'audio', icon: 'volume', key: 'audioTitle' },
   { id: 'performance', icon: 'gauge', key: 'secPerformance' },
   { id: 'storage', icon: 'drive', key: 'secStorage' },
+];
+const APP_SECTIONS: { id: AppSection; icon: IconName; key: Key }[] = [
   { id: 'look', icon: 'palette', key: 'lookTitle' },
   { id: 'general', icon: 'sliders', key: 'generalTitle' },
+  { id: 'about', icon: 'info', key: 'tabAbout' },
 ];
 const SECTION_STORE = 'kine-settings-section';
+const APP_SECTION_STORE = 'kine-app-section';
 
 function isSection(value: unknown): value is SettingsSection {
   return SETTINGS_SECTIONS.some((x) => x.id === value);
 }
 
-let settingsSection: SettingsSection = (() => {
+function isAppSection(value: unknown): value is AppSection {
+  return APP_SECTIONS.some((x) => x.id === value);
+}
+
+function loadSection<T extends string>(store: string, valid: (v: unknown) => v is T, fallback: T): T {
   try {
-    const saved = localStorage.getItem(SECTION_STORE);
-    return isSection(saved) ? saved : 'hotkeys';
+    const saved = localStorage.getItem(store);
+    return valid(saved) ? saved : fallback;
   } catch {
-    return 'hotkeys';
+    return fallback;
   }
-})();
+}
+
+let settingsSection: SettingsSection = loadSection(SECTION_STORE, isSection, 'hotkeys');
+let appSection: AppSection = loadSection(APP_SECTION_STORE, isAppSection, 'look');
 
 function setSection(id: SettingsSection) {
   settingsSection = id;
@@ -2070,42 +2089,76 @@ function setSection(id: SettingsSection) {
   }
 }
 
-/** "settings:audio" -> záložka Nastavení, oddíl Zvuk; "clips" -> záložka. Vrací, jestli to vyšlo. */
+function setAppSection(id: AppSection) {
+  appSection = id;
+  try {
+    localStorage.setItem(APP_SECTION_STORE, id);
+  } catch {
+    // nevadí - příště se otevře první oddíl
+  }
+}
+
+/**
+ * Cíl navigace ("settings:audio", "app:look", "clips"...) -> záložka a oddíl. Staré cíle
+ * z dřívějších verzí (hlavní proces, upozornění, odkazy kine://) vedou na nové místo:
+ * "about" -> Appka / O appce, "settings:look" a "settings:general" -> Appka.
+ */
+function resolveTarget(target: string): { tab: Tab; section: string | null } | null {
+  let [name, section] = target.split(':') as [string, string | undefined];
+  if (name === 'about') {
+    name = 'app';
+    section = 'about';
+  }
+  if (name === 'settings' && (section === 'look' || section === 'general')) name = 'app';
+  if (!visibleTabs().includes(name as Tab)) return null;
+  return { tab: name as Tab, section: section ?? null };
+}
+
+function applySection(target: { tab: Tab; section: string | null }) {
+  if (target.tab === 'settings' && isSection(target.section)) setSection(target.section);
+  if (target.tab === 'app' && isAppSection(target.section)) setAppSection(target.section);
+}
+
+/** "settings:audio" -> záložka Záznam, oddíl Zvuk; "app:about" -> Appka, O appce; "clips" -> záložka. Vrací, jestli to vyšlo. */
 function navigateTo(target: string): boolean {
-  const [name, section] = target.split(':');
-  if (!visibleTabs().includes(name as Tab)) return false;
-  tab = name as Tab;
-  if (name === 'settings' && isSection(section)) setSection(section);
+  const resolved = resolveTarget(target);
+  if (!resolved) return false;
+  tab = resolved.tab;
+  applySection(resolved);
   wizardStep = null;
   render();
-  if (section) {
+  if (resolved.section) {
     const main = app.querySelector('.main');
     if (main) main.scrollTop = 0;
   }
   return true;
 }
 
-/** Upozornění, které se týká oddílu (zkratka nejde, zvuk je ticho…) - tečka na jeho ikoně. */
-function sectionWarn(id: SettingsSection): boolean {
-  if (status.notices.some((n) => n.kind !== 'info' && n.tab === `settings:${id}`)) return true;
-  if (id === 'audio') return status.capture === 'on' && !!audioLevels && audioLevels.system !== null && audioLevels.systemSilentSeconds >= 10;
+/** Upozornění, které se týká oddílu (zkratka nejde, zvuk je ticho, aktualizace…) - tečka na jeho ikoně. */
+function sectionWarn(kind: 'settings' | 'app', id: string): boolean {
+  const here = (n: AppNotice) => n.kind !== 'info' && !!n.tab && (n.tab === `${kind}:${id}` || (kind === 'app' && id === 'about' && n.tab === 'about'));
+  if (status.notices.some(here)) return true;
+  if (kind === 'settings' && id === 'audio') return status.capture === 'on' && !!audioLevels && audioLevels.system !== null && audioLevels.systemSilentSeconds >= 10;
   return false;
 }
 
-function sectionNav() {
+function sectionNav(kind: 'settings' | 'app') {
+  const list: { id: string; icon: IconName; key: Key }[] = kind === 'settings' ? SETTINGS_SECTIONS : APP_SECTIONS;
+  const active = kind === 'settings' ? settingsSection : appSection;
   return h(
     'div',
-    { class: 'section-nav', role: 'tablist', 'aria-label': t('tabSettings') },
-    ...SETTINGS_SECTIONS.map((x) =>
+    { class: 'section-nav', role: 'tablist', 'aria-label': t(kind === 'settings' ? 'tabSettings' : 'tabApp') },
+    ...list.map((x) =>
       h(
         'button',
         {
-          class: `section-chip ${settingsSection === x.id ? 'active' : ''}`,
+          class: `section-chip ${active === x.id ? 'active' : ''}`,
           role: 'tab',
-          'aria-selected': String(settingsSection === x.id),
+          'aria-selected': String(active === x.id),
           'data-section': x.id,
           onclick: () => {
-            setSection(x.id);
+            if (kind === 'settings' && isSection(x.id)) setSection(x.id);
+            if (kind === 'app' && isAppSection(x.id)) setAppSection(x.id);
             render();
             const main = app.querySelector('.main');
             if (main) main.scrollTop = 0;
@@ -2113,12 +2166,13 @@ function sectionNav() {
         },
         icon(x.icon, 20),
         h('span', { class: 'section-label' }, t(x.key)),
-        sectionWarn(x.id) ? h('span', { class: 'section-warn', 'aria-hidden': 'true' }) : null
+        sectionWarn(kind, x.id) ? h('span', { class: 'section-warn', 'aria-hidden': 'true' }) : null
       )
     )
   );
 }
 
+/** Záložka Záznam: jak se nahrává (zkratky, kvalita, zvuk, výkon, úložiště). */
 function renderSettings() {
   const win = kine.platform === 'win32';
   let body: (HTMLElement | null)[];
@@ -2135,16 +2189,27 @@ function renderSettings() {
     case 'performance':
       body = [performancePanel()];
       break;
-    case 'storage':
+    default:
       body = [storagePanel()];
-      break;
+  }
+  return h('div', { class: 'stack settings-page' }, h('h1', {}, t('settingsTitle')), sectionNav('settings'), ...body);
+}
+
+/** Záložka Appka: vzhled, obecné (jazyk, start s Windows, oznámení, co po spuštění), o appce (verze, aktualizace, diagnostika). */
+function renderApp() {
+  const win = kine.platform === 'win32';
+  let body: (HTMLElement | null)[];
+  switch (appSection) {
     case 'look':
       body = [appearancePanel()];
       break;
-    default:
+    case 'general':
       body = [generalPanel(win), variantPanel()];
+      break;
+    default:
+      body = [renderAbout(true)];
   }
-  return h('div', { class: 'stack settings-page' }, h('h1', {}, t('settingsTitle')), sectionNav(), ...body);
+  return h('div', { class: 'stack settings-page app-page' }, h('h1', {}, t('tabApp')), sectionNav('app'), ...body);
 }
 
 /** Zkratky a délka klipu. */
@@ -4300,7 +4365,8 @@ function updateStatus(r: NonNullable<typeof updateResult>) {
 /** Kdy se naposledy zkopírovala diagnostika (hláška "Zkopírováno" na pár sekund). */
 let diagnosticsCopiedAt = 0;
 
-function renderAbout() {
+/** O appce (verze, aktualizace, diagnostika) - oddíl záložky Appka; `embedded` = pod jejím nadpisem (název appky jen jako podnadpis). */
+function renderAbout(embedded = false) {
   const copied = Date.now() - diagnosticsCopiedAt < 5000;
   const progressBox = updateProgressBox();
   // Průběh stahování nahrazuje hlášku "verze X je venku" z ručního zkontrolování (jinak by tam byly dvě).
@@ -4308,7 +4374,7 @@ function renderAbout() {
   return h(
     'div',
     { class: 'stack' },
-    h('h1', {}, status.variant === 'clipper' ? t('variantClipperName') : t('aboutTitle')),
+    h(embedded ? 'h2' : 'h1', embedded ? { class: 'about-name' } : {}, status.variant === 'clipper' ? t('variantClipperName') : t('aboutTitle')),
     updateIssueBox(),
     h(
       'div',
@@ -4358,7 +4424,7 @@ function renderAbout() {
                 diagnosticsCopiedAt = Date.now();
                 render();
                 setTimeout(() => {
-                  if (tab === 'about') render();
+                  if (tab === 'app' && appSection === 'about') render();
                 }, 5200);
               }),
           },

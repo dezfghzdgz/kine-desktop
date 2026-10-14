@@ -859,4 +859,9 @@ export const es: Record<Key, string> = {
   playerMicAudioHint: 'Tu micrófono: haz clic para silenciar / activar (al guardar en Editar se queda lo que oyes)',
   playerSpeed: 'Velocidad de reproducción',
   liveOnKineHidden: 'Kine ha ocultado tu emisión de Directo por ahora (revisión automática de contenido): los demás no la verán hasta que un moderador la apruebe.',
+  playerMute: 'Silenciar',
+  playerUnmute: 'Activar sonido',
+  playerVolume: 'Volumen',
+  playerSeek: 'Posición en el vídeo',
+  tabApp: 'Aplicación',
 };

@@ -859,4 +859,9 @@ export const fr: Record<Key, string> = {
   playerMicAudioHint: 'Ton micro - clique pour couper / remettre (l\'enregistrement dans Modifier garde ce que tu entends)',
   playerSpeed: 'Vitesse de lecture',
   liveOnKineHidden: 'Kine a masqué ton live du Direct pour l\'instant (vérification automatique du contenu) - les autres ne le verront pas tant qu\'un modérateur ne l\'aura pas validé.',
+  playerMute: 'Couper le son',
+  playerUnmute: 'Activer le son',
+  playerVolume: 'Volume',
+  playerSeek: 'Position dans la vidéo',
+  tabApp: 'Application',
 };

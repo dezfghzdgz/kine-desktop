@@ -3087,7 +3087,8 @@ class KineApp {
       const parsed = new URL(url);
       const target = (parsed.hostname || parsed.pathname.replace(/^\/+/, '')).toLowerCase();
       const tab = parsed.searchParams.get('tab') ?? (target === 'open' ? 'clips' : target);
-      if (['clips', 'live', 'settings', 'games', 'upload', 'account', 'about'].includes(tab)) this.openSettings(tab);
+      // "about" (O appce) je od 0.10.8 oddíl záložky Appka - okno ho tam přesměruje samo.
+      if (['clips', 'live', 'settings', 'games', 'upload', 'account', 'app', 'about'].includes(tab)) this.openSettings(tab);
       else if (target === 'kine') this.openKine(parsed.searchParams.get('path') ?? '');
     } catch (e) {
       log(`kine:// odkaz: ${(e as Error).message}`);

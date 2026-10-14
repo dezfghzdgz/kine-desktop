@@ -859,4 +859,9 @@ export const cs: Record<Key, string> = {
   playerMicAudioHint: 'Tvůj mikrofon - kliknutím ztlumíš / zapneš (uložení v úpravách vezme, co slyšíš)',
   playerSpeed: 'Rychlost přehrávání',
   liveOnKineHidden: 'Kine tvůj přenos zatím skryla ze Živě (automatická kontrola obsahu) - ostatní ho neuvidí, dokud ho moderátor nepustí.',
+  playerMute: 'Ztlumit',
+  playerUnmute: 'Zapnout zvuk',
+  playerVolume: 'Hlasitost',
+  playerSeek: 'Posun ve videu',
+  tabApp: 'Appka',
 };

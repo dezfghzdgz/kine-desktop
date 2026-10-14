@@ -853,3 +853,27 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   co video opravdu hraje), `playerSpeedOk`, `playerMuteOk` (klip s jednou
   stopou: „Odstranit zvuk" ztlumí náhled, po zavření úprav zase hraje); `tests/live.test.mjs`
   a `tests/uploader.test.mjs` (skrytý přenos).
+
+## Novinky 0.10.8
+
+- **Vlastní ovládání přehrávače** (`renderer/player.ts`): místo vestavěného
+  ovládání Chromia lišta dole přes obraz - posuvník (načtené světleji,
+  momenty nahrávky žlutě, při najetí čas) a pod ním jedna řada: přehrát /
+  pozastavit, hlasitost (posuvník se vysune u reproduktoru), čas, vpravo
+  „Hra" a „Mikrofon" (jen klipy se samostatnými stopami), rychlost a celá
+  obrazovka. Všechno u posuvníku, nic dalšího na ploše videa; stejné i přes
+  celou obrazovku. Pryč je nabídka ⋮ se „zvukovou stopou" (Chromium ji
+  přidávalo ke klipům s víc stopami). Klik do obrazu přehraje / pozastaví,
+  dvojklik dá celou obrazovku. Při přehrávání se lišta po 2,5 s bez pohybu
+  myši schová (i kurzor), při pauze zůstává. Klávesy beze změny (mezerník / K,
+  šipky, M, F, < >).
+- **Nastavení přeuspořádané**: záložka Záznam má jen to, co se týká
+  nahrávání (zkratky, kvalita, zvuk, výkon, úložiště); vzhled, obecné
+  (jazyk, start s Windows, oznámení, co po spuštění) a O appce jsou v nové
+  záložce **Appka** (místo O appce v postranním panelu - počet položek
+  zůstal). Staré cíle (`about`, `settings:look`, `settings:general` -
+  upozornění, odkazy `kine://`) vedou na nové místo (`resolveTarget`).
+- Testy: e2e `playerControlsOk` (žádné vestavěné ovládání, lišta s posuvníkem
+  a jednou řadou tlačítek, přehrát / pozastavit, posun kliknutím, ztlumení),
+  `playerFullscreenOk` přes tlačítko v liště, `settingsSectionsOk` (Záznam
+  pět oddílů, Appka vzhled / obecné / o appce, staré cíle).

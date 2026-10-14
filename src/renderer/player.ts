@@ -279,14 +279,13 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
 
   // ---- prvky ----------------------------------------------------------------------
   // Celou obrazovku nedělá samotné video (to by ukázalo jen obraz), ale celá scéna - se šipkami na další klip.
-  // Ikona celé obrazovky je vpravo dole v ovládání videa (jako u videí na Kine); stahování, rychlost,
-  // obraz v obraze a přenos do TV jsou schované - jinak by v rohu byla nabídka ⋮ místo ikony.
+  // Ovládání videa je vlastní (lišta dole: posuvník a pod ním tlačítka) - vestavěné Chromia mělo u klipů
+  // s víc stopami nabídku ⋮ se "zvukovou stopou" a vlastní tlačítka (zvuk hry, mikrofon, rychlost)
+  // do něj dát nešla, takže visela zvlášť nad ním na obraze.
   const video = h('video', {
     class: 'player-video',
-    controls: true,
     autoplay: true,
     preload: 'auto',
-    controlslist: 'nodownload noplaybackrate noremoteplayback',
     disablepictureinpicture: true,
     disableremoteplayback: true,
   }) as HTMLVideoElement;
@@ -303,8 +302,36 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   // Jak z celé obrazovky ven, když se klip nedá přehrát (není video s vlastní ikonou vpravo dole).
   const fullscreenBtn = h('button', { class: 'stage-fullscreen', title: `${t('playerExitFullscreen')} (F)`, 'aria-label': t('playerExitFullscreen'), onclick: () => toggleFullscreen() }, icon('shrink', 18));
   const stageTop = h('div', { class: 'stage-top' }, stageTitle, stagePos);
-  // Vpravo dole nad ovládáním videa (i přes celou obrazovku): zvuk hry a mikrofon zvlášť (klipy se
-  // samostatnými stopami - dřív šly vypnout jen v úpravách a v náhledu se nic neztlumilo) a rychlost.
+  // Ovládání videa: dole přes obraz posuvník a pod ním jedna řada - přehrát, hlasitost, čas, vpravo
+  // zvuk hry a mikrofon zvlášť (klipy se samostatnými stopami), rychlost a celá obrazovka. Stejné
+  // i přes celou obrazovku; při přehrávání se po chvíli bez pohybu myši schová.
+  const playBtn = h('button', { class: 'pc-btn pc-play', onclick: () => togglePlay() }) as HTMLButtonElement;
+  const muteBtn = h('button', { class: 'pc-btn pc-mute', onclick: () => toggleMute() }) as HTMLButtonElement;
+  const volumeRange = h('input', {
+    type: 'range',
+    class: 'pc-volume',
+    min: '0',
+    max: '1',
+    step: '0.02',
+    'aria-label': t('playerVolume'),
+    title: t('playerVolume'),
+    oninput: (e: Event) => setVolume(Number((e.target as HTMLInputElement).value)),
+  }) as HTMLInputElement;
+  const timeNow = h('span', { class: 'pc-time-now' }, '0:00');
+  const timeAll = h('span', { class: 'pc-time-all' }, '0:00');
+  const seekBuffered = h('div', { class: 'pc-seek-buffered' });
+  const seekPlayed = h('div', { class: 'pc-seek-played' });
+  /** Momenty nahrávky (uložené klipy během hraní) jako značky na posuvníku. */
+  const seekTicks = h('div', { class: 'pc-seek-ticks' });
+  const seekThumb = h('div', { class: 'pc-seek-thumb' });
+  const seekTip = h('div', { class: 'pc-seek-tip hidden' });
+  const seekBar = h(
+    'div',
+    { class: 'pc-seek', role: 'slider', 'aria-label': t('playerSeek'), 'aria-valuemin': '0' },
+    h('div', { class: 'pc-seek-track' }, seekBuffered, seekPlayed, seekTicks, seekThumb),
+    seekTip
+  );
+  const fullBtn = h('button', { class: 'pc-btn pc-full', onclick: () => toggleFullscreen() }) as HTMLButtonElement;
   const gameChip = h(
     'button',
     { class: 'tool-chip tool-game', 'aria-pressed': 'true', title: t('playerGameAudioHint'), onclick: () => toggleTrack('game') },
@@ -331,7 +358,13 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   );
   const rateMenu = h('div', { class: 'tool-rate-menu hidden', role: 'menu', 'aria-label': t('playerSpeed') }, ...rateItems);
   const tools = h('div', { class: 'player-tools' }, gameChip, micChip, h('div', { class: 'tool-rate-wrap' }, rateMenu, rateChip));
-  const stageChrome = [stagePrev, stageNext, stageTop, fullscreenBtn, tools];
+  const controls = h(
+    'div',
+    { class: 'player-controls' },
+    seekBar,
+    h('div', { class: 'pc-row' }, playBtn, h('div', { class: 'pc-vol' }, muteBtn, volumeRange), h('span', { class: 'pc-time' }, timeNow, ' / ', timeAll), h('span', { class: 'pc-spacer' }), tools, fullBtn)
+  );
+  const stageChrome = [stagePrev, stageNext, stageTop, fullscreenBtn, controls];
   const stage = h('div', { class: 'player-stage' }, video, shadeLeft, shadeRight, textLayer, ...stageChrome);
   /** Momenty nahrávky (uložené klipy během hraní) - skok kousek před ně. */
   const markersRow = h('div', { class: 'player-markers hidden' });
@@ -445,18 +478,43 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       onFullscreenChange();
     }
   }
-  // Ovládání v celé obrazovce se po chvíli bez pohybu myši schová (jako v přehrávačích).
+  // Ovládání se při přehrávání po chvíli bez pohybu myši schová (jako v přehrávačích); přes celou
+  // obrazovku i šipky, název a kurzor. Při pauze, s myší na liště a s otevřenou nabídkou zůstává.
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
-  const wake = () => {
-    stage.classList.remove('idle', 'tools-idle');
+  let overControls = false;
+  let seekDragging = false;
+  const hideSoon = (ms = 2500) => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
+      idleTimer = null;
+      if (closed || video.paused || overControls || seekDragging || !rateMenu.classList.contains('hidden')) return;
+      stage.classList.add('controls-idle');
       if (isFull()) stage.classList.add('idle');
-      // Tlačítka zvuku a rychlosti se při hraní schovají spolu s ovládáním videa.
-      if (!video.paused) stage.classList.add('tools-idle');
-    }, 2500);
+    }, ms);
+  };
+  const wake = () => {
+    stage.classList.remove('idle', 'controls-idle');
+    hideSoon();
   };
   stage.addEventListener('mousemove', wake);
+  // Myš pryč z videa (mimo celou obrazovku): při přehrávání se lišta schová hned.
+  stage.addEventListener('mouseleave', () => {
+    if (!video.paused && !isFull()) hideSoon(400);
+  });
+  controls.addEventListener('mouseenter', () => {
+    overControls = true;
+  });
+  controls.addEventListener('mouseleave', () => {
+    overControls = false;
+  });
+  // Po kliknutí myší tlačítko (nebo hlasitost) lišty fokus nedrží - mezerník a šipky pak dál
+  // ovládají video, ne naposledy zmáčknuté tlačítko.
+  controls.addEventListener('mouseup', () => {
+    setTimeout(() => {
+      const el = document.activeElement as HTMLElement | null;
+      if (el && el !== document.body && controls.contains(el)) el.blur();
+    }, 0);
+  });
   const onFullscreenChange = () => {
     if (closed) return;
     // Ikona celé obrazovky ve videu (vpravo dole) dá přes celou obrazovku holé video.
@@ -476,8 +534,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     }
     const full = isFull();
     stage.classList.toggle('fullscreen', full);
-    if (full) wake();
-    else stage.classList.remove('idle');
+    refreshFullButton();
+    wake();
     onResize();
   };
   document.addEventListener('fullscreenchange', onFullscreenChange);
@@ -526,10 +584,161 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   let previewSilenced = false;
   let userMuted = video.muted;
   video.addEventListener('volumechange', () => {
+    refreshVolume();
     if (previewSilenced) return;
     userMuted = video.muted;
     saveVolume(video.volume, video.muted);
   });
+
+  // ---- ovládání videa (lišta dole) ------------------------------------------------------
+  /** Čas na liště: m:ss (h:mm:ss u dlouhé nahrávky). */
+  function clock(seconds: number): string {
+    const s = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
+    const hh = Math.floor(s / 3600);
+    const mm = Math.floor((s % 3600) / 60);
+    const ss = String(s % 60).padStart(2, '0');
+    return hh > 0 ? `${hh}:${String(mm).padStart(2, '0')}:${ss}` : `${mm}:${ss}`;
+  }
+  function togglePlay() {
+    if (broken) return;
+    if (video.paused || video.ended) void video.play().catch(() => undefined);
+    else video.pause();
+  }
+  function refreshPlay() {
+    const paused = video.paused || video.ended;
+    clear(playBtn);
+    playBtn.append(icon(paused ? 'play' : 'pauseFilled', 20));
+    const label = `${paused ? t('playerPlay') : t('playerPause')} (K)`;
+    playBtn.title = label;
+    playBtn.setAttribute('aria-label', label);
+  }
+  function setVolume(value: number) {
+    const v = clamp(value, 0, 1);
+    video.volume = v;
+    video.muted = v === 0;
+  }
+  function toggleMute() {
+    if (video.muted || video.volume === 0) {
+      video.muted = false;
+      if (video.volume === 0) video.volume = 0.5;
+    } else video.muted = true;
+  }
+  function refreshVolume() {
+    const silent = video.muted || video.volume === 0;
+    clear(muteBtn);
+    muteBtn.append(icon(silent ? 'volumeOff' : 'volume', 20));
+    const label = `${silent ? t('playerUnmute') : t('playerMute')} (M)`;
+    muteBtn.title = label;
+    muteBtn.setAttribute('aria-label', label);
+    const level = silent ? 0 : video.volume;
+    volumeRange.value = String(level);
+    volumeRange.style.setProperty('--level', `${Math.round(level * 100)}%`);
+  }
+  function refreshFullButton() {
+    const full = isFull();
+    clear(fullBtn);
+    fullBtn.append(icon(full ? 'shrink' : 'expand', 19));
+    const label = `${full ? t('playerExitFullscreen') : t('playerFullscreen')} (F)`;
+    fullBtn.title = label;
+    fullBtn.setAttribute('aria-label', label);
+  }
+  /** Délka videa pro lištu (dokud nejsou metadata, z knihovny). */
+  const totalTime = () => (Number.isFinite(video.duration) && video.duration > 0 ? video.duration : duration);
+  /** Posuvník a čas podle místa přehrávání (a kolik je načteno). */
+  function refreshSeek() {
+    const total = totalTime();
+    const now = clamp(video.currentTime || 0, 0, total || 0);
+    const share = total > 0 ? now / total : 0;
+    seekPlayed.style.width = `${share * 100}%`;
+    seekThumb.style.left = `${share * 100}%`;
+    let loaded = 0;
+    try {
+      for (let i = 0; i < video.buffered.length; i++) {
+        if (video.buffered.start(i) <= now + 0.5) loaded = Math.max(loaded, video.buffered.end(i));
+      }
+    } catch {
+      loaded = 0;
+    }
+    seekBuffered.style.width = total > 0 ? `${clamp(loaded / total, 0, 1) * 100}%` : '0%';
+    timeNow.textContent = clock(now);
+    timeAll.textContent = clock(total);
+    seekBar.setAttribute('aria-valuemax', String(Math.round(total)));
+    seekBar.setAttribute('aria-valuenow', String(Math.round(now)));
+    seekBar.setAttribute('aria-valuetext', `${clock(now)} / ${clock(total)}`);
+  }
+  /** Momenty nahrávky jako značky na posuvníku. */
+  function layoutSeekTicks() {
+    clear(seekTicks);
+    const total = totalTime();
+    if (total <= 0) return;
+    for (const m of markerList()) seekTicks.append(h('span', { style: `left:${(clamp(m.time, 0, total) / total) * 100}%`, title: String(m.label ?? '') }));
+  }
+  const seekTime = (clientX: number) => {
+    const r = seekBar.getBoundingClientRect();
+    const total = totalTime();
+    if (r.width <= 0 || total <= 0) return 0;
+    return clamp(((clientX - r.left) / r.width) * total, 0, total);
+  };
+  // Tažení po posuvníku: přehrávání skáče, kam ukazuje myš; najetí ukáže čas.
+  seekBar.addEventListener('pointerdown', (e) => {
+    if (broken || e.button !== 0) return;
+    e.preventDefault();
+    seekBar.setPointerCapture(e.pointerId);
+    seekDragging = true;
+    seekBar.classList.add('dragging');
+    const move = (ev: PointerEvent) => {
+      video.currentTime = seekTime(ev.clientX);
+      refreshSeek();
+      layoutPlayhead();
+    };
+    const up = (ev: PointerEvent) => {
+      try {
+        seekBar.releasePointerCapture(ev.pointerId);
+      } catch {
+        // už puštěno
+      }
+      seekDragging = false;
+      seekBar.classList.remove('dragging');
+      seekBar.removeEventListener('pointermove', move);
+      seekBar.removeEventListener('pointerup', up);
+      seekBar.removeEventListener('pointercancel', up);
+      wake();
+    };
+    seekBar.addEventListener('pointermove', move);
+    seekBar.addEventListener('pointerup', up);
+    seekBar.addEventListener('pointercancel', up);
+    move(e);
+  });
+  seekBar.addEventListener('pointermove', (e) => {
+    const total = totalTime();
+    if (total <= 0) return;
+    const r = seekBar.getBoundingClientRect();
+    const x = clamp(e.clientX - r.left, 0, r.width);
+    seekTip.textContent = clock(seekTime(e.clientX));
+    seekTip.style.left = `${clamp(x, 22, Math.max(22, r.width - 22))}px`;
+    seekTip.classList.remove('hidden');
+  });
+  seekBar.addEventListener('pointerleave', () => seekTip.classList.add('hidden'));
+  // Klik do obrazu = přehrát / pozastavit (dvojklik = celá obrazovka - přehrávání se tím přepne dvakrát, zůstane).
+  video.addEventListener('click', () => togglePlay());
+  video.addEventListener('play', () => {
+    refreshPlay();
+    hideSoon();
+  });
+  video.addEventListener('pause', () => {
+    refreshPlay();
+    wake();
+  });
+  video.addEventListener('ended', refreshPlay);
+  video.addEventListener('timeupdate', refreshSeek);
+  video.addEventListener('progress', refreshSeek);
+  video.addEventListener('durationchange', () => {
+    refreshSeek();
+    layoutSeekTicks();
+  });
+  refreshPlay();
+  refreshVolume();
+  refreshFullButton();
 
   // ---- rychlost přehrávání ----------------------------------------------------------------
   /** Rychlost, kterou video hraje: v úpravách ta, se kterou se klip uloží (náhled), jinak ta z tlačítka. */
@@ -838,12 +1047,15 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     // Nový zdroj začíná vším zvukem a rychlostí 1 - vrátit, co je vybrané.
     applyPreviewAudio();
     applyRate();
+    refreshSeek();
+    layoutSeekTicks();
   });
   const tick = () => {
     raf = 0;
     if (video.paused || closed) return;
     if (editing && video.currentTime >= end && video.currentTime - end < 0.35) video.currentTime = start;
     layoutPlayhead();
+    if (!seekDragging) refreshSeek();
     raf = requestAnimationFrame(tick);
   };
   video.addEventListener('play', () => {
@@ -966,6 +1178,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       );
     }
     layoutTicks();
+    layoutSeekTicks();
   }
   function layoutTicks() {
     clear(ticks);

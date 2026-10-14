@@ -859,4 +859,9 @@ export const de: Record<Key, string> = {
   playerMicAudioHint: 'Dein Mikrofon - klicken zum Stummschalten / Einschalten (Speichern in Bearbeiten übernimmt, was du hörst)',
   playerSpeed: 'Wiedergabegeschwindigkeit',
   liveOnKineHidden: 'Kine hat deinen Stream vorerst aus Live ausgeblendet (automatische Inhaltsprüfung) - andere sehen ihn erst, wenn ein Moderator ihn freigibt.',
+  playerMute: 'Stummschalten',
+  playerUnmute: 'Ton an',
+  playerVolume: 'Lautstärke',
+  playerSeek: 'Position im Video',
+  tabApp: 'App',
 };

@@ -874,6 +874,11 @@ export const en = {
   playerMicAudioHint: 'Your microphone - click to mute / unmute (saving in Edit keeps what you hear)',
   playerSpeed: 'Playback speed',
   liveOnKineHidden: 'Kine hid your stream from Live for now (automatic content check) - others don\'t see it until a moderator lets it through.',
+  playerMute: 'Mute',
+  playerUnmute: 'Unmute',
+  playerVolume: 'Volume',
+  playerSeek: 'Position in the video',
+  tabApp: 'App',
 } as const;
 
 export type Key = keyof typeof en;

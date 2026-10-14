@@ -859,4 +859,9 @@ export const pl: Record<Key, string> = {
   playerMicAudioHint: 'Twój mikrofon - kliknij, aby wyciszyć / włączyć (zapis w edycji weźmie to, co słyszysz)',
   playerSpeed: 'Szybkość odtwarzania',
   liveOnKineHidden: 'Kine na razie ukryło twoją transmisję z Na żywo (automatyczna kontrola treści) - inni jej nie zobaczą, dopóki moderator jej nie przepuści.',
+  playerMute: 'Wycisz',
+  playerUnmute: 'Włącz dźwięk',
+  playerVolume: 'Głośność',
+  playerSeek: 'Pozycja w filmie',
+  tabApp: 'Aplikacja',
 };

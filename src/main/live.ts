@@ -706,7 +706,7 @@ export class LiveController {
         if (this.status.confirmed !== result.confirmed || this.status.viewers !== viewers || this.status.onKine !== onKine || !!this.status.onKineHidden !== onKineHidden) {
           this.set({ confirmed: result.confirmed, viewers, onKine, onKineHidden });
         }
-        // Do deníku, jen když se něco změní (Nastavení -> O appce -> diagnostika): co Kine a Cloudflare
+        // Do deníku, jen když se něco změní (Appka -> O appce -> diagnostika): co Kine a Cloudflare
         // o přenosu říkají - bez toho se "diváci tě vidí, na Kine nikdo nevysílá" nedalo dohledat.
         const yn = (v: boolean | null | undefined) => (v === true ? 'ano' : v === false ? 'ne' : '?');
         const cf = result.cloudflare;

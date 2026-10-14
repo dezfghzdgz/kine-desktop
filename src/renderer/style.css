@@ -383,19 +383,7 @@ kbd {
 .player-head button.active { color: var(--brand); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.5); }
 .player-close { width: 32px; padding: 0 !important; font-size: 14px; }
 .player-stage { position: relative; background: #000; min-height: 200px; display: flex; align-items: center; justify-content: center; }
-.player-video { display: block; width: 100%; max-height: 72vh; background: #000; outline: none; }
-/* Ikona celé obrazovky je vpravo dole v ovládání videa (jako u videí na Kine). Přes celou obrazovku
-   jde celá scéna se šipkami (player.ts) - video v ní celou obrazovku "nemá", takže by ikona
-   ukazovala "zvětšit"; v celé obrazovce scény se proto přepíše na "zmenšit" (Material, jako ta vestavěná). */
-/* Klip s víc zvukovými stopami: Chromium přidá do ovládání nabídku ⋮ (Audio Tracks) - celá obrazovka
-   zůstane i tak úplně vpravo dole (ovládání je flex řada). */
-.player-video::-webkit-media-controls-fullscreen-button { order: 99; }
-.player-stage.fullscreen .player-video::-webkit-media-controls-fullscreen-button {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='white'%3E%3Cpath d='M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z'/%3E%3C/svg%3E");
-  background-size: 24px 24px;
-  background-position: center;
-  background-repeat: no-repeat;
-}
+.player-video { display: block; width: 100%; max-height: 72vh; background: #000; outline: none; cursor: pointer; }
 .player-box.editing .player-video { max-height: 50vh; }
 .player-error { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 200px; padding: 20px; color: var(--text-dim); text-align: center; }
 .player-error p { margin: 0; max-width: 520px; }
@@ -465,32 +453,75 @@ body.player-pseudo-full .overlay, body.player-pseudo-full .player-box { transfor
 .player-stage.fullscreen.idle { cursor: none; }
 .player-stage.fullscreen.idle .stage-nav, .player-stage.fullscreen.idle .stage-top, .player-stage.fullscreen.idle .stage-fullscreen { opacity: 0; pointer-events: none; }
 
-/* Vpravo dole nad ovládáním videa (i přes celou obrazovku): zvuk hry a mikrofon zvlášť
-   (klipy se samostatnými stopami) a rychlost přehrávání. Ukáže se s ovládáním videa. */
-.player-tools {
-  position: absolute; right: 12px; bottom: 58px; z-index: 4; display: flex; gap: 6px; align-items: flex-end;
-  opacity: 0; pointer-events: none; transition: opacity var(--dur-2) var(--ease);
+/* Ovládání videa (player.ts): vlastní lišta dole přes obraz - posuvník a pod ním jedna řada:
+   přehrát, hlasitost, čas | zvuk hry, mikrofon, rychlost, celá obrazovka. Všechno u posuvníku,
+   nic dalšího na obraze. Při přehrávání se po chvíli bez pohybu myši schová (i kurzor); při pauze zůstává. */
+.player-controls {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 4;
+  display: flex; flex-direction: column; gap: 2px; padding: 34px 12px 8px; color: #fff;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0.5) 55%, rgba(0, 0, 0, 0.78) 100%);
+  transition: opacity var(--dur-2) var(--ease);
 }
-.player-stage:hover .player-tools, .player-tools:focus-within, .player-tools.menu-open { opacity: 1; pointer-events: auto; }
-.player-stage.tools-idle .player-tools:not(.menu-open), .player-stage.fullscreen.idle .player-tools:not(.menu-open) { opacity: 0; pointer-events: none; }
-.player-stage.broken .player-tools { display: none; }
+.player-stage.controls-idle .player-controls { opacity: 0; pointer-events: none; }
+.player-stage.controls-idle .player-video { cursor: none; }
+.player-stage.broken .player-controls { display: none; }
+.player-stage.fullscreen .player-controls { padding: 48px 24px 14px; }
+.pc-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.pc-spacer { flex: 1; min-width: 8px; }
+.pc-btn {
+  flex: none; width: 38px; height: 38px; min-height: 0; padding: 0; display: grid; place-items: center; border-radius: 10px;
+  color: #fff; background: transparent; background-image: none; box-shadow: none;
+}
+.pc-btn:hover:not(:disabled) { color: #fff; background: rgba(255, 255, 255, 0.14); box-shadow: none; }
+.player-controls .icon { stroke-width: 2.1; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55)); }
+.pc-time { flex: none; margin-left: 6px; font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; color: #fff; white-space: nowrap; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6); }
+.pc-time-all { color: rgba(255, 255, 255, 0.72); }
+/* Hlasitost: posuvník se vysune při najetí na reproduktor (jako na YouTube). */
+.pc-vol { display: flex; align-items: center; }
+.pc-volume {
+  width: 0; height: 4px; min-height: 0; padding: 0; margin: 0; opacity: 0; cursor: pointer; border: none; border-radius: 2px; box-shadow: none;
+  -webkit-appearance: none; appearance: none;
+  background: linear-gradient(90deg, #fff var(--level, 100%), rgba(255, 255, 255, 0.3) var(--level, 100%));
+  transition: width var(--dur-2) var(--ease), opacity var(--dur-2) var(--ease), margin var(--dur-2) var(--ease);
+}
+.pc-vol:hover .pc-volume, .pc-vol:focus-within .pc-volume, .pc-volume:active { width: 76px; opacity: 1; margin: 0 8px 0 4px; }
+.pc-volume::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5); }
+/* Posuvník: tenký, při najetí silnější s kolečkem; načtené světleji, přehrané v barvě appky, momenty žlutě. */
+.pc-seek { position: relative; height: 18px; display: flex; align-items: center; cursor: pointer; touch-action: none; }
+.pc-seek-track { position: relative; width: 100%; height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.24); transition: height var(--dur-1) var(--ease); }
+.pc-seek:hover .pc-seek-track, .pc-seek.dragging .pc-seek-track { height: 6px; }
+.pc-seek-buffered, .pc-seek-played { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: inherit; pointer-events: none; }
+.pc-seek-buffered { background: rgba(255, 255, 255, 0.32); }
+.pc-seek-played { background: var(--brand); }
+.pc-seek-thumb {
+  position: absolute; top: 50%; left: 0; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; pointer-events: none;
+  background: var(--brand); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5); transform: scale(0); transition: transform var(--dur-1) var(--ease);
+}
+.pc-seek:hover .pc-seek-thumb, .pc-seek.dragging .pc-seek-thumb { transform: scale(1); }
+.pc-seek-ticks span { position: absolute; top: -1px; bottom: -1px; width: 3px; margin-left: -1.5px; border-radius: 1px; background: #ffd23f; pointer-events: none; }
+.pc-seek-tip {
+  position: absolute; bottom: 20px; transform: translateX(-50%); padding: 3px 8px; border-radius: 6px; pointer-events: none;
+  font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; color: #fff; white-space: nowrap;
+  background: rgba(10, 10, 14, 0.92); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+/* Vpravo v řadě: zvuk hry a mikrofon zvlášť (jen klipy se samostatnými stopami) a rychlost. */
+.player-tools { display: flex; align-items: center; gap: 2px; }
 /* V úpravách má rychlost vlastní řádek (rychlost uloženého klipu) - náhled hraje jí. */
 .player-box.editing .tool-rate-wrap { display: none; }
-.player-stage.fullscreen .player-tools { right: 18px; bottom: 64px; }
 .tool-chip {
-  display: inline-flex; align-items: center; gap: 6px; height: 30px; min-height: 0; padding: 0 11px; border-radius: 999px;
-  font-size: 12px; font-weight: 600; line-height: 1; color: #fff; white-space: nowrap;
-  background: rgba(10, 10, 14, 0.62); background-image: none; backdrop-filter: blur(8px);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+  display: inline-flex; align-items: center; gap: 6px; height: 34px; min-height: 0; padding: 0 10px; border-radius: 10px;
+  font-size: 13px; font-weight: 600; line-height: 1; color: #fff; white-space: nowrap; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  background: transparent; background-image: none; box-shadow: none;
 }
-.tool-chip:hover { color: #fff; background-color: rgba(10, 10, 14, 0.82); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.6); }
-.tool-chip.off { color: rgba(255, 255, 255, 0.5); box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.6); }
+.tool-chip:hover:not(:disabled) { color: #fff; background: rgba(255, 255, 255, 0.14); box-shadow: none; }
+.tool-chip.off { color: rgba(255, 255, 255, 0.55); }
+.tool-chip.off .icon { color: #ff6b6b; }
 .tool-chip.off span { text-decoration: line-through; }
 .tool-chip.changed .tool-rate-value { color: var(--brand); }
 .tool-rate-value { font-variant-numeric: tabular-nums; min-width: 30px; text-align: left; }
 .tool-rate-wrap { position: relative; }
 .tool-rate-menu {
-  position: absolute; right: 0; bottom: calc(100% + 6px); display: flex; flex-direction: column; gap: 2px; padding: 4px; min-width: 78px;
+  position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 5; display: flex; flex-direction: column; gap: 2px; padding: 4px; min-width: 78px;
   border-radius: 10px; background: rgba(10, 10, 14, 0.94); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16), 0 10px 30px rgba(0, 0, 0, 0.5);
 }
 .tool-rate-item {
@@ -982,6 +1013,8 @@ html[data-calm="1"] *:not(.spin):not(.rec-dot)::after {
 .section-chip:hover .icon, .section-chip.active .icon { color: var(--brand); }
 .section-chip.active { color: var(--text); font-weight: 600; background-color: rgba(var(--brand-rgb), 0.1); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.6); }
 .section-warn { position: absolute; top: 7px; right: 8px; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 6px rgba(255, 200, 87, 0.7); }
+/* Záložka Appka / O appce: název appky jako podnadpis pod řadou oddílů. */
+.app-page .about-name { margin: 6px 0 0; font-size: var(--fs-lg); }
 
 /* Volba: zaškrtávátko / přepínač, ikonka, krátký popisek a otazníček vedle. */
 .opt { display: flex; flex-direction: column; gap: 4px; }

@@ -72,6 +72,10 @@ const PATHS = {
   plus: '<path d="M12 5v14M5 12h14"/>',
   arrowRight: '<path d="M5 12h14M13.5 6.5 19 12l-5.5 5.5"/>',
   dot: '<circle cx="12" cy="12" r="5" fill="currentColor" stroke="none"/>',
+  /** Ztlumeno (ovládání videa v přehrávači). */
+  volumeOff: '<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/>',
+  /** Pauza plná (ovládání videa - tenké čáry by na obraze zanikly). */
+  pauseFilled: '<rect x="6.5" y="5.5" width="4" height="13" rx="1.2" fill="currentColor" stroke="none"/><rect x="13.5" y="5.5" width="4" height="13" rx="1.2" fill="currentColor" stroke="none"/>',
 } as const;
 
 export type IconName = keyof typeof PATHS;

@@ -263,12 +263,13 @@ export async function runTestDriver(kine: {
           !!saved && saved.visibility === 'subscribers' && Array.isArray(saved.hashtags) && saved.hashtags.includes('test_tag') && saved.category === 'catGaming' && saved.hashtags.includes('klip');
       }
     }
-    for (const tab of ['clips', 'settings', 'games', 'upload', 'account', 'about']) {
+    for (const tab of ['clips', 'settings', 'games', 'upload', 'account', 'app', 'about']) {
       kine.openSettings(tab === 'settings' ? 'settings:hotkeys' : tab);
       await sleep(900);
       await shot(kine.settingsWindow, `settings-${tab}`);
     }
-    // Nastavení po oddílech: sedm ikon nahoře, každá ukáže jen svůj oddíl; vysvětlení až pod otazníčkem.
+    // Nastavení po oddílech: Záznam má pět ikon nahoře (zkratky, kvalita, zvuk, výkon, úložiště), každá ukáže
+    // jen svůj oddíl; vzhled, obecné a o appce jsou zvlášť v záložce Appka (0.10.8). Vysvětlení až pod otazníčkem.
     kine.openSettings('settings:hotkeys');
     await sleep(700);
     if (kine.settingsWindow && !kine.settingsWindow.isDestroyed()) {
@@ -276,17 +277,32 @@ export async function runTestDriver(kine: {
       const nav = await sw.webContents.executeJavaScript(
         `(() => { const chips = [...document.querySelectorAll('.section-nav .section-chip')]; return { count: chips.length, icons: chips.every((c) => c.querySelector('svg.icon')), active: (document.querySelector('.section-chip.active') || {}).dataset?.section, panels: document.querySelectorAll('.settings-page > .panel').length, hints: document.querySelectorAll('.settings-page .help-text').length, helpBtns: document.querySelectorAll('.settings-page .help-btn').length }; })()`
       );
+      const captureChips = await sw.webContents.executeJavaScript(`[...document.querySelectorAll('.section-nav .section-chip')].map((c) => c.dataset.section).join(',')`);
+      await sw.webContents.executeJavaScript(`(() => { const c = document.querySelector('.side .tab[data-tab="app"]'); if (c) c.click(); return !!c; })()`);
+      await sleep(300);
       await sw.webContents.executeJavaScript(`(() => { const c = document.querySelector('.section-chip[data-section="general"]'); if (c) c.click(); return !!c; })()`);
       await sleep(400);
-      const general = await sw.webContents.executeJavaScript(`(() => ({ active: (document.querySelector('.section-chip.active') || {}).dataset?.section, lang: !!document.querySelector('.general-panel select'), hotkeys: document.querySelectorAll('.hotkey').length }))()`);
+      const general = await sw.webContents.executeJavaScript(`(() => ({ active: (document.querySelector('.section-chip.active') || {}).dataset?.section, lang: !!document.querySelector('.general-panel select'), hotkeys: document.querySelectorAll('.hotkey').length, appTab: !!document.querySelector('.side .tab.active[data-tab="app"]'), chips: [...document.querySelectorAll('.section-nav .section-chip')].map((c) => c.dataset.section).join(',') }))()`);
       await sw.webContents.executeJavaScript(`(() => { const b = document.querySelector('.general-panel .help-btn'); if (b) b.click(); return !!b; })()`);
       await sleep(300);
       const helpOpen = await sw.webContents.executeJavaScript(`document.querySelectorAll('.general-panel .help-text').length === 1 && !!document.querySelector('.general-panel .help-btn.open')`);
       await shot(sw, 'settings-general');
       // Emoji v okně nikde (ikony jsou SVG) - text bez znaků z rozsahu emoji / dingbatů.
       const emoji = await sw.webContents.executeJavaScript(`(() => { const t = document.body.innerText; return (t.match(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}]/gu) || []).join(''); })()`);
-      result.settingsSections = { nav, general, helpOpen, emoji };
-      result.settingsSectionsOk = nav.count === 7 && nav.icons && nav.active === 'hotkeys' && nav.panels === 1 && nav.hints === 0 && nav.helpBtns >= 3 && general.active === 'general' && general.lang && general.hotkeys === 0 && helpOpen && emoji === '';
+      // Staré cíle z dřívějších verzí (upozornění, hlavní proces): "settings:look" a "about" vedou do Appky.
+      const where = () => sw.webContents.executeJavaScript(`({ tab: (document.querySelector('.side .tab.active') || {}).dataset?.tab, section: (document.querySelector('.section-chip.active') || {}).dataset?.section, about: !!document.querySelector('.copy-diagnostics'), look: !!document.querySelector('.appearance-panel') })`);
+      kine.openSettings('settings:look');
+      await sleep(500);
+      const oldLook = await where();
+      kine.openSettings('about');
+      await sleep(500);
+      const oldAbout = await where();
+      await shot(sw, 'settings-app-about');
+      const legacy = oldLook.tab === 'app' && oldLook.section === 'look' && oldLook.look && oldAbout.tab === 'app' && oldAbout.section === 'about' && oldAbout.about;
+      result.settingsSections = { nav, captureChips, general, helpOpen, emoji, oldLook, oldAbout };
+      result.settingsSectionsOk =
+        nav.count === 5 && captureChips === 'hotkeys,quality,audio,performance,storage' && nav.icons && nav.active === 'hotkeys' && nav.panels === 1 && nav.hints === 0 && nav.helpBtns >= 3 &&
+        general.active === 'general' && general.appTab && general.chips === 'look,general,about' && general.lang && general.hotkeys === 0 && helpOpen && emoji === '' && legacy;
     }
 
     // Nahrání a sdílení: viditelnost má tři volby (i "jen odběratelé"), k tomu hashtagy ke všemu a kategorie.
@@ -612,8 +628,8 @@ export async function runTestDriver(kine: {
         const secondClip = kine.library.list().find((c) => c.id === shown[1]);
         result.playerNav = first.next && first.prevDisabled && first.pos === `1 / ${shown.length}` && second.pos === `2 / ${shown.length}` && second.overlay === 1 && !!secondClip && second.title === secondClip.title && back === `1 / ${shown.length}`;
         result.playerNavDebug = { first, second, back };
-        // Celá obrazovka: jedna ikona vpravo dole v ovládání videa (jako u videí na Kine) - dovnitř
-        // i ven. Kliknutí opravdovou myší: video si ho vezme, scénu se šipkami zapne hlavní proces.
+        // Celá obrazovka: jedna ikona vpravo dole v liště ovládání (jako u videí na Kine) - dovnitř
+        // i ven. Kliknutí opravdovou myší (Fullscreen API chce kliknutí uživatele).
         const realClick = async (x: number, y: number, count = 1) => {
           win.webContents.sendInputEvent({ type: 'mouseMove', x, y });
           await sleep(120);
@@ -637,17 +653,56 @@ export async function runTestDriver(kine: {
           }
           return ok;
         };
+        const rectOf = (sel: string): Promise<{ x: number; y: number; w: number; h: number } | null> =>
+          win.webContents.executeJavaScript(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return null; const r = e.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })()`);
+        const clickEl = async (sel: string, count = 1) => {
+          const r = await rectOf(sel);
+          if (!r) return false;
+          await realClick(Math.round(r.x + r.w / 2), Math.round(r.y + r.h / 2), count);
+          return true;
+        };
+        // Ovládání videa (0.10.8): vlastní lišta dole - posuvník a pod ním jedna řada (přehrát, hlasitost, čas,
+        // zvuk hry / mikrofon, rychlost, celá obrazovka). Vestavěné ovládání Chromia (a jeho nabídka ⋮ se
+        // zvukovou stopou) není; nic dalšího na ploše videa.
+        const bar = await win.webContents.executeJavaScript(`(() => {
+          const st = document.querySelector('.player-stage'); const v = st && st.querySelector('video'); const c = st && st.querySelector('.player-controls');
+          const row = c && c.querySelector('.pc-row'); const tools = st && st.querySelector('.player-tools');
+          return { native: !!v && v.controls, bar: !!c, seek: !!c && !!c.querySelector('.pc-seek'), row: !!row && ['.pc-play', '.pc-mute', '.pc-volume', '.pc-time', '.pc-full'].every((s) => !!row.querySelector(s)), toolsInRow: !!row && !!tools && row.contains(tools), toolsPos: tools ? getComputedStyle(tools).position : null };
+        })()`);
+        await win.webContents.executeJavaScript(`(() => { document.querySelector('.player-stage video').pause(); return true; })()`);
+        await sleep(200);
+        await clickEl('.player-controls .pc-play');
+        await sleep(400);
+        const playedByBtn = await win.webContents.executeJavaScript(`!document.querySelector('.player-stage video').paused`);
+        await clickEl('.player-controls .pc-play');
+        await sleep(300);
+        const pausedByBtn = await win.webContents.executeJavaScript(`document.querySelector('.player-stage video').paused`);
+        const sr = await rectOf('.player-controls .pc-seek');
+        if (sr) await realClick(Math.round(sr.x + sr.w * 0.5), Math.round(sr.y + sr.h / 2));
+        await sleep(400);
+        const seeked = await win.webContents.executeJavaScript(`(() => { const v = document.querySelector('.player-stage video'); return { t: v.currentTime, d: v.duration, label: document.querySelector('.pc-time-now').textContent }; })()`);
+        const mutedBefore = await win.webContents.executeJavaScript(`document.querySelector('.player-stage video').muted`);
+        await clickEl('.player-controls .pc-mute');
+        await sleep(200);
+        const mutedAfter = await win.webContents.executeJavaScript(`document.querySelector('.player-stage video').muted`);
+        await clickEl('.player-controls .pc-mute');
+        await sleep(200);
+        const mutedBack = await win.webContents.executeJavaScript(`document.querySelector('.player-stage video').muted`);
+        await shot(win, 'settings-clips-player-controls');
+        result.playerControls = { bar, playedByBtn, pausedByBtn, seeked, mutedBefore, mutedAfter, mutedBack };
+        result.playerControlsOk =
+          !bar.native && bar.bar && bar.seek && bar.row && bar.toolsInRow && bar.toolsPos !== 'absolute' && playedByBtn && pausedByBtn &&
+          Number.isFinite(seeked.d) && seeked.d > 0 && Math.abs(seeked.t - seeked.d / 2) < Math.max(0.6, seeked.d * 0.06) && /^\d+:\d\d$/.test(seeked.label) &&
+          mutedAfter === !mutedBefore && mutedBack === mutedBefore;
+
         const headFull = await win.webContents.executeJavaScript(
-          `(() => { const s = document.querySelector('.player-stage .stage-fullscreen'); const v = document.querySelector('.player-stage video'); return !document.querySelector('.player-head .player-full') && !!s && getComputedStyle(s).display === 'none' && !!v && v.controls && !(v.getAttribute('controlslist') || '').includes('nofullscreen'); })()`
+          `(() => { const s = document.querySelector('.player-stage .stage-fullscreen'); const v = document.querySelector('.player-stage video'); return !document.querySelector('.player-head .player-full') && !!s && getComputedStyle(s).display === 'none' && !!v && !v.controls && !!document.querySelector('.player-controls .pc-full'); })()`
         );
         let vr = await videoRect();
-        await realClick(Math.round(vr.x + vr.w / 2), Math.round(vr.y + vr.h / 3));
-        await sleep(300);
-        await shot(win, 'settings-clips-player-controls');
-        await realClick(Math.round(vr.x + vr.w - 24), Math.round(vr.y + vr.h - 48));
+        await clickEl('.player-controls .pc-full');
         const fsOn = await waitStageFull(true);
         const fsFirst = await win.webContents.executeJavaScript(
-          `(() => { const st = document.querySelector('.player-stage.fullscreen'); const n = st && st.querySelector('.stage-nav.next'); const r = n ? n.getBoundingClientRect() : null; const v = st && st.querySelector('video'); return { next: !!n && !n.disabled && getComputedStyle(n).display !== 'none' && !!r && r.right > window.innerWidth - 120, exit: !!v && v.controls, pos: st ? st.querySelector('.stage-pos')?.textContent : null, title: st ? st.querySelector('.stage-title')?.textContent : null }; })()`
+          `(() => { const st = document.querySelector('.player-stage.fullscreen'); const n = st && st.querySelector('.stage-nav.next'); const r = n ? n.getBoundingClientRect() : null; return { next: !!n && !n.disabled && getComputedStyle(n).display !== 'none' && !!r && r.right > window.innerWidth - 120, exit: !!st && !!st.querySelector('.player-controls .pc-full'), pos: st ? st.querySelector('.stage-pos')?.textContent : null, title: st ? st.querySelector('.stage-title')?.textContent : null }; })()`
         );
         vr = await videoRect();
         win.webContents.sendInputEvent({ type: 'mouseMove', x: Math.round(vr.x + vr.w - 30), y: Math.round(vr.y + vr.h - 44) });
@@ -663,10 +718,7 @@ export async function runTestDriver(kine: {
         await sleep(600);
         const fsKey = await win.webContents.executeJavaScript(`({ still: !!document.fullscreenElement, pos: document.querySelector('.player-stage.fullscreen .stage-pos')?.textContent })`);
         // Ven tou samou ikonou vpravo dole.
-        vr = await videoRect();
-        await realClick(Math.round(vr.x + vr.w / 2), Math.round(vr.y + vr.h / 3));
-        await sleep(200);
-        await realClick(Math.round(vr.x + vr.w - 24), Math.round(vr.y + vr.h - 48));
+        await clickEl('.player-controls .pc-full');
         const fsOff = await waitStageFull(false);
         // Dvojklik do videa: taky scéna se šipkami (ne holé video), F ji zavře.
         // (Okno se po celé obrazovce chvíli vrací do původní velikosti - až pak měřit.)
@@ -678,7 +730,7 @@ export async function runTestDriver(kine: {
         await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true }))`, true);
         const fsDblOff = await waitStageFull(false);
         const playing = await win.webContents.executeJavaScript(`(() => { const v = document.querySelector('.player-stage video'); return !!v && v.isConnected && v.readyState >= 1; })()`);
-        result.playerFullscreen = { headFull, fsOn, fsFirst, fsSecond, fsKey, fsOff, fsDbl, fsDblOff, playing, dblDebug };
+        result.playerFullscreen = { headFull, fsOn, fsFirst, fsSecond, fsKey, fsOff, fsDbl, fsDblOff, playing, dblDebug, rectBefore: vr };
         result.playerFullscreenOk =
           headFull && fsOn && fsFirst.next && fsFirst.exit && fsFirst.pos === `1 / ${shown.length}` && fsSecond.still && fsSecond.pos === `2 / ${shown.length}` && fsSecond.video && fsKey.still && fsKey.pos === `1 / ${shown.length}` && fsOff && fsDbl && fsDblOff && playing;
         await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
@@ -792,7 +844,7 @@ export async function runTestDriver(kine: {
           await sleep(200);
           win.webContents.sendInputEvent({ type: 'mouseMove', x: 420, y: 320 });
           await sleep(300);
-          const full = await win.webContents.executeJavaScript(`(() => { const st = document.querySelector('.player-stage.fullscreen'); const tl = st && st.querySelector('.player-tools'); return { full: !!st, tools: !!tl && getComputedStyle(tl).opacity !== '0', label: tl ? tl.querySelector('.tool-rate-value')?.textContent : null }; })()`);
+          const full = await win.webContents.executeJavaScript(`(() => { const st = document.querySelector('.player-stage.fullscreen'); const tl = st && st.querySelector('.player-tools'); const pc = st && st.querySelector('.player-controls'); return { full: !!st, tools: !!tl && !!pc && pc.contains(tl) && getComputedStyle(pc).opacity !== '0', label: tl ? tl.querySelector('.tool-rate-value')?.textContent : null }; })()`);
           await shot(win, 'settings-clips-player-tools-fullscreen');
           await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true }))`, true);
           await sleep(900);
@@ -1038,7 +1090,7 @@ export async function runTestDriver(kine: {
         result.clipperSide = await w.webContents.executeJavaScript(
           `(() => { const tabs = [...document.querySelectorAll('.side .tab')].map((b) => b.textContent.trim()); return !tabs.some((x) => x === 'Kine') && !!document.querySelector('.brand-tag') && document.querySelectorAll('.brand .mark svg path').length === 3; })()`
         );
-        kine.openSettings('settings:general');
+        kine.openSettings('app:general');
         await sleep(700);
         result.clipperPanel = await w.webContents.executeJavaScript(`document.querySelectorAll('.app-icon svg path').length === 3 && !document.querySelector('.kine-host')`);
         await shot(w, 'settings-settings-clipper');
@@ -1731,7 +1783,8 @@ export async function runTestDriver(kine: {
       const ready = await aboutWin.webContents.executeJavaScript(
         `(() => { const b = document.querySelector('.update-progress.ready .update-now'); return !!b && !b.disabled && !!document.querySelector('.side-update.ready') && /9\\.9\\.9/.test(document.querySelector('.update-progress').textContent); })()`
       );
-      const title = await aboutWin.webContents.executeJavaScript(`(document.querySelector('h1') || {}).textContent || ''`);
+      // Název appky v O appce (od 0.10.8 podnadpis pod "Appka"; dřív nadpis stránky).
+      const title = await aboutWin.webContents.executeJavaScript(`(document.querySelector('.about-name') || document.querySelector('h1') || {}).textContent || ''`);
       await shot(aboutWin, 'settings-about-update-ready');
       simulateUpdateProgress({ phase: 'idle', version: null, percent: null, transferred: null, total: null, bytesPerSecond: null });
       await sleep(400);
@@ -1768,7 +1821,7 @@ export async function runTestDriver(kine: {
     }
 
     // Vzhled: sklo (barvy Západ slunce, silné) -> <html> dostane atributy a pozadí; pak zpět klasický.
-    kine.openSettings('settings:look');
+    kine.openSettings('app:look');
     await sleep(700);
     const lookWin = kine.settingsWindow;
     if (lookWin && !lookWin.isDestroyed()) {
@@ -1834,7 +1887,7 @@ export async function runTestDriver(kine: {
       result.lookOk = look.look === 'glass' && look.backdrop === 'sunset' && look.k === '0.8' && look.backdropShown && look.chips === 6 && look.panel && !!alpha && Number(alpha[1]) < 0.7 && back;
 
       // Velikost písma, rohy, karty klipů, klidný režim (Vzhled): atributy na <html> a opravdu větší písmo / kulatější rohy.
-      kine.openSettings('settings:look');
+      kine.openSettings('app:look');
       await sleep(700);
       const sw = kine.settingsWindow!;
       const fontBefore = await sw.webContents.executeJavaScript(`parseFloat(getComputedStyle(document.body).fontSize)`);
@@ -1923,7 +1976,7 @@ export async function runTestDriver(kine: {
     const common = [
       'inlinePlayer', 'gridUntouched', 'trimPanel', 'trimNewClip', 'trimReplace', 'vertical', 'verticalUi', 'autoClip', 'overlayClosed', 'filters',
       'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks', 'reviewMerge', 'updateUi',
-      'playerNav', 'playerTracksOk', 'playerSpeedOk', 'playerMuteOk', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
+      'playerNav', 'playerControlsOk', 'playerTracksOk', 'playerSpeedOk', 'playerMuteOk', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
       'autoClipContext', 'dota2Clip', 'minecraftClip', 'rocketLeagueClip', 'rocketLeagueConfig', 'verticalBlur', 'trash', 'trashUndoOk', 'trashDoubleOk', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
       'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'clipToastInstant', 'recordingStopOnceOk', 'updateProgressOk', 'playerFullscreenOk', 'lookOk', 'lookSizesOk', 'lookFollowOk',
       'updateIssueOk', 'settingsSectionsOk', 'compressOk',

@@ -859,4 +859,9 @@ export const sk: Record<Key, string> = {
   playerMicAudioHint: 'Tvoj mikrofón - kliknutím stlmíš / zapneš (uloženie v úpravách vezme, čo počuješ)',
   playerSpeed: 'Rýchlosť prehrávania',
   liveOnKineHidden: 'Kine tvoj prenos zatiaľ skryla z Naživo (automatická kontrola obsahu) - ostatní ho neuvidia, kým ho moderátor nepustí.',
+  playerMute: 'Stlmiť',
+  playerUnmute: 'Zapnúť zvuk',
+  playerVolume: 'Hlasitosť',
+  playerSeek: 'Posun vo videu',
+  tabApp: 'Aplikácia',
 };

@@ -63,7 +63,7 @@ const DISCARD_RETRY_GAP_MS = 10 * 1000;
 const HEALTH_POLL_MS = 5000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const IDLE: LiveStatus = { state: 'idle', since: null, title: '', watchUrl: null, error: null, confirmed: null, scene: null, stats: null, viewers: null, cameraError: null, ended: null, health: null, compat: false, onKine: null };
+const IDLE: LiveStatus = { state: 'idle', since: null, title: '', watchUrl: null, error: null, confirmed: null, scene: null, stats: null, viewers: null, cameraError: null, ended: null, health: null, compat: false, onKine: null, onKineHidden: false };
 
 export class LiveController {
   private status: LiveStatus = { ...IDLE };
@@ -702,14 +702,15 @@ export class LiveController {
         const viewers = typeof result.viewers === 'number' ? result.viewers : null;
         // Je přenos na Kine živě? (starší Kine to neposílá - pak podle potvrzení)
         const onKine = typeof result.live === 'boolean' ? result.live : result.confirmed ? true : this.status.onKine ?? null;
-        if (this.status.confirmed !== result.confirmed || this.status.viewers !== viewers || this.status.onKine !== onKine) {
-          this.set({ confirmed: result.confirmed, viewers, onKine });
+        const onKineHidden = result.hidden === true;
+        if (this.status.confirmed !== result.confirmed || this.status.viewers !== viewers || this.status.onKine !== onKine || !!this.status.onKineHidden !== onKineHidden) {
+          this.set({ confirmed: result.confirmed, viewers, onKine, onKineHidden });
         }
         // Do deníku, jen když se něco změní (Nastavení -> O appce -> diagnostika): co Kine a Cloudflare
         // o přenosu říkají - bez toho se "diváci tě vidí, na Kine nikdo nevysílá" nedalo dohledat.
         const yn = (v: boolean | null | undefined) => (v === true ? 'ano' : v === false ? 'ne' : '?');
         const cf = result.cloudflare;
-        const line = `Kine živě ${yn(result.live)}, potvrzeno ${yn(result.confirmed)}${cf ? `; Cloudflare: lifecycle ${yn(cf.lifecycle)}, běžící záznam ${yn(cf.listed)}, HLS ${yn(cf.hls)}` : ''}`;
+        const line = `Kine živě ${yn(result.live)}, potvrzeno ${yn(result.confirmed)}${onKineHidden ? ', SKRYTO kontrolou obsahu' : ''}${cf ? `; Cloudflare: lifecycle ${yn(cf.lifecycle)}, běžící záznam ${yn(cf.listed)}, HLS ${yn(cf.hls)}` : ''}`;
         if (line !== this.lastSignalLine) {
           this.lastSignalLine = line;
           this.deps.log(`vysílání (${action}): ${line}`);

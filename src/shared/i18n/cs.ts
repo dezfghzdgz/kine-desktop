@@ -853,4 +853,10 @@ export const cs: Record<Key, string> = {
   liveOnKineOk: 'Na Kine jsi živě.',
   liveOnKinePending: 'Na Kine jsi živě - Cloudflare přenos ještě potvrzuje.',
   liveOnKineNo: 'Kine tě teď neukazuje (Cloudflare přenos nepotvrdil) - appka to zkouší dál.',
+  playerGameAudio: 'Hra',
+  playerGameAudioHint: 'Zvuk hry - kliknutím ztlumíš / zapneš (uložení v úpravách vezme, co slyšíš)',
+  playerMicAudio: 'Mikrofon',
+  playerMicAudioHint: 'Tvůj mikrofon - kliknutím ztlumíš / zapneš (uložení v úpravách vezme, co slyšíš)',
+  playerSpeed: 'Rychlost přehrávání',
+  liveOnKineHidden: 'Kine tvůj přenos zatím skryla ze Živě (automatická kontrola obsahu) - ostatní ho neuvidí, dokud ho moderátor nepustí.',
 };

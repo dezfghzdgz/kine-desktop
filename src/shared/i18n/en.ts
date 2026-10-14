@@ -868,6 +868,12 @@ export const en = {
   liveOnKineOk: 'You\'re live on Kine.',
   liveOnKinePending: 'You\'re live on Kine - Cloudflare is still confirming the stream.',
   liveOnKineNo: 'Kine isn\'t showing you right now (Cloudflare hasn\'t confirmed the stream) - the app keeps trying.',
+  playerGameAudio: 'Game',
+  playerGameAudioHint: 'Game sound - click to mute / unmute (saving in Edit keeps what you hear)',
+  playerMicAudio: 'Mic',
+  playerMicAudioHint: 'Your microphone - click to mute / unmute (saving in Edit keeps what you hear)',
+  playerSpeed: 'Playback speed',
+  liveOnKineHidden: 'Kine hid your stream from Live for now (automatic content check) - others don\'t see it until a moderator lets it through.',
 } as const;
 
 export type Key = keyof typeof en;

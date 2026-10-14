@@ -830,3 +830,26 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   ho Cloudflare vidí.
 - Testy: `tests/live.test.mjs` (stav „na Kine", zápis do deníku jen při
   změně, starší Kine bez `live`), e2e: oba řádky v záložce Live.
+
+## Novinky 0.10.7
+
+- **Zvuk hry a mikrofon v přehrávači** (`renderer/player.ts`): vpravo dole
+  nad ovládáním videa (i přes celou obrazovku) jsou u klipů se samostatnými
+  stopami tlačítka „Hra" a „Mikrofon" - kliknutím se ztlumí / zapnou hned
+  v tom, co hraje (dřív šel zvuk vybrat jen v úpravách a v náhledu se nic
+  neztlumilo). Úpravy převezmou, co je slyšet, a stejně klip uloží. Stopy
+  přepíná Chromium (`enableBlinkFeatures: 'AudioVideoTracks'` u oken
+  s přehrávačem - `main.ts`); bez toho aspoň „bez zvuku". Po vypnutí všech
+  stop pustí Chromium tutéž stopu znovu až za 1-2 s (změřeno) - přehrávač
+  proto po zapnutí skočí na stejné místo a zvuk je hned zpátky.
+- Klipy s jednou stopou: „Odstranit zvuk" v úpravách ztlumí i náhled; po zavření
+  úprav hraje náhled zase se zvukem (mimo úpravy tu volbu nic neukazuje).
+- **Rychlost přehrávání**: tlačítko „1×" vedle (0,25× až 2×), i přes celou
+  obrazovku, klávesy `<` a `>`; výchozí 1×, zůstává i pro další klipy.
+  V úpravách náhled hraje rychlostí, se kterou se klip uloží.
+- **Živě**: když kontrola obsahu přenos skryje z Živě, záložka Live to řekne
+  (dřív „Na Kine jsi živě", i když ho ostatní neviděli).
+- Testy: e2e `playerTracksOk` (klip se třemi stopami 440 / 1000 Hz - měří se,
+  co video opravdu hraje), `playerSpeedOk`, `playerMuteOk` (klip s jednou
+  stopou: „Odstranit zvuk" ztlumí náhled, po zavření úprav zase hraje); `tests/live.test.mjs`
+  a `tests/uploader.test.mjs` (skrytý přenos).

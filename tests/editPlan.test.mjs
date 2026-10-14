@@ -154,6 +154,11 @@ test('slepení klipu: hra + mikrofon = tři stopy (mix, hra, mikrofon) s hlasito
   assert.match(micOnly[micOnly.indexOf('-filter_complex') + 1], /^\[1:a\]aresample=[^,]*,adelay=delays=300:all=1,aformat=[^,]*\[m1\]$/);
   assert.deepEqual(mapsOf(micOnly), ['0:v:0', '[m1]']);
   assert.deepEqual(clipAudioTracks(true, true, true), ['mix', 'game', 'mic']);
+  // Stopy mají jména (title i handler_name - podle něj je jmenuje přehrávač v appce).
+  const named = clipMuxArgs({ videoList: 'v.txt', hasSystemAudio: true, micList: 'm.txt', separateTracks: true, container: 'mp4', output: 'o.mp4', durationSeconds: 10 });
+  for (const [i, name] of ['Game + mic', 'Game', 'Mic'].entries()) {
+    assert.ok(named.join('\u0001').includes(`-metadata:s:a:${i}\u0001handler_name=${name}`), name);
+  }
   assert.deepEqual(clipAudioTracks(true, true, false), ['mix']);
   assert.deepEqual(clipAudioTracks(false, false, true), []);
 });

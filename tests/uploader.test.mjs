@@ -20,7 +20,7 @@ function startMockServer() {
   const statusCalls = [];
   let slowPatch = false;
   let processingLeft = 0;
-  const server = createServer(async (req, res) => {
+  async function handle(req, res) {
     const chunks = [];
     for await (const c of req) chunks.push(c);
     const body = Buffer.concat(chunks);
@@ -63,6 +63,18 @@ function startMockServer() {
     }
     res.writeHead(404);
     res.end();
+  }
+  const server = createServer((req, res) => {
+    handle(req, res).catch(() => {
+      // Appka nahrávání přerušila (hra se rozjela - pozastavení): spojení je pryč, napodobenina to tiše přejde.
+      // Dřív to v testu vyhodilo "aborted" (ECONNRESET) a test občas spadl podle toho, kdy přerušení přišlo.
+      try {
+        if (!res.headersSent) res.writeHead(499);
+        res.end();
+      } catch {
+        // spojení už není
+      }
+    });
   });
   return new Promise((resolve) =>
     server.listen(0, '127.0.0.1', () =>
@@ -420,5 +432,31 @@ test('Zahodit záznam: podle id, nebo okno vysílání + hodiny appky (server si
   assert.equal(sent.until, 5001);
   assert.ok(typeof sent.clientNow === 'number' && sent.clientNow >= before && sent.clientNow <= Date.now(), JSON.stringify(sent));
   assert.equal(sent.videoUid, undefined);
+  server.close();
+});
+
+test('hlášení vysílání: Kine řekne, jestli je přenos živě, co viděl Cloudflare a jestli ho skryla kontrola obsahu', async () => {
+  let reply = { ok: true, confirmed: true, viewers: 2, recordingUid: 'abc123', live: true, cloudflare: { lifecycle: true, listed: false, hls: null }, hidden: 'moderation' };
+  const server = createServer(async (req, res) => {
+    for await (const _ of req) {
+      // tělo nepotřebujeme
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(reply));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${server.address().port}`, getToken: async () => 'token-123' });
+  const a = await api.liveSignal('ping');
+  assert.equal(a.live, true);
+  assert.equal(a.hidden, true);
+  assert.deepEqual(a.cloudflare, { lifecycle: true, listed: false, hls: null });
+  reply = { ok: true, confirmed: true, viewers: 2, live: true, hidden: null };
+  const b = await api.liveSignal('ping');
+  assert.equal(b.hidden, false);
+  // starší Kine bez "hidden" a "live"
+  reply = { ok: true, confirmed: false };
+  const c = await api.liveSignal('ping');
+  assert.equal(c.hidden, false);
+  assert.equal(c.live, null);
   server.close();
 });

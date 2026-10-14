@@ -2041,7 +2041,8 @@ class KineApp {
       backgroundColor: '#050506',
       autoHideMenuBar: true,
       icon: this.appIcon(),
-      webPreferences: { preload: PRELOAD, contextIsolation: true, sandbox: true, spellcheck: false },
+      // AudioVideoTracks: přehrávač klipů přepíná stopy zvuku (hra / mikrofon) - renderer/player.ts.
+      webPreferences: { preload: PRELOAD, contextIsolation: true, sandbox: true, spellcheck: false, enableBlinkFeatures: 'AudioVideoTracks' },
     });
     win.setMenuBarVisibility(false);
     this.settingsWindow = win;
@@ -2079,7 +2080,7 @@ class KineApp {
       autoHideMenuBar: true,
       alwaysOnTop: true,
       icon: this.appIcon(),
-      webPreferences: { preload: PRELOAD, contextIsolation: true, sandbox: true, spellcheck: false },
+      webPreferences: { preload: PRELOAD, contextIsolation: true, sandbox: true, spellcheck: false, enableBlinkFeatures: 'AudioVideoTracks' },
     });
     win.setMenuBarVisibility(false);
     this.reviewWindow = win;

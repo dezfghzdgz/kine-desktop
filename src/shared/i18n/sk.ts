@@ -853,4 +853,10 @@ export const sk: Record<Key, string> = {
   liveOnKineOk: 'Na Kine si naživo.',
   liveOnKinePending: 'Na Kine si naživo - Cloudflare prenos ešte potvrdzuje.',
   liveOnKineNo: 'Kine ťa teraz neukazuje (Cloudflare prenos nepotvrdil) - appka to skúša ďalej.',
+  playerGameAudio: 'Hra',
+  playerGameAudioHint: 'Zvuk hry - kliknutím stlmíš / zapneš (uloženie v úpravách vezme, čo počuješ)',
+  playerMicAudio: 'Mikrofón',
+  playerMicAudioHint: 'Tvoj mikrofón - kliknutím stlmíš / zapneš (uloženie v úpravách vezme, čo počuješ)',
+  playerSpeed: 'Rýchlosť prehrávania',
+  liveOnKineHidden: 'Kine tvoj prenos zatiaľ skryla z Naživo (automatická kontrola obsahu) - ostatní ho neuvidia, kým ho moderátor nepustí.',
 };

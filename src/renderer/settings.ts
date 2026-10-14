@@ -687,6 +687,10 @@ function maxClip(): number {
 function kineLine(live: LiveStatus): HTMLElement | null {
   const compatPill = () =>
     live.compat && !(live.health && live.health !== 'unknown') ? h('span', { class: 'plan-pill live-compat-pill', title: t('liveCompatHint') }, t('liveCompatOn')) : null;
+  if (live.onKine === true && live.onKineHidden) {
+    // Přenos běží, ale kontrola obsahu ho skryla z Živě - ostatní ho nevidí, dokud ho moderátor nepustí.
+    return h('p', { class: 'live-on-kine hint warn hidden-by-check', style: 'margin:0' }, icon('warning', 14), ' ', t('liveOnKineHidden'), compatPill());
+  }
   if (live.onKine === true) {
     return h(
       'p',

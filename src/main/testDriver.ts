@@ -685,6 +685,204 @@ export async function runTestDriver(kine: {
         await sleep(300);
       }
 
+      // Zvuk hry / mikrofon a rychlost přehrávání v přehrávači (0.10.7): klip se třemi stopami
+      // (smíchaná, hra 440 Hz, mikrofon 1000 Hz) - tlačítka vpravo dole přepnou, co je slyšet
+      // (měří se to, co video opravdu hraje), stejně se pak uloží v úpravách; rychlost 1× a menu.
+      {
+        const tracksFile = join((kine as any).settings.clipsDir(), 'E2E tracks.mp4');
+        let tracksOk = false;
+        try {
+          await runFfmpeg(
+            [
+              '-f', 'lavfi', '-i', 'testsrc=size=640x360:rate=30:duration=8',
+              '-f', 'lavfi', '-i', 'sine=frequency=440:duration=8:sample_rate=48000',
+              '-f', 'lavfi', '-i', 'sine=frequency=1000:duration=8:sample_rate=48000',
+              '-filter_complex', '[1:a][2:a]amix=inputs=2:normalize=0[mix]',
+              '-map', '0:v', '-map', '[mix]', '-map', '1:a', '-map', '2:a',
+              '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', tracksFile,
+            ],
+            120000
+          );
+          (kine as any).library.add({ id: 'e2e-tracks', file: tracksFile, thumb: null, title: 'E2E tracks', game: null, createdAt: new Date().toISOString(), durationSeconds: 8, sizeBytes: statSync(tracksFile).size, width: 640, height: 360, sessionId: 'e2e-tracks', upload: null, audioTracks: ['mix', 'game', 'mic'] });
+          tracksOk = true;
+        } catch (e) {
+          result.playerTracksError = (e as Error).message;
+        }
+        await sleep(700);
+        if (tracksOk) {
+          await win.webContents.executeJavaScript(`(() => { const c = document.querySelector('.clips .clip[data-id="e2e-tracks"] .thumb'); if (c) { c.scrollIntoView({ block: 'center' }); c.click(); } return !!c; })()`);
+          let ready = false;
+          for (let i = 0; i < 40 && !ready; i++) {
+            await sleep(150);
+            ready = await win.webContents.executeJavaScript(`(() => { const v = document.querySelector('.player-stage video'); return !!v && v.readyState >= 2 && !!v.audioTracks && v.audioTracks.length === 3; })()`);
+          }
+          // Co video hraje: úroveň 440 Hz (hra) a 1000 Hz (mikrofon) v jeho výstupu.
+          await win.webContents.executeJavaScript(`(() => {
+            const v = document.querySelector('.player-stage video');
+            v.muted = false; v.volume = 1;
+            if (v.paused) v.play().catch(() => {});
+            window.__kineTone = async () => {
+              const stream = v.captureStream();
+              const at = stream.getAudioTracks();
+              if (at.length === 0) return { game: -200, mic: -200, tracks: 0 };
+              const ctx = new AudioContext();
+              const src = ctx.createMediaStreamSource(new MediaStream([at[0]]));
+              const an = ctx.createAnalyser(); an.fftSize = 4096; src.connect(an);
+              await new Promise((r) => setTimeout(r, 700));
+              const data = new Float32Array(an.frequencyBinCount); an.getFloatFrequencyData(data);
+              const bin = (f) => Math.round(f / (ctx.sampleRate / an.fftSize));
+              const lvl = (f) => Math.round(Math.max(...data.slice(bin(f) - 2, bin(f) + 3)));
+              const out = { game: lvl(440), mic: lvl(1000), tracks: at.length };
+              ctx.close();
+              return out;
+            };
+            return true;
+          })()`);
+          const state = async () =>
+            win.webContents.executeJavaScript(`(async () => {
+              const v = document.querySelector('.player-stage video');
+              const g = document.querySelector('.player-tools .tool-game'); const m = document.querySelector('.player-tools .tool-mic');
+              await new Promise((r) => setTimeout(r, 350));
+              return { enabled: [...v.audioTracks].map((t) => t.enabled), gameOn: !!g && !g.classList.contains('off'), micOn: !!m && !m.classList.contains('off'), chips: !!g && !g.classList.contains('hidden') && !!m && !m.classList.contains('hidden'), tone: await window.__kineTone() };
+            })()`);
+          const click = (sel: string) => win.webContents.executeJavaScript(`(() => { const b = document.querySelector('${sel}'); if (b) b.click(); return !!b; })()`);
+          await sleep(500);
+          const heard = (x: number) => x > -80;
+          const silentAt = (x: number) => x < -100;
+          const s0 = await state();
+          await click('.player-tools .tool-game');
+          const s1 = await state();
+          await click('.player-tools .tool-mic');
+          const s2 = await state();
+          await click('.player-tools .tool-game');
+          const s3 = await state();
+          // Úpravy převezmou, co je slyšet (uloží se jen hra).
+          await click('.player-head .player-edit');
+          await sleep(400);
+          const editChoice = await win.webContents.executeJavaScript(`(() => { const s = document.querySelector('.player-box.editing select.trim-audio'); return s ? s.value : null; })()`);
+          await click('.player-head .player-edit');
+          await sleep(300);
+          result.playerTracks = { s0, s1, s2, s3, editChoice };
+          const en = (s: any, want: boolean[]) => JSON.stringify(s.enabled) === JSON.stringify(want);
+          result.playerTracksOk =
+            ready && s0.chips && s0.gameOn && s0.micOn && en(s0, [true, false, false]) && heard(s0.tone.game) && heard(s0.tone.mic) &&
+            !s1.gameOn && s1.micOn && en(s1, [false, false, true]) && silentAt(s1.tone.game) && heard(s1.tone.mic) &&
+            !s2.gameOn && !s2.micOn && en(s2, [false, false, false]) && silentAt(s2.tone.game) && silentAt(s2.tone.mic) &&
+            s3.gameOn && !s3.micOn && en(s3, [false, true, false]) && heard(s3.tone.game) && silentAt(s3.tone.mic) &&
+            editChoice === 'game';
+
+          // Rychlost: výchozí 1×, menu u tlačítka vpravo dole, klávesa > o stupeň rychleji; i přes celou obrazovku.
+          const rate = () => win.webContents.executeJavaScript(`(() => { const v = document.querySelector('.player-stage video'); const l = document.querySelector('.player-tools .tool-rate-value'); return { rate: v ? v.playbackRate : null, label: l ? l.textContent : null }; })()`);
+          const r0 = await rate();
+          const vr2 = await win.webContents.executeJavaScript(`(() => { const r = document.querySelector('.player-stage video').getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })()`);
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: Math.round(vr2.x + vr2.w / 2), y: Math.round(vr2.y + vr2.h / 2) });
+          await click('.player-tools .tool-rate');
+          await sleep(300);
+          const menu = await win.webContents.executeJavaScript(`(() => { const m = document.querySelector('.player-tools .tool-rate-menu'); return !!m && !m.classList.contains('hidden') ? m.querySelectorAll('.tool-rate-item').length : 0; })()`);
+          await shot(win, 'settings-clips-player-tools');
+          await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-tools .tool-rate-item')].find((x) => x.textContent.startsWith('0.5') || x.textContent.startsWith('0,5')); if (b) b.click(); return !!b; })()`);
+          await sleep(300);
+          const r1 = await rate();
+          await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: '>', bubbles: true, cancelable: true }))`, true);
+          await sleep(300);
+          const r2 = await rate();
+          await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true }))`, true);
+          await sleep(900);
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: 400, y: 300 });
+          await sleep(200);
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: 420, y: 320 });
+          await sleep(300);
+          const full = await win.webContents.executeJavaScript(`(() => { const st = document.querySelector('.player-stage.fullscreen'); const tl = st && st.querySelector('.player-tools'); return { full: !!st, tools: !!tl && getComputedStyle(tl).opacity !== '0', label: tl ? tl.querySelector('.tool-rate-value')?.textContent : null }; })()`);
+          await shot(win, 'settings-clips-player-tools-fullscreen');
+          await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true }))`, true);
+          await sleep(900);
+          result.playerSpeed = { r0, menu, r1, r2, full };
+          result.playerSpeedOk = r0.rate === 1 && r0.label === '1×' && menu === 7 && r1.rate === 0.5 && r2.rate === 0.75 && full.full && full.tools && (full.label === '0.75×' || full.label === '0,75×');
+          await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+          await sleep(300);
+        }
+        try {
+          (kine as any).library.purge('e2e-tracks');
+        } catch {
+          // nic
+        }
+        await sleep(400);
+      }
+
+      // Klip s jednou stopou: "bez zvuku" v úpravách ztlumí i náhled (dřív hrál dál) a po zavření
+      // úprav hraje zase se zvukem (mimo úpravy "bez zvuku" nic neukazuje).
+      {
+        const singleFile = join((kine as any).settings.clipsDir(), 'E2E single.mp4');
+        let singleOk = false;
+        try {
+          await runFfmpeg(
+            [
+              '-f', 'lavfi', '-i', 'testsrc=size=640x360:rate=30:duration=8',
+              '-f', 'lavfi', '-i', 'sine=frequency=440:duration=8:sample_rate=48000',
+              '-map', '0:v', '-map', '1:a',
+              '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', singleFile,
+            ],
+            120000
+          );
+          (kine as any).library.add({ id: 'e2e-single', file: singleFile, thumb: null, title: 'E2E single', game: null, createdAt: new Date().toISOString(), durationSeconds: 8, sizeBytes: statSync(singleFile).size, width: 640, height: 360, sessionId: 'e2e-single', upload: null });
+          singleOk = true;
+        } catch (e) {
+          result.playerMuteError = (e as Error).message;
+        }
+        await sleep(700);
+        if (singleOk) {
+          await win.webContents.executeJavaScript(`(() => { const c = document.querySelector('.clips .clip[data-id="e2e-single"] .thumb'); if (c) { c.scrollIntoView({ block: 'center' }); c.click(); } return !!c; })()`);
+          let ready = false;
+          for (let i = 0; i < 40 && !ready; i++) {
+            await sleep(150);
+            ready = await win.webContents.executeJavaScript(`(() => { const v = document.querySelector('.player-stage video'); return !!v && v.readyState >= 2 && decodeURIComponent(v.currentSrc).includes('E2E single') && !!v.audioTracks && v.audioTracks.length === 1; })()`);
+          }
+          const probe = async () =>
+            win.webContents.executeJavaScript(`(async () => {
+              const v = document.querySelector('.player-stage video');
+              v.volume = 1;
+              if (v.paused) v.play().catch(() => {});
+              await new Promise((r) => setTimeout(r, 350));
+              const g = document.querySelector('.player-tools .tool-game');
+              const box = document.querySelector('.trim-mute input');
+              const at = v.captureStream().getAudioTracks();
+              let level = -200;
+              if (at.length > 0) {
+                const ctx = new AudioContext();
+                const src = ctx.createMediaStreamSource(new MediaStream([at[0]]));
+                const an = ctx.createAnalyser(); an.fftSize = 4096; src.connect(an);
+                await new Promise((r) => setTimeout(r, 700));
+                const data = new Float32Array(an.frequencyBinCount); an.getFloatFrequencyData(data);
+                const bin = Math.round(440 / (ctx.sampleRate / an.fftSize));
+                level = Math.round(Math.max(...data.slice(bin - 2, bin + 3)));
+                ctx.close();
+              }
+              return { level: Number.isFinite(level) ? level : -999, enabled: [...v.audioTracks].map((t) => t.enabled), muted: v.muted, chips: !!g && !g.classList.contains('hidden'), box: box ? box.checked : null };
+            })()`);
+          const click = (sel: string) => win.webContents.executeJavaScript(`(() => { const b = document.querySelector('${sel}'); if (b) b.click(); return !!b; })()`);
+          await win.webContents.executeJavaScript(`(() => { const v = document.querySelector('.player-stage video'); if (v) v.muted = false; return true; })()`);
+          await sleep(400);
+          const m0 = await probe();
+          await click('.player-head .player-edit');
+          await sleep(400);
+          await click('.player-box.editing .trim-mute input');
+          const m1 = await probe();
+          await click('.player-head .player-edit');
+          await sleep(300);
+          const m2 = await probe();
+          result.playerMute = { ready, m0, m1, m2 };
+          result.playerMuteOk = ready && !m0.chips && m0.level > -80 && m1.box === true && m1.level < -100 && m2.box === false && m2.level > -80 && !m2.muted;
+          await win.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+          await sleep(300);
+        }
+        try {
+          (kine as any).library.purge('e2e-single');
+        } catch {
+          // nic
+        }
+        await sleep(400);
+      }
+
       // Řazení knihovny: "nejdelší první" dá nahoru nejdelší klip.
       {
         await win.webContents.executeJavaScript(`(() => { const s = document.querySelector('.clips-sort'); s.value = 'longest'; s.dispatchEvent(new Event('change')); return true; })()`);
@@ -1725,7 +1923,7 @@ export async function runTestDriver(kine: {
     const common = [
       'inlinePlayer', 'gridUntouched', 'trimPanel', 'trimNewClip', 'trimReplace', 'vertical', 'verticalUi', 'autoClip', 'overlayClosed', 'filters',
       'sidebar', 'favorite', 'hoverPreview', 'merge', 'mergeNote', 'gif', 'gifLimit', 'gifUi', 'sidePause', 'reviewPicks', 'reviewMerge', 'updateUi',
-      'playerNav', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
+      'playerNav', 'playerTracksOk', 'playerSpeedOk', 'playerMuteOk', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
       'autoClipContext', 'dota2Clip', 'minecraftClip', 'rocketLeagueClip', 'rocketLeagueConfig', 'verticalBlur', 'trash', 'trashUndoOk', 'trashDoubleOk', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
       'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'clipToastInstant', 'recordingStopOnceOk', 'updateProgressOk', 'playerFullscreenOk', 'lookOk', 'lookSizesOk', 'lookFollowOk',
       'updateIssueOk', 'settingsSectionsOk', 'compressOk',

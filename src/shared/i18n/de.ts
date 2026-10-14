@@ -853,4 +853,10 @@ export const de: Record<Key, string> = {
   liveOnKineOk: 'Du bist live auf Kine.',
   liveOnKinePending: 'Du bist live auf Kine - Cloudflare bestätigt den Stream noch.',
   liveOnKineNo: 'Kine zeigt dich gerade nicht an (Cloudflare hat den Stream nicht bestätigt) - die App versucht es weiter.',
+  playerGameAudio: 'Spiel',
+  playerGameAudioHint: 'Spielsound - klicken zum Stummschalten / Einschalten (Speichern in Bearbeiten übernimmt, was du hörst)',
+  playerMicAudio: 'Mikro',
+  playerMicAudioHint: 'Dein Mikrofon - klicken zum Stummschalten / Einschalten (Speichern in Bearbeiten übernimmt, was du hörst)',
+  playerSpeed: 'Wiedergabegeschwindigkeit',
+  liveOnKineHidden: 'Kine hat deinen Stream vorerst aus Live ausgeblendet (automatische Inhaltsprüfung) - andere sehen ihn erst, wenn ein Moderator ihn freigibt.',
 };

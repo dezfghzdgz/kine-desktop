@@ -43,6 +43,8 @@ type TextStyle = 'outline' | 'box' | 'yellow';
 type TextSize = 's' | 'm' | 'l';
 /** Rychlosti v úpravách - stejné jako v hlavním procesu (editPlan.SPEEDS). */
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
+/** Rychlosti přehrávání při prohlížení (tlačítko vpravo dole, klávesy < >); výchozí 1×. */
+export const PLAYER_RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2] as const;
 /** Výška písma vůči výšce výsledného videa. */
 const TEXT_SIZES: Record<TextSize, number> = { s: 0.045, m: 0.065, l: 0.09 };
 const TEXT_MAX = 80;
@@ -255,6 +257,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   let gif = false;
   /** Rychlost výsledku - náhled v úpravách hraje stejnou rychlostí. */
   let speed = 1;
+  /** Rychlost přehrávání při prohlížení (tlačítko vpravo dole u celé obrazovky); platí i pro další klipy. */
+  let viewRate = 1;
   /** Text přes video (prázdný = žádný) a jak vypadá. */
   let overlayText = '';
   let textPosition: TextPosition = 'bottom';
@@ -299,7 +303,35 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   // Jak z celé obrazovky ven, když se klip nedá přehrát (není video s vlastní ikonou vpravo dole).
   const fullscreenBtn = h('button', { class: 'stage-fullscreen', title: `${t('playerExitFullscreen')} (F)`, 'aria-label': t('playerExitFullscreen'), onclick: () => toggleFullscreen() }, icon('shrink', 18));
   const stageTop = h('div', { class: 'stage-top' }, stageTitle, stagePos);
-  const stageChrome = [stagePrev, stageNext, stageTop, fullscreenBtn];
+  // Vpravo dole nad ovládáním videa (i přes celou obrazovku): zvuk hry a mikrofon zvlášť (klipy se
+  // samostatnými stopami - dřív šly vypnout jen v úpravách a v náhledu se nic neztlumilo) a rychlost.
+  const gameChip = h(
+    'button',
+    { class: 'tool-chip tool-game', 'aria-pressed': 'true', title: t('playerGameAudioHint'), onclick: () => toggleTrack('game') },
+    icon('gamepad', 15),
+    h('span', {}, t('playerGameAudio'))
+  ) as HTMLButtonElement;
+  const micChip = h(
+    'button',
+    { class: 'tool-chip tool-mic', 'aria-pressed': 'true', title: t('playerMicAudioHint'), onclick: () => toggleTrack('mic') },
+    icon('mic', 15),
+    h('span', {}, t('playerMicAudio'))
+  ) as HTMLButtonElement;
+  const rateFormat = new Intl.NumberFormat(document.documentElement.lang || undefined, { maximumFractionDigits: 2 });
+  const rateValue = h('span', { class: 'tool-rate-value' }, '1×');
+  const rateChip = h(
+    'button',
+    { class: 'tool-chip tool-rate', 'aria-haspopup': 'menu', 'aria-expanded': 'false', title: `${t('playerSpeed')} (< >)`, onclick: () => toggleRateMenu() },
+    icon('gauge', 15),
+    rateValue
+  ) as HTMLButtonElement;
+  const rateItems = PLAYER_RATES.map(
+    (value) =>
+      h('button', { class: `tool-rate-item ${value === 1 ? 'active' : ''}`, role: 'menuitemradio', 'aria-checked': value === 1 ? 'true' : 'false', onclick: () => setViewRate(value, true) }, `${rateFormat.format(value)}×`) as HTMLButtonElement
+  );
+  const rateMenu = h('div', { class: 'tool-rate-menu hidden', role: 'menu', 'aria-label': t('playerSpeed') }, ...rateItems);
+  const tools = h('div', { class: 'player-tools' }, gameChip, micChip, h('div', { class: 'tool-rate-wrap' }, rateMenu, rateChip));
+  const stageChrome = [stagePrev, stageNext, stageTop, fullscreenBtn, tools];
   const stage = h('div', { class: 'player-stage' }, video, shadeLeft, shadeRight, textLayer, ...stageChrome);
   /** Momenty nahrávky (uložené klipy během hraní) - skok kousek před ně. */
   const markersRow = h('div', { class: 'player-markers hidden' });
@@ -416,10 +448,12 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   // Ovládání v celé obrazovce se po chvíli bez pohybu myši schová (jako v přehrávačích).
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   const wake = () => {
-    stage.classList.remove('idle');
+    stage.classList.remove('idle', 'tools-idle');
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       if (isFull()) stage.classList.add('idle');
+      // Tlačítka zvuku a rychlosti se při hraní schovají spolu s ovládáním videa.
+      if (!video.paused) stage.classList.add('tools-idle');
     }, 2500);
   };
   stage.addEventListener('mousemove', wake);
@@ -482,13 +516,59 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     // Pozadí skla podle klipu (Vzhled -> Barvy podle obrazu).
     if (clip.thumb) followImage(fileUrl(clip.thumb));
   }
-  // Hlasitost jako minule; každá změna se uloží.
+  // Hlasitost jako minule; každá změna se uloží (ne ztlumení náhledu "bez zvuku" v úpravách).
   const remembered = loadVolume();
   if (remembered) {
     video.volume = remembered.volume;
     video.muted = remembered.muted;
   }
-  video.addEventListener('volumechange', () => saveVolume(video.volume, video.muted));
+  /** Náhled ztlumený jen kvůli "bez zvuku" (prohlížeč bez přepínání stop) - a jak to měl hráč předtím. */
+  let previewSilenced = false;
+  let userMuted = video.muted;
+  video.addEventListener('volumechange', () => {
+    if (previewSilenced) return;
+    userMuted = video.muted;
+    saveVolume(video.volume, video.muted);
+  });
+
+  // ---- rychlost přehrávání ----------------------------------------------------------------
+  /** Rychlost, kterou video hraje: v úpravách ta, se kterou se klip uloží (náhled), jinak ta z tlačítka. */
+  function applyRate() {
+    const rate = editing ? speed : viewRate;
+    video.defaultPlaybackRate = rate;
+    video.playbackRate = rate;
+    rateValue.textContent = `${rateFormat.format(rate)}×`;
+    rateChip.classList.toggle('changed', rate !== 1);
+    rateItems.forEach((btn, i) => {
+      const on = PLAYER_RATES[i] === rate;
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-checked', on ? 'true' : 'false');
+    });
+  }
+  function setViewRate(value: number, fromMenu = false) {
+    viewRate = value;
+    applyRate();
+    if (fromMenu) toggleRateMenu(false);
+  }
+  function toggleRateMenu(open = rateMenu.classList.contains('hidden')) {
+    rateMenu.classList.toggle('hidden', !open);
+    rateChip.setAttribute('aria-expanded', open ? 'true' : 'false');
+    tools.classList.toggle('menu-open', open);
+  }
+  /** O stupeň pomaleji / rychleji (klávesy < a >); v úpravách rychlost, se kterou se klip uloží. */
+  function stepRate(dir: -1 | 1) {
+    const list: readonly number[] = editing ? SPEEDS : PLAYER_RATES;
+    const current = editing ? speed : viewRate;
+    let idx = list.findIndex((r) => r === current);
+    if (idx < 0) idx = list.indexOf(1);
+    const next = list[clamp(idx + dir, 0, list.length - 1)];
+    if (editing) setSpeed(next);
+    else setViewRate(next);
+    showNote(`${editing ? t('trimSpeed') : t('playerSpeed')}: ${rateFormat.format(next)}×`, 'ok');
+  }
+  stage.addEventListener('mousedown', (e) => {
+    if (!rateMenu.classList.contains('hidden') && !(e.target as HTMLElement).closest('.tool-rate-wrap')) toggleRateMenu(false);
+  });
 
   // Časová osa se staví jednou - při tažení se jen posouvají styly.
   const track = h('div', { class: 'tl-track' });
@@ -502,8 +582,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const startVal = h('b', {});
   const endVal = h('b', {});
   const lenVal = h('b', {});
-  const muteBox = h('input', { type: 'checkbox', onchange: (e: Event) => { mute = (e.target as HTMLInputElement).checked; refreshButtons(); } }) as HTMLInputElement;
-  const muteLabel = h('label', { class: 'check', style: 'align-items:center' }, muteBox, t('trimMute'));
+  const muteBox = h('input', { type: 'checkbox', onchange: (e: Event) => { mute = (e.target as HTMLInputElement).checked; refreshButtons(); applyPreviewAudio(); } }) as HTMLInputElement;
+  const muteLabel = h('label', { class: 'check trim-mute', style: 'align-items:center' }, muteBox, t('trimMute'));
   // Klip se samostatnými stopami: místo "bez zvuku" výběr, co v uloženém klipu bude (třeba bez vlastního hlasu).
   const audioSelect = h(
     'select',
@@ -515,6 +595,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
         audioChoice = (e.target as HTMLSelectElement).value as AudioChoice;
         mute = audioChoice === 'none';
         refreshButtons();
+        applyPreviewAudio();
       },
     },
     h('option', { value: 'mix' }, t('trimAudioMix')),
@@ -523,16 +604,86 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     h('option', { value: 'none' }, t('trimAudioNone'))
   ) as HTMLSelectElement;
   const audioLabel = h('label', { class: 'row trim-audio-row', style: 'gap:6px;align-items:center' }, h('span', { class: 'faint' }, t('trimAudio')), audioSelect);
-  /** Má klip samostatné stopy hra / mikrofon? Podle toho výběr zvuku, nebo jen "bez zvuku". */
-  function syncAudioChoice() {
+  /** Má klip samostatné stopy hra / mikrofon? */
+  function separateTracks(): boolean {
     const tracks = clip.audioTracks ?? [];
-    const separate = tracks.includes('game') && tracks.includes('mic');
+    return tracks.includes('game') && tracks.includes('mic');
+  }
+  /**
+   * Podle stop klipu výběr zvuku, nebo jen "bez zvuku". `reset` (jiný klip) začne se vším;
+   * otevření úprav nechá, co hráč vypnul tlačítky ve videu (uloží se, co slyší).
+   */
+  function syncAudioChoice(reset = true) {
+    const separate = separateTracks();
     audioLabel.classList.toggle('hidden', !separate);
     muteLabel.classList.toggle('hidden', separate);
-    audioChoice = 'mix';
-    audioSelect.value = 'mix';
-    mute = false;
-    muteBox.checked = false;
+    if (reset || !separate) {
+      audioChoice = 'mix';
+      mute = false;
+    }
+    audioSelect.value = audioChoice;
+    muteBox.checked = mute;
+    gameChip.classList.toggle('hidden', !separate);
+    micChip.classList.toggle('hidden', !separate);
+    refreshTrackChips();
+    applyPreviewAudio();
+  }
+  /** Tlačítka zvuku hry a mikrofonu podle toho, co se zrovna hraje. */
+  function refreshTrackChips() {
+    const gameOn = !mute && (audioChoice === 'mix' || audioChoice === 'game');
+    const micOn = !mute && (audioChoice === 'mix' || audioChoice === 'mic');
+    gameChip.classList.toggle('off', !gameOn);
+    micChip.classList.toggle('off', !micOn);
+    gameChip.setAttribute('aria-pressed', gameOn ? 'true' : 'false');
+    micChip.setAttribute('aria-pressed', micOn ? 'true' : 'false');
+  }
+  /** Vypne / zapne zvuk hry nebo mikrofon - v náhledu hned a stejně se pak uloží v úpravách. */
+  function toggleTrack(kind: 'game' | 'mic') {
+    let gameOn = !mute && (audioChoice === 'mix' || audioChoice === 'game');
+    let micOn = !mute && (audioChoice === 'mix' || audioChoice === 'mic');
+    if (kind === 'game') gameOn = !gameOn;
+    else micOn = !micOn;
+    audioChoice = gameOn && micOn ? 'mix' : gameOn ? 'game' : micOn ? 'mic' : 'none';
+    mute = audioChoice === 'none';
+    audioSelect.value = audioChoice;
+    refreshTrackChips();
+    refreshButtons();
+    applyPreviewAudio();
+  }
+  /**
+   * Co se v náhledu hraje: stopa podle výběru (0 = smíchaná, pak hra, mikrofon - Clip.audioTracks).
+   * Stopy přepíná prohlížeč (okno má zapnuté AudioVideoTracks - main.ts); bez toho aspoň "bez zvuku".
+   */
+  function applyPreviewAudio() {
+    const choice = audioChoice;
+    const silent = mute || choice === 'none';
+    const layoutTracks: string[] = clip.audioTracks ?? [];
+    const want = silent ? -1 : choice === 'mix' ? 0 : Math.max(0, layoutTracks.indexOf(choice));
+    const list = (video as HTMLVideoElement & { audioTracks?: { length: number; [index: number]: { enabled: boolean } } }).audioTracks;
+    if (list && list.length > 0) {
+      let wasSilent = true;
+      for (let i = 0; i < list.length; i++) if (list[i].enabled) wasSilent = false;
+      for (let i = 0; i < list.length; i++) {
+        const on = i === want;
+        if (list[i].enabled !== on) list[i].enabled = on;
+      }
+      // Po vypnutí všech stop pustí Chromium tutéž stopu znovu až za 1-2 s (změřeno); skok na
+      // stejné místo ji rozjede hned (do 0,1 s). Přepnutí mezi stopami je rychlé i bez toho.
+      if (wasSilent && want >= 0 && video.readyState >= 1 && !video.seeking) video.currentTime = video.currentTime;
+      if (previewSilenced) {
+        previewSilenced = false;
+        video.muted = userMuted;
+      }
+      return;
+    }
+    if (silent && !previewSilenced) {
+      previewSilenced = true;
+      userMuted = video.muted;
+      video.muted = true;
+    } else if (!silent && previewSilenced) {
+      previewSilenced = false;
+      video.muted = userMuted;
+    }
   }
   const saveNewBtn = h('button', { class: 'small primary', onclick: () => void (gif ? saveGif() : save('new')) }, t('trimSaveNew'));
   const replaceBtn = h('button', { class: 'small quiet', onclick: () => onReplaceClick() }, t('trimReplace'));
@@ -684,6 +835,9 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     layout();
     layoutTicks();
     if (overlayText.trim()) void refreshText();
+    // Nový zdroj začíná vším zvukem a rychlostí 1 - vrátit, co je vybrané.
+    applyPreviewAudio();
+    applyRate();
   });
   const tick = () => {
     raf = 0;
@@ -781,7 +935,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   function setSpeed(value: number) {
     speed = value;
     speedBtns.forEach((btn, i) => btn.classList.toggle('active', SPEEDS[i] === value));
-    if (editing) video.playbackRate = value;
+    applyRate();
     layout();
   }
   function markerList() {
@@ -943,7 +1097,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     if (editing) {
       start = 0;
       end = duration;
-      syncAudioChoice();
+      syncAudioChoice(false);
       confirmReplace = false;
       gif = false;
       overlayText = '';
@@ -953,7 +1107,15 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       setSpeed(1);
       setVertical(null);
     } else {
-      video.playbackRate = 1;
+      speed = 1;
+      applyRate();
+      // "Bez zvuku" z úprav platí pro ukládaný klip - mimo úpravy ho nic neukazuje, tak náhled
+      // zase hraje se zvukem. Klipy se stopami hra / mikrofon mají svá tlačítka ve videu - ta zůstávají.
+      if (mute && !separateTracks()) {
+        mute = false;
+        muteBox.checked = false;
+        applyPreviewAudio();
+      }
       layoutText();
     }
     layout();
@@ -1156,6 +1318,9 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     } else if (e.key === 'm' || e.key === 'M') {
       e.preventDefault();
       video.muted = !video.muted;
+    } else if (e.key === '<' || e.key === '>') {
+      e.preventDefault();
+      stepRate(e.key === '<' ? -1 : 1);
     } else if (e.key === 'f' || e.key === 'F') {
       e.preventDefault();
       toggleFullscreen();

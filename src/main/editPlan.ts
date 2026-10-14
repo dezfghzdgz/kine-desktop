@@ -284,7 +284,8 @@ export function clipMuxArgs(input: ClipMuxInput): string[] {
     if (copyGame) args.push('-c:a', 'copy');
     // AAC 192k: zvuk už jednou prošel Opusem v nahrávání - vyšší datový tok, ať druhé kódování není slyšet.
     else args.push('-c:a', mp4 ? 'aac' : 'libopus', '-b:a', mp4 ? '192k' : '128k');
-    titles.forEach((title, i) => args.push(`-metadata:s:a:${i}`, `title=${title}`));
+    // Název stopy: title (VLC a spol.) i handler_name - podle něj ji jmenuje Chromium (přehrávač v appce, nabídka ⋮ Audio Tracks).
+    titles.forEach((title, i) => args.push(`-metadata:s:a:${i}`, `title=${title}`, `-metadata:s:a:${i}`, `handler_name=${title}`));
     // Jen první stopa je výchozí - přehrávače bez výběru stop hrají ji.
     if (titles.length > 1) titles.forEach((_, i) => args.push(`-disposition:a:${i}`, i === 0 ? 'default' : '0'));
   }

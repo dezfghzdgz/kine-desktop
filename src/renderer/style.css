@@ -387,6 +387,9 @@ kbd {
 /* Ikona celé obrazovky je vpravo dole v ovládání videa (jako u videí na Kine). Přes celou obrazovku
    jde celá scéna se šipkami (player.ts) - video v ní celou obrazovku "nemá", takže by ikona
    ukazovala "zvětšit"; v celé obrazovce scény se proto přepíše na "zmenšit" (Material, jako ta vestavěná). */
+/* Klip s víc zvukovými stopami: Chromium přidá do ovládání nabídku ⋮ (Audio Tracks) - celá obrazovka
+   zůstane i tak úplně vpravo dole (ovládání je flex řada). */
+.player-video::-webkit-media-controls-fullscreen-button { order: 99; }
 .player-stage.fullscreen .player-video::-webkit-media-controls-fullscreen-button {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='white'%3E%3Cpath d='M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z'/%3E%3C/svg%3E");
   background-size: 24px 24px;
@@ -461,6 +464,41 @@ body.player-pseudo-full .overlay, body.player-pseudo-full .player-box { transfor
 .player-stage.fullscreen .stage-pos { flex: none; font-size: var(--fs-sm); font-weight: 500; color: rgba(255, 255, 255, 0.7); font-variant-numeric: tabular-nums; }
 .player-stage.fullscreen.idle { cursor: none; }
 .player-stage.fullscreen.idle .stage-nav, .player-stage.fullscreen.idle .stage-top, .player-stage.fullscreen.idle .stage-fullscreen { opacity: 0; pointer-events: none; }
+
+/* Vpravo dole nad ovládáním videa (i přes celou obrazovku): zvuk hry a mikrofon zvlášť
+   (klipy se samostatnými stopami) a rychlost přehrávání. Ukáže se s ovládáním videa. */
+.player-tools {
+  position: absolute; right: 12px; bottom: 58px; z-index: 4; display: flex; gap: 6px; align-items: flex-end;
+  opacity: 0; pointer-events: none; transition: opacity var(--dur-2) var(--ease);
+}
+.player-stage:hover .player-tools, .player-tools:focus-within, .player-tools.menu-open { opacity: 1; pointer-events: auto; }
+.player-stage.tools-idle .player-tools:not(.menu-open), .player-stage.fullscreen.idle .player-tools:not(.menu-open) { opacity: 0; pointer-events: none; }
+.player-stage.broken .player-tools { display: none; }
+/* V úpravách má rychlost vlastní řádek (rychlost uloženého klipu) - náhled hraje jí. */
+.player-box.editing .tool-rate-wrap { display: none; }
+.player-stage.fullscreen .player-tools { right: 18px; bottom: 64px; }
+.tool-chip {
+  display: inline-flex; align-items: center; gap: 6px; height: 30px; min-height: 0; padding: 0 11px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; line-height: 1; color: #fff; white-space: nowrap;
+  background: rgba(10, 10, 14, 0.62); background-image: none; backdrop-filter: blur(8px);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+}
+.tool-chip:hover { color: #fff; background-color: rgba(10, 10, 14, 0.82); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.6); }
+.tool-chip.off { color: rgba(255, 255, 255, 0.5); box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.6); }
+.tool-chip.off span { text-decoration: line-through; }
+.tool-chip.changed .tool-rate-value { color: var(--brand); }
+.tool-rate-value { font-variant-numeric: tabular-nums; min-width: 30px; text-align: left; }
+.tool-rate-wrap { position: relative; }
+.tool-rate-menu {
+  position: absolute; right: 0; bottom: calc(100% + 6px); display: flex; flex-direction: column; gap: 2px; padding: 4px; min-width: 78px;
+  border-radius: 10px; background: rgba(10, 10, 14, 0.94); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16), 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+.tool-rate-item {
+  display: flex; align-items: center; justify-content: flex-start; height: 28px; min-height: 0; padding: 0 10px; border-radius: 6px;
+  font-size: 13px; font-variant-numeric: tabular-nums; color: #fff; background: transparent; background-image: none; box-shadow: none;
+}
+.tool-rate-item:hover { background: rgba(255, 255, 255, 0.1); color: #fff; box-shadow: none; }
+.tool-rate-item.active { color: var(--brand); font-weight: 700; }
 
 /* Úpravy: časová osa s úchyty (jako v Medalu), hodnoty, akce. */
 .trim { padding: 12px 16px 14px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }

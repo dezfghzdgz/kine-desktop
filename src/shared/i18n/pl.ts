@@ -853,4 +853,10 @@ export const pl: Record<Key, string> = {
   liveOnKineOk: 'Jesteś na żywo na Kine.',
   liveOnKinePending: 'Jesteś na żywo na Kine - Cloudflare jeszcze potwierdza transmisję.',
   liveOnKineNo: 'Kine teraz cię nie pokazuje (Cloudflare nie potwierdził transmisji) - aplikacja próbuje dalej.',
+  playerGameAudio: 'Gra',
+  playerGameAudioHint: 'Dźwięk gry - kliknij, aby wyciszyć / włączyć (zapis w edycji weźmie to, co słyszysz)',
+  playerMicAudio: 'Mikrofon',
+  playerMicAudioHint: 'Twój mikrofon - kliknij, aby wyciszyć / włączyć (zapis w edycji weźmie to, co słyszysz)',
+  playerSpeed: 'Szybkość odtwarzania',
+  liveOnKineHidden: 'Kine na razie ukryło twoją transmisję z Na żywo (automatyczna kontrola treści) - inni jej nie zobaczą, dopóki moderator jej nie przepuści.',
 };

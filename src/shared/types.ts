@@ -626,6 +626,8 @@ export type LiveStatus = {
    * ještě se neozvala). Dřív appka hlásila "diváci tě vidí" a na Kine přitom "nikdo nevysílá".
    */
   onKine?: boolean | null;
+  /** Kine přenos skryla z Živě (automatická kontrola obsahu, čeká na moderátora) - ostatní ho nevidí. */
+  onKineHidden?: boolean;
 };
 
 /** Co o vstupu naposledy řekl Cloudflare serveru Kine (do deníku appky - diagnostika). */

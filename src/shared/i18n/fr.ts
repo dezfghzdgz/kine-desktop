@@ -853,4 +853,10 @@ export const fr: Record<Key, string> = {
   liveOnKineOk: 'Tu es en direct sur Kine.',
   liveOnKinePending: 'Tu es en direct sur Kine - Cloudflare confirme encore le stream.',
   liveOnKineNo: 'Kine ne t\'affiche pas pour le moment (Cloudflare n\'a pas confirmé le stream) - l\'appli continue d\'essayer.',
+  playerGameAudio: 'Jeu',
+  playerGameAudioHint: 'Son du jeu - clique pour couper / remettre (l\'enregistrement dans Modifier garde ce que tu entends)',
+  playerMicAudio: 'Micro',
+  playerMicAudioHint: 'Ton micro - clique pour couper / remettre (l\'enregistrement dans Modifier garde ce que tu entends)',
+  playerSpeed: 'Vitesse de lecture',
+  liveOnKineHidden: 'Kine a masqué ton live du Direct pour l\'instant (vérification automatique du contenu) - les autres ne le verront pas tant qu\'un modérateur ne l\'aura pas validé.',
 };

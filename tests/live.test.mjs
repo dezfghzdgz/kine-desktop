@@ -573,4 +573,13 @@ test('vysílání: appka ví, jestli je přenos na Kine živě, a co o vstupu ř
   await live.signal('ping');
   assert.equal(live.current().onKine, true);
   assert.equal(live.current().viewers, 3);
+  // kontrola obsahu přenos skryla z Živě: appka to řekne (a zapíše do deníku)
+  reply = { confirmed: true, viewers: 0, recording: null, recordingUid: null, live: true, hidden: true };
+  await live.signal('ping');
+  assert.equal(live.current().onKine, true);
+  assert.equal(live.current().onKineHidden, true);
+  assert.ok(logs.some((l) => l.includes('SKRYTO kontrolou obsahu')), logs.join('\n'));
+  reply = { ...reply, hidden: false };
+  await live.signal('ping');
+  assert.equal(live.current().onKineHidden, false);
 });

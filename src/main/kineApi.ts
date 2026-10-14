@@ -104,6 +104,8 @@ export type KineApi = {
     live?: boolean | null;
     /** Co o vstupu řekl Cloudflare (novější Kine) - do deníku. */
     cloudflare?: LiveCloudflareSeen | null;
+    /** Kontrola obsahu přenos skryla z Živě (čeká na moderátora) - jen majitel ho tam vidí. */
+    hidden?: boolean;
   }>;
   /**
    * Záznam vysílání ke stažení do PC: Kine ho nechá u Cloudflare vyrobit jako
@@ -248,7 +250,7 @@ export function createKineApi(deps: {
       const c = data?.cloudflare;
       const tri = (v: unknown): boolean | null => (typeof v === 'boolean' ? v : null);
       const cloudflare: LiveCloudflareSeen | null = c && typeof c === 'object' ? { lifecycle: tri(c.lifecycle), listed: c.listed === true, hls: tri(c.hls) } : null;
-      return { confirmed: data?.confirmed === true, viewers, recording, recordingUid, live, cloudflare };
+      return { confirmed: data?.confirmed === true, viewers, recording, recordingUid, live, cloudflare, hidden: data?.hidden === 'moderation' };
     },
     async liveDetails(details) {
       await post('/api/live/me', { action: 'details', title: details.title.slice(0, 100), description: details.description.slice(0, 2000), category: details.category });

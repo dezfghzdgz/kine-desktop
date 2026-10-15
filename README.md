@@ -878,6 +878,32 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   `playerFullscreenOk` přes tlačítko v liště, `settingsSectionsOk` (Záznam
   pět oddílů, Appka vzhled / obecné / o appce, staré cíle).
 
+## Novinky 0.11.0
+
+- **Verze appky v každém dotazu na Kine** (`X-Kine-App: clipper/0.11.0` -
+  `shared/kineClient.ts`): Kine pozná zastaralou appku a nepustí ji nahrávat
+  ani vysílat (odpoví 426). Appka pak ukáže upozornění „aktualizuj" (O appce)
+  a hned hledá aktualizaci. Nejstarší povolenou verzi hlásí i
+  `/api/desktop/config` (`minDesktopVersion`). Starší verze hlavičku neposílají
+  a Kine je pozná podle toho, že volají z Node.js - po vydání 0.11.0 musí
+  aktualizovat.
+- **Jen oficiální Kine**: zabalená appka mluví jen s www.playkine.com (a
+  starší kine-lac.vercel.app); jiná adresa v nastavení se vrátí. Vývoj
+  (nezabalená appka) a testy můžou cokoli. Předplatné tak nejde „zapnout"
+  vlastním falešným webem.
+- **Klipy Plus hlídá i appka**: konec předplatného (`planUntil`) - po něm se
+  hned vrátí 60s klipy a ruční nahrávání, i bez spojení s Kine; strop délky
+  klipu od serveru nejvýš 5 minut, bez Plus vždy 60 s. Předplatné se ověřuje
+  každou hodinu (dřív 6 h).
+- **Přihlášení po výpadku**: když Kine / Supabase při startu neodpovídá, appka
+  hráče neodhlásí (relace je na disku) a přihlášení obnoví, jakmile Kine
+  odpoví - dřív se tvářil jako odhlášený až do restartu appky.
+- **Délka klipu do nahrání**: Kine podle ní hlídá limity nahrávání a u
+  Cloudflare rezervuje jen tolik místa, kolik klip opravdu má.
+- Nezveřejněné záznamy vysílání Kine maže po pár dnech (texty v appce).
+- Testy: `tests/kineClient.test.mjs` (hlavička, oficiální adresy, verze,
+  426 -> upozornění, délka klipu, konec Klipy Plus).
+
 ## Novinky 0.10.9
 
 - **Kamera v klipech** (Záznam -> Kamera, výchozí vypnuto): obraz z kamery se

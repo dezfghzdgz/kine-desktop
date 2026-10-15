@@ -691,7 +691,7 @@ export const de: Record<Key, string> = {
   sideUpdateReady: 'Update {version} bereit',
   trayUpdateNow: 'Auf {version} aktualisieren (Neustart)',
   liveEndedTitle: 'Stream beendet · {duration}',
-  liveEndedRecordingHint: 'Kine hat den Stream aufgezeichnet. Veröffentliche ihn auf deinem Kanal (mit Chat-Wiedergabe), lade ihn auf den PC oder verwirf ihn. Was du nicht veröffentlichst, erscheint nirgends und wird nach 30 Tagen gelöscht.',
+  liveEndedRecordingHint: 'Kine hat den Stream aufgezeichnet. Veröffentliche ihn auf deinem Kanal (mit Chat-Wiedergabe), lade ihn auf den PC oder verwirf ihn. Was du nicht veröffentlichst, erscheint nirgends und wird nach ein paar Tagen gelöscht.',
   liveEndedVideoTitle: 'Videotitel',
   liveEndedVisibility: 'Wer es sehen kann',
   liveEndedPublish: 'Aufzeichnung auf Kine veröffentlichen',
@@ -717,7 +717,7 @@ export const de: Record<Key, string> = {
   liveAfterStreamPublic: 'Aufzeichnung sofort veröffentlichen - öffentlich',
   liveAfterStreamSubscribers: 'Sofort veröffentlichen - nur Abonnenten',
   liveAfterStreamPrivate: 'Sofort veröffentlichen - privat (nur du)',
-  liveAfterStreamHint: 'Kine zeichnet jeden Stream auf. Eine veröffentlichte Aufzeichnung bleibt dauerhaft auf deinem Kanal, samt Chat-Wiedergabe; eine nicht veröffentlichte wird nach 30 Tagen gelöscht. Dieselbe Einstellung wie im Studio auf Kine.',
+  liveAfterStreamHint: 'Kine zeichnet jeden Stream auf. Eine veröffentlichte Aufzeichnung bleibt dauerhaft auf deinem Kanal, samt Chat-Wiedergabe; eine nicht veröffentlichte wird nach ein paar Tagen gelöscht. Dieselbe Einstellung wie im Studio auf Kine.',
   liveAfterStreamUnsupported: 'Automatisches Veröffentlichen braucht ein Datenbank-Update auf Kine - nutze vorerst den Button, der nach dem Stream erscheint.',
   liveAfterStreamSaveFailed: 'Speichern fehlgeschlagen - prüfe die Verbindung und versuch es noch einmal.',
   toastLiveEndedPublish: 'Stream beendet ({duration}). Klicke, um die Aufzeichnung auf Kine zu veröffentlichen.',
@@ -877,4 +877,5 @@ export const de: Record<Key, string> = {
   clipCameraUnsupported: 'Die Kamera konnte nicht zur Aufnahme hinzugefügt werden.',
   clipCameraPreviewGame: 'Spiel',
   toastClipCameraFailed: 'Kamera in Clips: {reason} Clips werden vorerst ohne sie aufgenommen.',
+  updateRequiredNotice: 'Diese App-Version ist veraltet - Hochladen auf Kine und Streamen gehen erst nach dem Update wieder (Info → Aktualisieren).',
 };

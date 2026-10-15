@@ -72,7 +72,8 @@ export type PublishedRecording = { videoId: string; status: 'ready' | 'processin
 
 export type KineApi = {
   siteUrl(): string;
-  createUploadUrl(fileSize: number): Promise<UploadTarget>;
+  /** `durationSeconds`: délka klipu (Kine podle ní hlídá limity a rezervuje místo); null = neznámá. */
+  createUploadUrl(fileSize: number, durationSeconds?: number | null): Promise<UploadTarget>;
   confirm(input: ConfirmInput): Promise<{ id: string }>;
   /**
    * Je video na Kine už zpracované? Kine se zeptá Cloudflare a když je
@@ -158,8 +159,21 @@ export function createKineApi(deps: {
   siteUrl: () => string;
   getToken: () => Promise<string | null>;
   fetchImpl?: typeof fetch;
+  /** Kine odpověděla 426: appka je moc stará (nahrávat a vysílat nepůjde, dokud se neaktualizuje). */
+  onUpdateRequired?: () => void;
 }): KineApi {
-  const fetchImpl = deps.fetchImpl ?? fetch;
+  const rawFetch = deps.fetchImpl ?? fetch;
+  const fetchImpl = (async (input: any, init?: RequestInit) => {
+    const res = await rawFetch(input, init);
+    if (res.status === 426) {
+      try {
+        deps.onUpdateRequired?.();
+      } catch {
+        // Hlášení "aktualizuj" nesmí shodit volání.
+      }
+    }
+    return res;
+  }) as typeof fetch;
 
   async function post(path: string, body: unknown, timeoutMs?: number): Promise<any> {
     const token = await deps.getToken();
@@ -186,8 +200,12 @@ export function createKineApi(deps: {
 
   return {
     siteUrl: deps.siteUrl,
-    async createUploadUrl(fileSize) {
-      const data = await post('/api/videos/create-upload-url', { fileSize, preferResumable: true });
+    async createUploadUrl(fileSize, durationSeconds) {
+      const data = await post('/api/videos/create-upload-url', {
+        fileSize,
+        preferResumable: true,
+        ...(typeof durationSeconds === 'number' && durationSeconds > 0 ? { durationSeconds } : {}),
+      });
       if (!data?.uploadURL || !data?.videoId) throw new KineApiError('Kine nevrátila adresu pro nahrání.', 500);
       return { mode: data.mode === 'tus' ? 'tus' : 'basic', uploadURL: data.uploadURL, videoId: data.videoId };
     },

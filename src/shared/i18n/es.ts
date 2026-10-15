@@ -691,7 +691,7 @@ export const es: Record<Key, string> = {
   sideUpdateReady: 'Actualización {version} lista',
   trayUpdateNow: 'Actualizar a {version} (reinicio)',
   liveEndedTitle: 'Emisión terminada · {duration}',
-  liveEndedRecordingHint: 'Kine grabó el directo. Publícalo en tu canal (con la repetición del chat), descárgalo al PC o descártalo. Lo que no publiques no aparece en ningún sitio y se borra a los 30 días.',
+  liveEndedRecordingHint: 'Kine grabó el directo. Publícalo en tu canal (con la repetición del chat), descárgalo al PC o descártalo. Lo que no publiques no aparece en ningún sitio y se borra a los pocos días.',
   liveEndedVideoTitle: 'Título del vídeo',
   liveEndedVisibility: 'Quién puede verlo',
   liveEndedPublish: 'Publicar la grabación en Kine',
@@ -717,7 +717,7 @@ export const es: Record<Key, string> = {
   liveAfterStreamPublic: 'Publicar la grabación al momento - pública',
   liveAfterStreamSubscribers: 'Publicar al momento - solo suscriptores',
   liveAfterStreamPrivate: 'Publicar al momento - privada (solo tú)',
-  liveAfterStreamHint: 'Kine graba cada emisión. Una grabación publicada se queda en tu canal para siempre, con la repetición del chat; una sin publicar se borra a los 30 días. Es el mismo ajuste que en el estudio de Kine.',
+  liveAfterStreamHint: 'Kine graba cada emisión. Una grabación publicada se queda en tu canal para siempre, con la repetición del chat; una sin publicar se borra a los pocos días. Es el mismo ajuste que en el estudio de Kine.',
   liveAfterStreamUnsupported: 'La publicación automática necesita una actualización de la base de datos en Kine; por ahora usa el botón que aparece al terminar la emisión.',
   liveAfterStreamSaveFailed: 'No se pudo guardar: revisa la conexión y vuelve a intentarlo.',
   toastLiveEndedPublish: 'Emisión terminada ({duration}). Haz clic para publicar la grabación en Kine.',
@@ -877,4 +877,5 @@ export const es: Record<Key, string> = {
   clipCameraUnsupported: 'No se pudo añadir la cámara a la grabación.',
   clipCameraPreviewGame: 'Juego',
   toastClipCameraFailed: 'Cámara en los clips: {reason} Por ahora los clips se graban sin ella.',
+  updateRequiredNotice: 'Esta versión de la app está desactualizada: subir a Kine y emitir volverá a funcionar cuando actualices (Acerca de → Actualizar).',
 };

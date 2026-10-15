@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { app, safeStorage, shell } from 'electron';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { NO_PRICES, hasClipsPlus, hasKinePlus, normalizePlan, type AccountInfo } from '../shared/plan';
+import { appOutdated } from '../shared/kineClient';
 import { log } from './log';
 
 /**
@@ -42,9 +43,27 @@ export class Auth {
   private linkServer: Server | null = null;
   private linkState: string | null = null;
   private readonly dir: string;
+  /** Kine řekla, že je appka moc stará (minDesktopVersion / 426 / updateRequired). */
+  onUpdateRequired: (() => void) | null = null;
 
-  constructor(private siteUrl: () => string) {
+  /**
+   * `fetchImpl`: fetch s hlavičkou appky (X-Kine-App - src/shared/kineClient.ts),
+   * ať server ví, jaká verze se ptá.
+   */
+  constructor(
+    private siteUrl: () => string,
+    private readonly fetchImpl: typeof fetch = fetch
+  ) {
     this.dir = app.getPath('userData');
+  }
+
+  private updateRequired(why: string): void {
+    log(`Kine: appka je moc stará (${why}) - je potřeba aktualizovat`);
+    try {
+      this.onUpdateRequired?.();
+    } catch {
+      // nic
+    }
   }
 
   onChange(l: Listener): () => void {
@@ -108,10 +127,11 @@ export class Auth {
     const site = this.siteUrl();
     const cacheFile = join(this.dir, 'kine-config.json');
     try {
-      const res = await fetch(`${site}/api/desktop/config`, { signal: AbortSignal.timeout(10000) });
+      const res = await this.fetchImpl(`${site}/api/desktop/config`, { signal: AbortSignal.timeout(10000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as Partial<DesktopConfig>;
+      const data = (await res.json()) as Partial<DesktopConfig> & { minDesktopVersion?: unknown };
       if (!data.supabaseUrl || !data.supabaseAnonKey) throw new Error('no config');
+      if (appOutdated(app.getVersion(), data.minDesktopVersion)) this.updateRequired(`Kine chce aspoň ${String(data.minDesktopVersion)}`);
       const config: DesktopConfig = { supabaseUrl: data.supabaseUrl, supabaseAnonKey: data.supabaseAnonKey, siteUrl: site };
       writeFileSync(cacheFile, JSON.stringify(config));
       return config;
@@ -179,8 +199,20 @@ export class Auth {
 
   private async loadAccount(): Promise<void> {
     const client = await this.getClient();
-    const { data } = await client.auth.getUser();
-    const user = data.user;
+    const { data, error } = await client.auth.getUser();
+    let user = data.user;
+    if (!user && error && isNetworkError(error)) {
+      // Kine / Supabase teď neodpovídá (výpadek sítě): přihlášení zůstává (relace je na
+      // disku) - dřív se hráč po výpadku v appce tvářil jako odhlášený, dokud ji nerestartoval.
+      const { data: local } = await client.auth.getSession();
+      if (!local.session?.user) {
+        this.setAccount(null);
+        return;
+      }
+      if (this.account?.userId === local.session.user.id) return;
+      user = local.session.user;
+      log(`přihlášení: Kine neodpovídá (${error.message}) - účet z uložené relace, předplatné se ověří později`);
+    }
     if (!user) {
       this.setAccount(null);
       return;
@@ -207,12 +239,14 @@ export class Auth {
       const { data: session } = await client.auth.getSession();
       const token = session.session?.access_token;
       if (token) {
-        const res = await fetch(`${this.siteUrl()}/api/desktop/me`, {
+        const res = await this.fetchImpl(`${this.siteUrl()}/api/desktop/me`, {
           headers: { Authorization: `Bearer ${token}` },
           signal: AbortSignal.timeout(10000),
         });
+        if (res.status === 426) this.updateRequired('/api/desktop/me 426');
         if (res.ok) {
-          const me = (await res.json()) as Partial<AccountInfo> & { id?: string; plusPriceLabel?: string | null };
+          const me = (await res.json()) as Partial<AccountInfo> & { id?: string; plusPriceLabel?: string | null; updateRequired?: boolean };
+          if (me.updateRequired === true) this.updateRequired('/api/desktop/me');
           if (me.username) account.username = me.username;
           account.plan = normalizePlan(me.plan);
           account.planUntil = me.planUntil ?? null;
@@ -266,7 +300,7 @@ export class Auth {
     const token = await this.getToken();
     if (!token) return null;
     try {
-      const res = await fetch(`${this.siteUrl()}/api/desktop/link`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) });
+      const res = await this.fetchImpl(`${this.siteUrl()}/api/desktop/link`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) });
       if (!res.ok) return null;
       const data = (await res.json()) as { token_hash?: string };
       return data.token_hash ?? null;
@@ -282,7 +316,7 @@ export class Auth {
    * z něj vlastní relaci - obnovovací tokeny se nesdílí.
    */
   async loginFromWebToken(webAccessToken: string): Promise<void> {
-    const res = await fetch(`${this.siteUrl()}/api/desktop/link`, { method: 'POST', headers: { Authorization: `Bearer ${webAccessToken}` }, signal: AbortSignal.timeout(10000) });
+    const res = await this.fetchImpl(`${this.siteUrl()}/api/desktop/link`, { method: 'POST', headers: { Authorization: `Bearer ${webAccessToken}` }, signal: AbortSignal.timeout(10000) });
     if (!res.ok) throw new Error(`link ${res.status}`);
     const data = (await res.json()) as { token_hash?: string };
     if (!data.token_hash) throw new Error('missing token');
@@ -292,10 +326,18 @@ export class Auth {
     await this.loadAccount();
   }
 
-  /** Znovu se zeptat na plán a barvu (po startu, po přihlášení, občas). */
+  /**
+   * Znovu se zeptat na plán a barvu (po startu, po přihlášení, občas). Když
+   * appka při startu Kine nezastihla (výpadek), zkusí relaci obnovit teď -
+   * dřív zůstal hráč "odhlášený" až do restartu appky.
+   */
   async refresh(): Promise<void> {
-    if (!this.account) return;
     try {
+      if (!this.account) {
+        const client = await this.getClient();
+        const { data } = await client.auth.getSession();
+        if (!data.session) return;
+      }
       await this.loadAccount();
     } catch (e) {
       log(`obnova účtu: ${(e as Error).message}`);
@@ -475,4 +517,11 @@ function translateAuthError(message: string): string {
   if (/rate limit/i.test(message)) return 'rate-limit';
   if (/expired|invalid/i.test(message)) return 'link-expired';
   return message;
+}
+
+/** Chyba přihlášení kvůli síti (Kine / Supabase neodpovídá), ne kvůli neplatné relaci. */
+function isNetworkError(error: { name?: string; status?: number; message?: string }): boolean {
+  if (error.name === 'AuthRetryableFetchError') return true;
+  if (typeof error.status === 'number' && error.status !== 0) return error.status >= 500;
+  return /fetch|network|timeout|ECONN|ENOTFOUND|EAI_AGAIN|socket/i.test(error.message ?? '');
 }

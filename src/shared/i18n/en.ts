@@ -706,7 +706,7 @@ export const en = {
   sideUpdateReady: 'Update {version} ready',
   trayUpdateNow: 'Update to {version} (restart)',
   liveEndedTitle: 'Stream ended · {duration}',
-  liveEndedRecordingHint: 'Kine recorded the stream. Publish it on your channel (it stays there with the chat replay), download it to your PC, or discard it. Anything you don\'t publish shows up nowhere and is deleted after 30 days.',
+  liveEndedRecordingHint: 'Kine recorded the stream. Publish it on your channel (it stays there with the chat replay), download it to your PC, or discard it. Anything you don\'t publish shows up nowhere and is deleted after a few days.',
   liveEndedVideoTitle: 'Video title',
   liveEndedVisibility: 'Who can watch it',
   liveEndedPublish: 'Publish the recording on Kine',
@@ -732,7 +732,7 @@ export const en = {
   liveAfterStreamPublic: 'Publish the recording right away - public',
   liveAfterStreamSubscribers: 'Publish right away - subscribers only',
   liveAfterStreamPrivate: 'Publish right away - private (only you)',
-  liveAfterStreamHint: 'Kine records every stream. A published recording stays on your channel for good, with the chat replay; an unpublished one is deleted after 30 days. Same setting as in the studio on Kine.',
+  liveAfterStreamHint: 'Kine records every stream. A published recording stays on your channel for good, with the chat replay; an unpublished one is deleted after a few days. Same setting as in the studio on Kine.',
   liveAfterStreamUnsupported: 'Automatic publishing needs a database update on Kine - for now, use the button that shows up after the stream.',
   liveAfterStreamSaveFailed: 'Could not save - check your connection and try again.',
   toastLiveEndedPublish: 'Stream ended ({duration}). Click to publish the recording on Kine.',
@@ -892,6 +892,7 @@ export const en = {
   clipCameraUnsupported: 'The camera couldn\'t be added to the recording.',
   clipCameraPreviewGame: 'Game',
   toastClipCameraFailed: 'Camera in clips: {reason} Clips are recorded without it for now.',
+  updateRequiredNotice: 'This version of the app is out of date - uploading to Kine and streaming will work again after you update (About → Update).',
 } as const;
 
 export type Key = keyof typeof en;

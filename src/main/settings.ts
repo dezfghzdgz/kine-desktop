@@ -3,7 +3,19 @@ import { dirname, join } from 'node:path';
 import { app } from 'electron';
 import type { Settings } from '../shared/types';
 import { DEFAULT_SETTINGS, sanitizeSettings } from '../shared/settingsSchema';
+import { guardSiteUrl } from '../shared/kineClient';
 import { log } from './log';
+
+/**
+ * Zabalená appka mluví jen s oficiálním Kine (src/shared/kineClient.ts) - jiná
+ * adresa v nastavení se vrátí. Vývoj (nezabalená appka) a testy můžou cokoli.
+ */
+function withOfficialSite(settings: Settings): Settings {
+  const siteUrl = guardSiteUrl(settings.siteUrl, { packaged: app.isPackaged, test: !!process.env.KINE_TEST });
+  if (siteUrl === settings.siteUrl) return settings;
+  log(`adresa Kine ${settings.siteUrl} není oficiální - appka mluví s ${siteUrl}`);
+  return { ...settings, siteUrl };
+}
 
 /**
  * Nastavení v userData/settings.json. Načte se jednou, změny se hned
@@ -22,7 +34,7 @@ export class SettingsStore {
   private read(): Settings {
     try {
       const parsed = JSON.parse(readFileSync(this.file, 'utf8'));
-      return sanitizeSettings(parsed);
+      return withOfficialSite(sanitizeSettings(parsed));
     } catch {
       // První spuštění (nebo rozbitý soubor): výchozí - anglicky, jazyk si
       // hráč vybere hned na první stránce průvodce.
@@ -36,7 +48,7 @@ export class SettingsStore {
 
   update(patch: Partial<Settings>): Settings {
     const prev = this.current;
-    this.current = sanitizeSettings({ ...prev, ...patch });
+    this.current = withOfficialSite(sanitizeSettings({ ...prev, ...patch }));
     try {
       mkdirSync(dirname(this.file), { recursive: true });
       const tmp = this.file + '.tmp';

@@ -57,10 +57,35 @@ export function clipOptionsFor(plan: Plan | null | undefined): readonly number[]
   return hasClipsPlus(plan) ? PLUS_CLIP_OPTIONS : FREE_CLIP_OPTIONS;
 }
 
-export function maxClipSecondsFor(account: { plan: Plan; maxClipSeconds?: number } | null | undefined): number {
-  if (!account) return FREE_CLIP_MAX_SECONDS;
-  if (account.maxClipSeconds && account.maxClipSeconds > 0) return account.maxClipSeconds;
-  return hasClipsPlus(account.plan) ? PLUS_CLIP_MAX_SECONDS : FREE_CLIP_MAX_SECONDS;
+/** Skončilo předplatné podle data (planUntil)? Bez data = neskončilo. */
+function planExpired(planUntil: string | null | undefined, now: number): boolean {
+  if (!planUntil) return false;
+  const until = Date.parse(planUntil);
+  return Number.isFinite(until) && until <= now;
+}
+
+/**
+ * Platí Klipy Plus právě teď? Kine to říká (clipsPlus), appka navíc hlídá
+ * datum konce - když předplatné skončí, zatímco appka běží (nebo je offline),
+ * Plus skončí včas, i bez dalšího dotazu na Kine.
+ */
+export function clipsPlusActive(account: { clipsPlus?: boolean; plan?: Plan; planUntil?: string | null } | null | undefined, now = Date.now()): boolean {
+  if (!account) return false;
+  const plus = typeof account.clipsPlus === 'boolean' ? account.clipsPlus : hasClipsPlus(account.plan);
+  return plus && !planExpired(account.planUntil, now);
+}
+
+/**
+ * Nejdelší klip: zdarma 60 s, s Klipy Plus to, co řekne Kine (nejvýš 5 min).
+ * Bez Plus (nebo po konci předplatného) vždycky 60 s, i kdyby server poslal víc.
+ */
+export function maxClipSecondsFor(
+  account: { plan: Plan; maxClipSeconds?: number; clipsPlus?: boolean; planUntil?: string | null } | null | undefined,
+  now = Date.now()
+): number {
+  if (!account || !clipsPlusActive(account, now)) return FREE_CLIP_MAX_SECONDS;
+  if (account.maxClipSeconds && account.maxClipSeconds > 0) return Math.min(account.maxClipSeconds, PLUS_CLIP_MAX_SECONDS);
+  return PLUS_CLIP_MAX_SECONDS;
 }
 
 /** "#a34ff7" nebo "#af7" -> "163, 79, 247"; neplatná barva -> null. */

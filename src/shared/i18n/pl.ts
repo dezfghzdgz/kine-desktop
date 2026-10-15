@@ -691,7 +691,7 @@ export const pl: Record<Key, string> = {
   sideUpdateReady: 'Aktualizacja {version} gotowa',
   trayUpdateNow: 'Zaktualizuj do {version} (restart)',
   liveEndedTitle: 'Transmisja zakończona · {duration}',
-  liveEndedRecordingHint: 'Kine nagrało transmisję. Opublikuj ją na kanale (zostanie z zapisem czatu), pobierz na PC albo odrzuć. Czego nie opublikujesz, nigdzie się nie pokaże i po 30 dniach samo zniknie.',
+  liveEndedRecordingHint: 'Kine nagrało transmisję. Opublikuj ją na kanale (zostanie z zapisem czatu), pobierz na PC albo odrzuć. Czego nie opublikujesz, nigdzie się nie pokaże i po kilku dniach samo zniknie.',
   liveEndedVideoTitle: 'Tytuł filmu',
   liveEndedVisibility: 'Kto może go oglądać',
   liveEndedPublish: 'Opublikuj nagranie na Kine',
@@ -717,7 +717,7 @@ export const pl: Record<Key, string> = {
   liveAfterStreamPublic: 'Od razu opublikuj nagranie - publiczne',
   liveAfterStreamSubscribers: 'Od razu opublikuj - tylko subskrybenci',
   liveAfterStreamPrivate: 'Od razu opublikuj - prywatnie (tylko ty)',
-  liveAfterStreamHint: 'Kine nagrywa każdą transmisję. Opublikowane nagranie zostaje na kanale na stałe, z zapisem czatu; nieopublikowane jest usuwane po 30 dniach. To samo ustawienie co w studiu na Kine.',
+  liveAfterStreamHint: 'Kine nagrywa każdą transmisję. Opublikowane nagranie zostaje na kanale na stałe, z zapisem czatu; nieopublikowane jest usuwane po kilku dniach. To samo ustawienie co w studiu na Kine.',
   liveAfterStreamUnsupported: 'Automatyczna publikacja wymaga aktualizacji bazy danych na Kine - na razie użyj przycisku, który pojawi się po transmisji.',
   liveAfterStreamSaveFailed: 'Nie udało się zapisać - sprawdź połączenie i spróbuj ponownie.',
   toastLiveEndedPublish: 'Transmisja zakończona ({duration}). Kliknij, aby opublikować nagranie na Kine.',
@@ -877,4 +877,5 @@ export const pl: Record<Key, string> = {
   clipCameraUnsupported: 'Nie udało się dodać kamery do nagrania.',
   clipCameraPreviewGame: 'Gra',
   toastClipCameraFailed: 'Kamera w klipach: {reason} Na razie klipy nagrywają się bez niej.',
+  updateRequiredNotice: 'Ta wersja aplikacji jest nieaktualna - przesyłanie na Kine i nadawanie zadziała po aktualizacji (O aplikacji → Aktualizuj).',
 };

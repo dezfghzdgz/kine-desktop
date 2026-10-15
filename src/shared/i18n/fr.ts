@@ -691,7 +691,7 @@ export const fr: Record<Key, string> = {
   sideUpdateReady: 'Mise à jour {version} prête',
   trayUpdateNow: 'Mettre à jour vers {version} (redémarrage)',
   liveEndedTitle: 'Live terminé · {duration}',
-  liveEndedRecordingHint: 'Kine a enregistré le live. Publie-le sur ta chaîne (avec la rediffusion du chat), télécharge-le sur ton PC ou jette-le. Ce que tu ne publies pas n\'apparaît nulle part et est supprimé après 30 jours.',
+  liveEndedRecordingHint: 'Kine a enregistré le live. Publie-le sur ta chaîne (avec la rediffusion du chat), télécharge-le sur ton PC ou jette-le. Ce que tu ne publies pas n\'apparaît nulle part et est supprimé au bout de quelques jours.',
   liveEndedVideoTitle: 'Titre de la vidéo',
   liveEndedVisibility: 'Qui peut la voir',
   liveEndedPublish: 'Publier l\'enregistrement sur Kine',
@@ -717,7 +717,7 @@ export const fr: Record<Key, string> = {
   liveAfterStreamPublic: 'Publier l\'enregistrement tout de suite - public',
   liveAfterStreamSubscribers: 'Publier tout de suite - abonnés seulement',
   liveAfterStreamPrivate: 'Publier tout de suite - privé (toi seul)',
-  liveAfterStreamHint: 'Kine enregistre chaque live. Un enregistrement publié reste sur ta chaîne pour de bon, avec la rediffusion du chat ; un enregistrement non publié est supprimé au bout de 30 jours. Même réglage que dans le studio sur Kine.',
+  liveAfterStreamHint: 'Kine enregistre chaque live. Un enregistrement publié reste sur ta chaîne pour de bon, avec la rediffusion du chat ; un enregistrement non publié est supprimé au bout de quelques jours. Même réglage que dans le studio sur Kine.',
   liveAfterStreamUnsupported: 'La publication automatique nécessite une mise à jour de la base de données sur Kine - en attendant, utilise le bouton qui apparaît après le live.',
   liveAfterStreamSaveFailed: 'Impossible d\'enregistrer - vérifie ta connexion et réessaie.',
   toastLiveEndedPublish: 'Live terminé ({duration}). Clique pour publier l\'enregistrement sur Kine.',
@@ -877,4 +877,5 @@ export const fr: Record<Key, string> = {
   clipCameraUnsupported: 'Impossible d\'ajouter la caméra à l\'enregistrement.',
   clipCameraPreviewGame: 'Jeu',
   toastClipCameraFailed: 'Caméra dans les clips : {reason} Pour l\'instant, les clips sont enregistrés sans elle.',
+  updateRequiredNotice: 'Cette version de l\'appli est obsolète - la mise en ligne sur Kine et le direct remarcheront après la mise à jour (À propos → Mettre à jour).',
 };

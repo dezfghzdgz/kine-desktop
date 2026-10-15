@@ -54,6 +54,8 @@ type Deps = {
   gameRunning: () => boolean;
   /** Jak často kontrolovat (h) - podle nastavení výkonu; bez toho 6 h. */
   checkHours?: () => number;
+  /** fetch s hlavičkou appky (src/shared/kineClient.ts) pro dotaz na web Kine. */
+  fetchImpl?: typeof fetch;
 };
 
 let updater: typeof import('electron-updater').autoUpdater | null = null;
@@ -385,7 +387,7 @@ export async function checkForUpdates(): Promise<UpdateCheck> {
 
   // Poslední záchrana: web Kine ví, jaká verze je venku a odkud se stahuje.
   try {
-    const res = await fetch(`${deps.siteUrl()}/api/desktop/latest`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
+    const res = await (deps.fetchImpl ?? fetch)(`${deps.siteUrl()}/api/desktop/latest`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = (await res.json()) as {
       release?: { version?: string } | null;

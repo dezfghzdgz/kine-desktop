@@ -691,7 +691,7 @@ export const cs: Record<Key, string> = {
   sideUpdateReady: 'Aktualizace {version} připravená',
   trayUpdateNow: 'Aktualizovat na {version} (restart)',
   liveEndedTitle: 'Vysílání skončilo · {duration}',
-  liveEndedRecordingHint: 'Kine vysílání nahrálo. Nahraj záznam na kanál (zůstane tam i se záznamem chatu), stáhni si ho do PC, nebo ho zahoď. Co nezveřejníš, nikde se neukáže a po 30 dnech se samo smaže.',
+  liveEndedRecordingHint: 'Kine vysílání nahrálo. Nahraj záznam na kanál (zůstane tam i se záznamem chatu), stáhni si ho do PC, nebo ho zahoď. Co nezveřejníš, nikde se neukáže a po pár dnech se samo smaže.',
   liveEndedVideoTitle: 'Název videa',
   liveEndedVisibility: 'Kdo ho uvidí',
   liveEndedPublish: 'Zveřejnit záznam na Kine',
@@ -717,7 +717,7 @@ export const cs: Record<Key, string> = {
   liveAfterStreamPublic: 'Hned zveřejnit záznam - veřejně',
   liveAfterStreamSubscribers: 'Hned zveřejnit - jen odběratelům',
   liveAfterStreamPrivate: 'Hned zveřejnit - soukromě (jen ty)',
-  liveAfterStreamHint: 'Kine nahrává každé vysílání. Zveřejněný záznam zůstane na kanálu napořád i se záznamem chatu, nezveřejněný se po 30 dnech smaže. Stejné nastavení jako ve studiu na Kine.',
+  liveAfterStreamHint: 'Kine nahrává každé vysílání. Zveřejněný záznam zůstane na kanálu napořád i se záznamem chatu, nezveřejněný se po pár dnech smaže. Stejné nastavení jako ve studiu na Kine.',
   liveAfterStreamUnsupported: 'Automatické zveřejnění potřebuje na Kine aktualizaci databáze - zatím použij tlačítko, které se ukáže po konci vysílání.',
   liveAfterStreamSaveFailed: 'Nepovedlo se uložit - zkontroluj připojení a zkus to znovu.',
   toastLiveEndedPublish: 'Vysílání skončilo ({duration}). Klikni a zveřejni záznam na Kine.',
@@ -877,4 +877,5 @@ export const cs: Record<Key, string> = {
   clipCameraUnsupported: 'Kameru se do záznamu přidat nepodařilo.',
   clipCameraPreviewGame: 'Hra',
   toastClipCameraFailed: 'Kamera v klipech: {reason} Klipy se zatím nahrávají bez ní.',
+  updateRequiredNotice: 'Tahle verze appky je zastaralá - nahrávat na Kine a vysílat půjde až po aktualizaci (O appce → Aktualizovat).',
 };

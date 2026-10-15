@@ -4,7 +4,7 @@ import { CATEGORY_KEYS, GLASS_BACKDROPS, LANGS, LOOK_CORNERS, LOOK_SIZES, STORAG
 import { LANG_NAMES, makeT, type Key } from '../shared/i18n';
 import { HotkeyRecorder, formatHotkey, hotkeyLabel } from '../shared/hotkeys';
 import { DISCORD_FILE_MAX_BYTES, isDiscordWebhook, suggestedMbps } from '../shared/settingsSchema';
-import { applyBrandColor, clipOptionsFor, maxClipSecondsFor } from '../shared/plan';
+import { applyBrandColor, clipOptionsFor, clipsPlusActive, maxClipSecondsFor } from '../shared/plan';
 import { performanceProfile } from '../shared/performance';
 import { clear, clipMeta, errorText, fileUrl, formatBytes, formatDate, formatDuration, h, isPortrait, thumbImages } from './ui';
 import { closePlayer, openPlayer, openPlayerId, type Neighbors, type PlayerHandle } from './player';
@@ -672,7 +672,7 @@ function saveText<K extends keyof Settings>(field: K, value: Settings[K], now = 
 }
 
 function clipsPlus(): boolean {
-  return status.account?.clipsPlus === true;
+  return clipsPlusActive(status.account);
 }
 
 /** Je zapnuté úsporné nastavení (720p / 30 fps / 5 Mb/s)? */

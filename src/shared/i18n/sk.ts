@@ -691,7 +691,7 @@ export const sk: Record<Key, string> = {
   sideUpdateReady: 'Aktualizácia {version} pripravená',
   trayUpdateNow: 'Aktualizovať na {version} (reštart)',
   liveEndedTitle: 'Vysielanie skončilo · {duration}',
-  liveEndedRecordingHint: 'Kine vysielanie nahralo. Nahraj záznam na kanál (zostane tam aj so záznamom chatu), stiahni si ho do PC, alebo ho zahoď. Čo nezverejníš, nikde sa neukáže a po 30 dňoch sa samo zmaže.',
+  liveEndedRecordingHint: 'Kine vysielanie nahralo. Nahraj záznam na kanál (zostane tam aj so záznamom chatu), stiahni si ho do PC, alebo ho zahoď. Čo nezverejníš, nikde sa neukáže a po pár dňoch sa samo zmaže.',
   liveEndedVideoTitle: 'Názov videa',
   liveEndedVisibility: 'Kto ho uvidí',
   liveEndedPublish: 'Zverejniť záznam na Kine',
@@ -717,7 +717,7 @@ export const sk: Record<Key, string> = {
   liveAfterStreamPublic: 'Hneď zverejniť záznam - verejne',
   liveAfterStreamSubscribers: 'Hneď zverejniť - len odberateľom',
   liveAfterStreamPrivate: 'Hneď zverejniť - súkromne (len ty)',
-  liveAfterStreamHint: 'Kine nahráva každé vysielanie. Zverejnený záznam zostane na kanáli navždy aj so záznamom chatu, nezverejnený sa po 30 dňoch zmaže. Rovnaké nastavenie ako v štúdiu na Kine.',
+  liveAfterStreamHint: 'Kine nahráva každé vysielanie. Zverejnený záznam zostane na kanáli navždy aj so záznamom chatu, nezverejnený sa po pár dňoch zmaže. Rovnaké nastavenie ako v štúdiu na Kine.',
   liveAfterStreamUnsupported: 'Automatické zverejnenie potrebuje na Kine aktualizáciu databázy - zatiaľ použi tlačidlo, ktoré sa ukáže po konci vysielania.',
   liveAfterStreamSaveFailed: 'Nepodarilo sa uložiť - skontroluj pripojenie a skús to znova.',
   toastLiveEndedPublish: 'Vysielanie skončilo ({duration}). Klikni a zverejni záznam na Kine.',
@@ -877,4 +877,5 @@ export const sk: Record<Key, string> = {
   clipCameraUnsupported: 'Kameru sa do záznamu pridať nepodarilo.',
   clipCameraPreviewGame: 'Hra',
   toastClipCameraFailed: 'Kamera v klipoch: {reason} Klipy sa zatiaľ nahrávajú bez nej.',
+  updateRequiredNotice: 'Táto verzia appky je zastaraná - nahrávať na Kine a vysielať pôjde až po aktualizácii (O appke → Aktualizovať).',
 };

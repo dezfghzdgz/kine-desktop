@@ -336,7 +336,10 @@ export class Uploader {
     let mode: 'tus' | 'basic' = 'tus';
 
     if (!tusUrl || !videoId) {
-      const target = await api.createUploadUrl(size);
+      // Délka jde Kine (rezerva u Cloudflare a limity - na webu lib/uploadLimits.ts). Upravený
+      // klip (zpomalení, střih) může mít jinou délku než originál - pak ji Kine odhadne sama.
+      const duration = file === clip.file && Number.isFinite(clip.durationSeconds) && clip.durationSeconds > 0 ? clip.durationSeconds : null;
+      const target = await api.createUploadUrl(size, duration);
       tusUrl = target.uploadURL;
       videoId = target.videoId;
       mode = target.mode;

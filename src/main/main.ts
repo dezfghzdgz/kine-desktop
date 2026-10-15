@@ -55,7 +55,8 @@ import { makeT, type Key } from '../shared/i18n';
 import { hotkeyLabel } from '../shared/hotkeys';
 import { clipFileBase, defaultClipTitle, safeFilePart } from '../shared/clipNaming';
 import { DISCORD_FILE_MAX_BYTES } from '../shared/settingsSchema';
-import { maxClipSecondsFor } from '../shared/plan';
+import { clipsPlusActive, maxClipSecondsFor } from '../shared/plan';
+import { kineAppHeader, withKineHeader } from '../shared/kineClient';
 import { performanceProfile } from '../shared/performance';
 import { initLog, log, logDir, tailLog } from './log';
 import { SettingsStore } from './settings';
@@ -197,6 +198,10 @@ class KineApp {
   /** Živé vysílání z appky na Kine (tlačítko Vysílat). */
   live!: LiveController;
   private kineApi!: KineApi;
+  /** fetch na Kine s hlavičkou appky (X-Kine-App - src/shared/kineClient.ts). */
+  private kineFetch: typeof fetch = fetch;
+  /** Kdy naposledy Kine řekla "appka je moc stará" (hlášení a kontrola aktualizace jednou za hodinu). */
+  private updateRequiredAt = 0;
   /** Okno s chatem vlastního vysílání (Twitch "popout chat"). */
   private chatWindow: BrowserWindow | null = null;
   /** Zásobník rozjelo až vysílání (nebyla hra / ruční režim) - po konci vysílání se zase vypne. */
@@ -268,9 +273,9 @@ class KineApp {
     return makeT(this.settings.get().lang)(key, vars);
   }
 
-  /** Má hráč Klipy Plus (automatické nahrávání, dlouhé klipy)? Bez přihlášení ne. */
+  /** Má hráč Klipy Plus (automatické nahrávání, dlouhé klipy)? Bez přihlášení ne, po konci předplatného ne. */
   hasClipsPlus(): boolean {
-    return this.auth.current()?.clipsPlus === true;
+    return clipsPlusActive(this.auth.current());
   }
 
   /** Co se má stát po hře - "auto" je jen v Klipy Plus, jinak se chová jako "review". */
@@ -319,8 +324,16 @@ class KineApp {
       onChange: () => this.pushStatusSoon(),
     });
 
-    this.auth = new Auth(() => this.settings.get().siteUrl);
-    const api = createKineApi({ siteUrl: () => this.settings.get().siteUrl, getToken: () => this.auth.getToken() });
+    // Každý dotaz na Kine nese verzi appky (X-Kine-App) - zastaralou appku Kine nepustí nahrávat ani vysílat.
+    this.kineFetch = withKineHeader(fetch, kineAppHeader(VARIANT, app.getVersion()));
+    this.auth = new Auth(() => this.settings.get().siteUrl, this.kineFetch);
+    this.auth.onUpdateRequired = () => this.markUpdateRequired();
+    const api = createKineApi({
+      siteUrl: () => this.settings.get().siteUrl,
+      getToken: () => this.auth.getToken(),
+      fetchImpl: this.kineFetch,
+      onUpdateRequired: () => this.markUpdateRequired(),
+    });
     this.kineApi = api;
 
     this.toast = new Toast({
@@ -527,7 +540,7 @@ class KineApp {
     this.helper?.start();
     this.createTray();
     this.applyLoginItem();
-    initUpdater({ variant: VARIANT, siteUrl: () => this.settings.get().siteUrl, gameRunning: () => !!this.games.current(), checkHours: () => this.profile().updateCheckHours });
+    initUpdater({ variant: VARIANT, siteUrl: () => this.settings.get().siteUrl, gameRunning: () => !!this.games.current(), checkHours: () => this.profile().updateCheckHours, fetchImpl: this.kineFetch });
     // Průběh stahování aktualizace do okna (O appce, postranní panel) a "Aktualizovat" do lišty.
     onUpdateProgress(() => {
       // Stažená aktualizace: zjistit Smart App Control (O appce u tlačítka upozorní, že ji může zablokovat).
@@ -579,9 +592,10 @@ class KineApp {
     setInterval(() => {
       if (this.kineViewShown && this.kineView && !this.kineView.webContents.isDestroyed()) void this.syncLogin(this.kineView);
     }, 15000);
-    // Plán (předplatné) a barva se občas srovnají podle Kine - když Klipy
-    // Plus vyprší, automatické nahrávání se samo vrátí na ruční.
-    setInterval(() => void this.auth.refresh(), 6 * 60 * 60 * 1000);
+    // Plán (předplatné) a barva se každou hodinu srovnají podle Kine - když Klipy
+    // Plus vyprší nebo se zruší, automatické nahrávání se samo vrátí na ruční
+    // (a do té doby hlídá i datum konce předplatného - src/shared/plan.ts).
+    setInterval(() => void this.auth.refresh(), 60 * 60 * 1000);
     // Koš: co v něm leží déle než týden, zmizí samo. Strop místa na klipy se hlídá taky.
     setInterval(() => {
       const n = this.library.purgeExpired();
@@ -1220,7 +1234,7 @@ class KineApp {
     // Testy (e2e) mluví s napodobeným webem - adresa se jim nemění.
     if (process.env.KINE_TEST) return;
     const current = this.settings.get().siteUrl;
-    const next = await checkSiteMove(current).catch(() => null);
+    const next = await checkSiteMove(current, this.kineFetch as unknown as Parameters<typeof checkSiteMove>[1]).catch(() => null);
     if (!next || next === this.settings.get().siteUrl) return;
     log(`Kine má novou adresu: ${current} -> ${next}`);
     this.settings.update({ siteUrl: next });
@@ -1731,6 +1745,20 @@ class KineApp {
   }
 
   // ---- tichá upozornění (v okně místo okének) ------------------------------------------
+
+  /**
+   * Kine řekla, že je appka moc stará (/api/desktop/config, 426 z nahrávání nebo
+   * vysílání): nahrávat a vysílat nepůjde, dokud se neaktualizuje. Upozornění
+   * v okně (O appce) a hned hledání aktualizace - stáhne se sama, "Aktualizovat"
+   * ji nainstaluje. Jednou za hodinu, ať se to při každém dotazu neopakuje.
+   */
+  markUpdateRequired(): void {
+    if (Date.now() - this.updateRequiredAt < 60 * 60 * 1000) return;
+    this.updateRequiredAt = Date.now();
+    this.addNotice({ id: 'update-required', text: this.t('updateRequiredNotice'), kind: 'error', tab: 'about' });
+    // Za chvíli: při startu se tohle dozví dřív, než je kontrola aktualizací připravená.
+    if (!process.env.KINE_TEST) setTimeout(() => void checkForUpdates().catch(() => undefined), 20_000);
+  }
 
   private addNotice(notice: Omit<AppNotice, 'at'>): void {
     this.notices = [...this.notices.filter((n) => n.id !== notice.id), { ...notice, at: Date.now() }].slice(-8);

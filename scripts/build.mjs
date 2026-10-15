@@ -70,6 +70,7 @@ await build({
     clipNaming: 'src/shared/clipNaming.ts',
     i18n: 'src/shared/i18n/index.ts',
     plan: 'src/shared/plan.ts',
+    kineClient: 'src/shared/kineClient.ts',
     performance: 'src/shared/performance.ts',
     types: 'src/shared/types.ts',
     upload: 'src/shared/upload.ts',

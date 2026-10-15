@@ -163,6 +163,59 @@ test('když se rozjede hra, nahrávání se pozastaví a po hře naváže od off
   mock.server.close();
 });
 
+test('během hraní: samo se nenahrává, ale "nahrát hned" (hráč klikl Nahrát) jede hned a hra ho nepřeruší', async () => {
+  const mock = await startMockServer();
+  const { library } = makeLibrary(2 * 1024 * 1024);
+  const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${mock.port}`, getToken: async () => 'token-123' });
+  let blocked = 'game';
+  const uploader = new Uploader({ library, api, blocked: () => blocked, settings: () => settings, log: () => {}, readySchedule: fast });
+  const done = new Promise((resolve) => uploader.on((e) => e.type === 'done' && resolve(e)));
+
+  // Automaticky (po klipu): čeká, až hráč dohraje.
+  uploader.enqueue([{ clipId: 'c1', visibility: 'private' }]);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(library.get('c1').upload.state, 'paused');
+  assert.equal(library.get('c1').upload.reason, 'game');
+  assert.equal(uploader.isPausedByGame(), true);
+  assert.equal(mock.uploads.size, 0);
+
+  // Hráč klikne "Nahrát hned": jede, i když hra pořád běží; kick() kvůli hře ho nepřeruší.
+  mock.setSlow(true);
+  uploader.enqueue([{ clipId: 'c1', visibility: 'private' }], { now: true });
+  assert.equal(uploader.isForced('c1'), true);
+  assert.equal(uploader.isPausedByGame(), false);
+  await new Promise((r) => setTimeout(r, 150));
+  uploader.kick();
+  mock.setSlow(false);
+  const result = await done;
+  assert.ok(result.url.includes('/watch/'));
+  assert.equal(mock.confirmed.length, 1);
+  assert.equal(library.get('c1').upload.state, 'done');
+  assert.equal(uploader.isForced('c1'), false);
+  uploader.stopWaiting();
+  mock.server.close();
+});
+
+test('"nahrát hned" bez připojení: počká na připojení (výjimka je jen pro hru)', async () => {
+  const mock = await startMockServer();
+  const { library } = makeLibrary(1024);
+  const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${mock.port}`, getToken: async () => 'token-123' });
+  let blocked = 'offline';
+  const uploader = new Uploader({ library, api, blocked: () => blocked, settings: () => settings, log: () => {}, readySchedule: fast });
+  const done = new Promise((resolve) => uploader.on((e) => e.type === 'done' && resolve(e)));
+  uploader.enqueue([{ clipId: 'c1', visibility: 'private' }], { now: true });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(library.get('c1').upload.state, 'paused');
+  assert.equal(library.get('c1').upload.reason, 'offline');
+  assert.equal(mock.uploads.size, 0);
+  blocked = null;
+  uploader.kick();
+  await done;
+  assert.equal(mock.confirmed.length, 1);
+  uploader.stopWaiting();
+  mock.server.close();
+});
+
 test('bez přihlášení skončí klip s chybou, ne zaseknutý', async () => {
   const mock = await startMockServer();
   const { library } = makeLibrary(1024);

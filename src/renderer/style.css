@@ -382,6 +382,13 @@ kbd {
 .player-head .title { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .player-head button.active { color: var(--brand); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.5); }
 .player-close { width: 32px; padding: 0 !important; font-size: 14px; }
+/* Hlavička přehrávače: hvězdička (oblíbené) jako na kartě klipu, Nahrát na Kine. */
+.player-head .player-fav { width: 32px; padding: 0 !important; justify-content: center; }
+.player-head .player-fav.on, .player-head .player-fav:hover:not(:disabled) { color: var(--warn); }
+.player-head .player-upload .spin { margin-right: 6px; }
+/* Karta klipu, který čeká na konec hry: text a vedle "Nahrát hned". */
+.upload-paused-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.upload-paused-row .upload-now { min-height: 24px; padding: 2px 8px; font-size: var(--fs-xs); }
 .player-stage { position: relative; background: #000; min-height: 200px; display: flex; align-items: center; justify-content: center; }
 .player-video { display: block; width: 100%; max-height: 72vh; background: #000; outline: none; cursor: pointer; }
 .player-box.editing .player-video { max-height: 50vh; }

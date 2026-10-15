@@ -195,6 +195,19 @@ export type Settings = {
   separateMicTrack: boolean;
   /** Posun zvuku vůči obrazu v ms (kladné = zvuk později) - kalibrace, když zvuk „nesedí“. */
   audioOffsetMs: number;
+  /**
+   * Kamera v klipech: obraz z kamery se skládá do záznamu už při nahrávání -
+   * do stejného snímku jako hra, takže v klipu sedí přesně se hrou (nic se
+   * dodatečně nezarovnává). Vypnuto (výchozí) = kamera se vůbec nezapíná.
+   */
+  clipCamera: boolean;
+  /** Kamera pro klipy ('' = výchozí kamera). */
+  clipCameraDevice: string;
+  clipCameraPosition: LiveCameraPosition;
+  clipCameraSize: LiveCameraSize;
+  clipCameraShape: LiveCameraShape;
+  /** Zrcadlit kameru v klipech (jak se hráč vidí sám). */
+  clipCameraMirror: boolean;
   /** Prázdné = hlavní obrazovka. Jinak id obrazovky z Electronu. */
   displayId: string;
   detection: DetectionMode;
@@ -419,6 +432,8 @@ export type Status = {
   notices: AppNotice[];
   /** Hardwarový kodér H.264 dostupný (podle WebCodecs); null = zásobník ještě neběžel / nejde zjistit. */
   hwEncoder: boolean | null;
+  /** Kamera v klipech: jak je na tom za běhu snímání; null = vypnutá v nastavení nebo snímání neběží. */
+  clipCamera: ClipCameraStatus | null;
   /** Živé vysílání z appky. */
   live: LiveStatus;
   /** Aktualizace appky: stahuje se (průběh) / připravená k instalaci. */
@@ -504,7 +519,9 @@ export type CaptureCommand =
   /** Změna za běhu vysílání bez nového spojení: obrazovka "Hned jsem zpět", ztlumený mikrofon, kamera. */
   | { type: 'live-scene'; scene: LiveScene }
   /** Měřáky zvuku rychle (někdo se dívá do nastavení), nebo jednou za sekundu. */
-  | { type: 'meters'; fast: boolean };
+  | { type: 'meters'; fast: boolean }
+  /** Kamera v klipech za běhu: jiná kamera, poloha, velikost, tvar, zrcadlo (null = bez kamery) - bez restartu zásobníku. */
+  | { type: 'clip-camera'; camera: SceneCamera | null };
 
 export type CaptureEvent =
   | {
@@ -553,6 +570,12 @@ export type CaptureEvent =
   /** Vysílá se, ale něco z přání nešlo (kamera není / je obsazená) - vysílání jede bez toho. */
   | { type: 'live-warning'; generation: number; kind: 'camera'; message: string }
   /**
+   * Kamera v klipech: starting = otevírá se, on = je v záznamu (rozměry kamery), error = nejde
+   * (message jako u vysílání: camera-busy / camera-missing / camera-denied / camera-unsupported /
+   * camera disconnected / camera: …) - nahrává se dál bez ní a za chvíli se zkusí znovu.
+   */
+  | { type: 'clip-camera'; generation: number; state: 'starting' | 'on' | 'error'; message?: string; width?: number; height?: number }
+  /**
    * Snímaná obrazovka změnila rozměry (hra přepnula rozlišení, celá
    * obrazovka 4:3…) v čase `at`. Kousky před a po se nesmí slepit do
    * jednoho klipu - podle toho se hledá, odkud klip vzít.
@@ -565,13 +588,19 @@ export type LivePreset = { width: number; height: number; fps: number; videoKbps
 /** Co jde do zvuku vysílání (hra a mikrofon se míchají do jedné stopy). */
 export type LiveAudio = { game: boolean; mic: boolean };
 
+/** Kamera v obraze (vysílání i kamera v klipech): která ('' = výchozí), kde, jak velká, jaký tvar, zrcadlo. */
+export type SceneCamera = { deviceId: string; position: LiveCameraPosition; size: LiveCameraSize; shape: LiveCameraShape; mirror: boolean };
+
+/** Kamera v klipech za běhu snímání (stav pro nastavení); viz CaptureEvent 'clip-camera'. */
+export type ClipCameraStatus = { state: 'starting' | 'on' | 'error'; message: string | null; width: number | null; height: number | null };
+
 /**
  * Co je ve vysílání vidět a slyšet navíc k obrazovce: kamera (kde, jak
  * velká, jaký tvar), obrazovka "Hned jsem zpět" (místo hry, s textem) a
  * ztlumený mikrofon. Mění se i za běhu (live-scene) bez nového spojení.
  */
 export type LiveScene = {
-  camera: { deviceId: string; position: LiveCameraPosition; size: LiveCameraSize; shape: LiveCameraShape; mirror: boolean } | null;
+  camera: SceneCamera | null;
   /** Obrazovka "Hned jsem zpět": hra a kamera schované, jen text. */
   brb: boolean;
   brbText: string;

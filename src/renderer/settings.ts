@@ -946,13 +946,23 @@ function cameraErrorMessage(code: string): string {
   return t('liveCameraFailed', { message: code.replace(/^camera:\s*/, '').slice(0, 120) });
 }
 
+/**
+ * Která kamera se má v okně ukazovat: záložka Živě (kamera ve vysílání) nebo
+ * Záznam -> Kamera (kamera v klipech); null = žádná (kamera nesvítí zbytečně).
+ */
+function wantedCamPreview(): string | null {
+  if (wizardStep !== null || document.visibilityState !== 'visible') return null;
+  if (tab === 'live' && settings.liveCamera) return settings.liveCameraDevice;
+  if (tab === 'settings' && settingsSection === 'camera' && settings.clipCamera) return settings.clipCameraDevice;
+  return null;
+}
+
 function syncCamPreview() {
-  const want = tab === 'live' && wizardStep === null && settings.liveCamera && document.visibilityState === 'visible';
-  if (!want) {
+  const id = wantedCamPreview();
+  if (id === null) {
     stopCamPreview();
     return;
   }
-  const id = settings.liveCameraDevice;
   if (camPreview && camPreview.deviceId === id) return;
   stopCamPreview();
   const preview: { deviceId: string; stream: MediaStream | null; error: string | null } = { deviceId: id, stream: null, error: null };
@@ -1025,8 +1035,17 @@ function livePreview() {
   return box;
 }
 
+/** Klíče nastavení kamery ve vysílání a kamery v klipech (stejné ovládání, jiná místa). */
+const CAMERA_KEYS = {
+  live: { device: 'liveCameraDevice', position: 'liveCameraPosition', size: 'liveCameraSize', shape: 'liveCameraShape', mirror: 'liveCameraMirror' },
+  clip: { device: 'clipCameraDevice', position: 'clipCameraPosition', size: 'clipCameraSize', shape: 'clipCameraShape', mirror: 'clipCameraMirror' },
+} as const;
+type CameraKind = keyof typeof CAMERA_KEYS;
+
 /** Rohy pro kameru jako čtyři tlačítka v obdélníku (kde bude kamera, je hned vidět). */
-function cornerPicker(disabled: boolean) {
+function cornerPicker(disabled: boolean, kind: CameraKind = 'live') {
+  const key = CAMERA_KEYS[kind].position;
+  const current = settings[key];
   const corners: { value: Settings['liveCameraPosition']; label: Key }[] = [
     { value: 'top-left', label: 'liveCameraTopLeft' },
     { value: 'top-right', label: 'liveCameraTopRight' },
@@ -1038,13 +1057,13 @@ function cornerPicker(disabled: boolean) {
     { class: 'corner-picker', role: 'radiogroup', 'aria-label': t('liveCameraPosition') },
     ...corners.map((c) =>
       h('button', {
-        class: `corner ${c.value} ${settings.liveCameraPosition === c.value ? 'active' : ''}`,
+        class: `corner ${c.value} ${current === c.value ? 'active' : ''}`,
         role: 'radio',
-        'aria-checked': settings.liveCameraPosition === c.value ? 'true' : 'false',
+        'aria-checked': current === c.value ? 'true' : 'false',
         title: t(c.label),
         'aria-label': t(c.label),
         disabled,
-        onclick: () => update({ liveCameraPosition: c.value }),
+        onclick: () => update({ [key]: c.value } as Partial<Settings>),
       })
     )
   );
@@ -2039,16 +2058,17 @@ function variantPanel() {
 /**
  * Nastavení po oddílech: nahoře řada ikon, pod ní jen ten jeden oddíl - žádná
  * dlouhá stěna textu. Vysvětlení jsou pod otazníčky. Dvě záložky:
- *  - Záznam (settings): zkratky, kvalita, zvuk, výkon, úložiště - jak se nahrává,
+ *  - Záznam (settings): zkratky, kvalita, zvuk, kamera, výkon, úložiště - jak se nahrává,
  *  - Appka (app): vzhled, obecné (jazyk, start s Windows, oznámení…), o appce.
  * Dřív byl vzhled a obecné mezi nastavením záznamu - nedávalo to smysl.
  */
-type SettingsSection = 'hotkeys' | 'quality' | 'audio' | 'performance' | 'storage';
+type SettingsSection = 'hotkeys' | 'quality' | 'audio' | 'camera' | 'performance' | 'storage';
 type AppSection = 'look' | 'general' | 'about';
 const SETTINGS_SECTIONS: { id: SettingsSection; icon: IconName; key: Key }[] = [
   { id: 'hotkeys', icon: 'keyboard', key: 'hotkeysTitle' },
   { id: 'quality', icon: 'quality', key: 'qualityTitle' },
   { id: 'audio', icon: 'volume', key: 'audioTitle' },
+  { id: 'camera', icon: 'camera', key: 'clipCameraTitle' },
   { id: 'performance', icon: 'gauge', key: 'secPerformance' },
   { id: 'storage', icon: 'drive', key: 'secStorage' },
 ];
@@ -2139,6 +2159,7 @@ function sectionWarn(kind: 'settings' | 'app', id: string): boolean {
   const here = (n: AppNotice) => n.kind !== 'info' && !!n.tab && (n.tab === `${kind}:${id}` || (kind === 'app' && id === 'about' && n.tab === 'about'));
   if (status.notices.some(here)) return true;
   if (kind === 'settings' && id === 'audio') return status.capture === 'on' && !!audioLevels && audioLevels.system !== null && audioLevels.systemSilentSeconds >= 10;
+  if (kind === 'settings' && id === 'camera') return settings.clipCamera && status.clipCamera?.state === 'error';
   return false;
 }
 
@@ -2172,7 +2193,7 @@ function sectionNav(kind: 'settings' | 'app') {
   );
 }
 
-/** Záložka Záznam: jak se nahrává (zkratky, kvalita, zvuk, výkon, úložiště). */
+/** Záložka Záznam: jak se nahrává (zkratky, kvalita, zvuk, kamera, výkon, úložiště). */
 function renderSettings() {
   const win = kine.platform === 'win32';
   let body: (HTMLElement | null)[];
@@ -2185,6 +2206,9 @@ function renderSettings() {
       break;
     case 'audio':
       body = [audioPanel(win)];
+      break;
+    case 'camera':
+      body = [cameraPanel()];
       break;
     case 'performance':
       body = [performancePanel()];
@@ -2366,6 +2390,116 @@ function qualityPanel() {
       )
     )
   );
+}
+
+/**
+ * Kamera v klipech: vypnuto (výchozí) = kamera se vůbec nezapíná. Zapnuto =
+ * kamera se při nahrávání kreslí rovnou do obrazu hry (stejný snímek) - v klipu
+ * sedí přesně se hrou. Kde, jak velká a jaký tvar jde měnit i za běhu.
+ */
+function cameraPanel() {
+  const on = settings.clipCamera;
+  if (on) void refreshVideoInputs();
+  const cam = status.clipCamera;
+  const running = status.capture === 'on';
+  let state: HTMLElement | null = null;
+  if (on) {
+    if (!running) state = h('p', { class: 'hint clip-camera-state', style: 'margin:0' }, icon('info', 14), ' ', t('clipCameraIdle'));
+    else if (cam?.state === 'on') state = h('p', { class: 'hint clip-camera-state ok', style: 'margin:0' }, icon('check', 14), ' ', t('clipCameraOn'));
+    else if (cam?.state === 'error') state = h('p', { class: 'hint clip-camera-state warn-text', style: 'margin:0' }, icon('warning', 14), ' ', (cam.message ?? '').startsWith('camera-unsupported') ? t('clipCameraUnsupported') : cameraErrorMessage(cam.message ?? ''), ' ', t('clipCameraRetry'));
+    else state = h('p', { class: 'hint clip-camera-state', style: 'margin:0' }, icon('info', 14), ' ', t('clipCameraStarting'));
+  }
+  return h(
+    'div',
+    { class: 'panel stack camera-panel' },
+    ...panelTitle('camera', t('clipCameraTitle'), { help: t('clipCameraHelp') }),
+    checkbox('clipCamera', t('clipCamera'), { help: t('clipCameraHint'), icon: 'camera' }),
+    on
+      ? h(
+          'div',
+          { class: 'live-scene-grid clip-camera-grid' },
+          clipCameraPreview(),
+          h(
+            'div',
+            { class: 'stack', style: 'gap:10px' },
+            state,
+            h(
+              'label',
+              {},
+              t('liveCameraDevice'),
+              h(
+                'select',
+                { class: 'clip-camera-device', onchange: (e: Event) => update({ clipCameraDevice: (e.target as HTMLSelectElement).value }) },
+                h('option', { value: '', selected: settings.clipCameraDevice === '' }, t('liveCameraDefault')),
+                ...videoInputs.map((d) => h('option', { value: d.id, selected: settings.clipCameraDevice === d.id }, d.label)),
+                settings.clipCameraDevice && !videoInputs.some((d) => d.id === settings.clipCameraDevice)
+                  ? h('option', { value: settings.clipCameraDevice, selected: true }, t('audioMissingDevice'))
+                  : null
+              )
+            ),
+            h(
+              'div',
+              { class: 'row', style: 'gap:14px;align-items:flex-start' },
+              h('div', { class: 'field' }, h('label', {}, t('liveCameraPosition')), cornerPicker(false, 'clip')),
+              h(
+                'div',
+                { class: 'stack grow', style: 'gap:8px' },
+                h(
+                  'label',
+                  {},
+                  t('liveCameraSize'),
+                  h(
+                    'select',
+                    { class: 'clip-camera-size', onchange: (e: Event) => update({ clipCameraSize: (e.target as HTMLSelectElement).value as Settings['clipCameraSize'] }) },
+                    h('option', { value: 'small', selected: settings.clipCameraSize === 'small' }, t('liveCameraSmall')),
+                    h('option', { value: 'medium', selected: settings.clipCameraSize === 'medium' }, t('liveCameraMedium')),
+                    h('option', { value: 'large', selected: settings.clipCameraSize === 'large' }, t('liveCameraLarge'))
+                  )
+                ),
+                h(
+                  'label',
+                  {},
+                  t('liveCameraShape'),
+                  h(
+                    'select',
+                    { class: 'clip-camera-shape', onchange: (e: Event) => update({ clipCameraShape: (e.target as HTMLSelectElement).value as Settings['clipCameraShape'] }) },
+                    h('option', { value: 'rounded', selected: settings.clipCameraShape === 'rounded' }, t('liveCameraRounded')),
+                    h('option', { value: 'rect', selected: settings.clipCameraShape === 'rect' }, t('liveCameraRect')),
+                    h('option', { value: 'circle', selected: settings.clipCameraShape === 'circle' }, t('liveCameraCircle'))
+                  )
+                )
+              )
+            ),
+            checkbox('clipCameraMirror', t('liveCameraMirror'), { help: t('liveCameraMirrorHint') }),
+            camPreview?.error && !(running && cam?.state === 'on') ? h('p', { class: 'hint warn', style: 'margin:0' }, icon('warning', 14), ' ', cameraErrorMessage(camPreview.error)) : null
+          )
+        )
+      : null
+  );
+}
+
+/** Náhled klipu s kamerou: plocha 16:9 (hra) a kamera přesně tam, kam ji nakreslí záznam (shared/liveLayout). */
+function clipCameraPreview() {
+  const W = 1280;
+  const H = 720;
+  const box = h('div', { class: 'live-preview clip-camera-preview' });
+  box.append(h('div', { class: 'live-preview-game' }, h('span', {}, status.game ?? t('clipCameraPreviewGame'))));
+  const track = camPreview?.stream?.getVideoTracks()[0] ?? null;
+  const cs = track?.getSettings();
+  const r = cameraRect(W, H, cs?.width ?? 1280, cs?.height ?? 720, { position: settings.clipCameraPosition, size: settings.clipCameraSize, shape: settings.clipCameraShape });
+  const radius = settings.clipCameraShape === 'circle' ? '50%' : `${(r.radius / r.w) * 100}% / ${(r.radius / r.h) * 100}%`;
+  const cam = h('div', { class: 'live-preview-cam', style: `left:${(r.x / W) * 100}%;top:${(r.y / H) * 100}%;width:${(r.w / W) * 100}%;height:${(r.h / H) * 100}%;border-radius:${radius}` });
+  if (camPreview?.stream) {
+    const video = h('video', { autoplay: '', muted: '', playsinline: '', class: settings.clipCameraMirror ? 'mirror' : '' }) as HTMLVideoElement;
+    video.muted = true;
+    video.srcObject = camPreview.stream;
+    void video.play().catch(() => undefined);
+    cam.append(video);
+  } else {
+    cam.append(h('span', { class: 'faint' }, camPreview?.error ? icon('warning', 16) : '…'));
+  }
+  box.append(cam);
+  return box;
 }
 
 /** Kam se klipy ukládají, kolik zabírají, strop místa. */
@@ -3348,7 +3482,31 @@ function uploadState(clip: Clip) {
   if (!u) return null;
   if (u.state === 'queued') return h('div', { class: 'state' }, t('uploadQueued'));
   if (u.state === 'uploading') return h('div', {}, h('div', { class: 'progress' }, h('span', { style: `width:${u.percent}%` })), h('div', { class: 'state' }, t('uploadUploading', { percent: u.percent })));
-  if (u.state === 'paused') return h('div', {}, h('div', { class: 'progress' }, h('span', { style: `width:${u.percent}%` })), h('div', { class: 'state' }, t(u.reason === 'game' ? 'uploadPausedGame' : 'uploadPausedOffline', { percent: u.percent })));
+  if (u.state === 'paused') {
+    // Čeká, až dohraješ: "Nahrát hned" ho pošle i během hraní (hráčova volba - na slabší wifi může hra lagovat).
+    const now =
+      u.reason === 'game'
+        ? h(
+            'button',
+            {
+              class: 'small quiet upload-now',
+              title: t('uploadNowHint'),
+              onclick: (e: Event) => {
+                e.stopPropagation();
+                void kine.uploadClips([clip.uploadOptions ?? { clipId: clip.id, visibility: settings.visibility }]);
+              },
+            },
+            icon('upload', 13),
+            t('uploadNow')
+          )
+        : null;
+    return h(
+      'div',
+      {},
+      h('div', { class: 'progress' }, h('span', { style: `width:${u.percent}%` })),
+      h('div', { class: 'state upload-paused-row' }, t(u.reason === 'game' ? 'uploadPausedGame' : 'uploadPausedOffline', { percent: u.percent }), now)
+    );
+  }
   if (u.state === 'done' && u.ready === false) {
     // Dlouhé video Cloudflare zpracovává minuty - když Kine ví kolik, je to vidět (a proužek).
     const pct = typeof u.processing === 'number' ? u.processing : null;
@@ -3449,6 +3607,9 @@ function showClip(clip: Clip, edit = false) {
     onCopyLink: (c) => {
       if (c.upload?.state === 'done') void kine.copyText(c.upload.url);
     },
+    // Hlavička přehrávače přímo u klipu: hvězdička (oblíbené) a Nahrát na Kine (dialog jako na kartě).
+    onFavorite: (c, favorite) => void kine.setFavorite(c.id, favorite),
+    onUpload: (c) => startUpload([clips.find((x) => x.id === c.id) ?? c]),
     edit: {
       run: (c, request) => kine.trimClip(c.id, request),
       onProgress: (cb) => kine.onTrimProgress(cb),

@@ -606,7 +606,7 @@ export const en = {
   liveBrbTextLabel: 'Text on the screen',
   liveBrbTitle: '“Be right back” screen',
   liveCamera: 'Camera in the stream',
-  liveCameraHint: 'Your webcam in a corner of the picture. Only in the stream - clips stay without it. You can move it even while live.',
+  liveCameraHint: 'Your webcam in a corner of the stream picture. You can move it even while live. Camera in clips is under Capture → Camera.',
   liveCameraDevice: 'Camera',
   liveCameraDefault: 'Default camera',
   liveCameraN: 'Camera {n}',
@@ -879,6 +879,19 @@ export const en = {
   playerVolume: 'Volume',
   playerSeek: 'Position in the video',
   tabApp: 'App',
+  uploadNow: 'Upload now',
+  uploadNowHint: 'Uploads even while you\'re playing - on weak Wi-Fi an online game may lag',
+  clipCameraTitle: 'Camera',
+  clipCamera: 'Camera in clips',
+  clipCameraHint: 'Your webcam is drawn straight into the game recording, into the same frame - in the clip it\'s exactly in sync with the game. The camera stays on while clips are being recorded. Off = the camera is never turned on.',
+  clipCameraHelp: 'Turn it on if you want yourself in your clips too. Position, size and shape can be changed even while playing - they apply right away.',
+  clipCameraOn: 'The camera is going into your clips.',
+  clipCameraStarting: 'Turning the camera on…',
+  clipCameraIdle: 'The camera turns on once clips start recording (when you play).',
+  clipCameraRetry: 'Clips keep recording without it - the app will try again shortly.',
+  clipCameraUnsupported: 'The camera couldn\'t be added to the recording.',
+  clipCameraPreviewGame: 'Game',
+  toastClipCameraFailed: 'Camera in clips: {reason} Clips are recorded without it for now.',
 } as const;
 
 export type Key = keyof typeof en;

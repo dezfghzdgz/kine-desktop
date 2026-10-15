@@ -71,6 +71,10 @@ export type PlayerOptions = {
   neighbors?: (clipId: string) => Neighbors;
   /** Odkaz na nahraný klip do schránky (tlačítko v hlavičce). */
   onCopyLink?: (clip: Clip) => void;
+  /** Hvězdička v hlavičce: přidat / odebrat z oblíbených (bez tohohle tlačítko není). */
+  onFavorite?: (clip: Clip, favorite: boolean) => void;
+  /** Nahrát na Kine z hlavičky (jako tlačítko Nahrát na kartě); bez tohohle tlačítko není. */
+  onUpload?: (clip: Clip) => void;
   /** Rovnou otevřít úpravy (tlačítko Upravit na kartě). */
   startEditing?: boolean;
   /**
@@ -373,6 +377,48 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const positionEl = h('span', { class: 'player-pos faint hidden' });
   const editBtn = h('button', { class: 'small quiet player-edit', onclick: () => toggleEdit() }, icon('scissors', 15), t('libraryEdit'));
   const copyBtn = h('button', { class: 'small quiet player-copy hidden', onclick: () => { if (options.onCopyLink) { options.onCopyLink(clip); showNote(t('linkCopied'), 'ok'); } } }, icon('link', 15), t('libraryCopyLink'));
+  // Hlavička přímo u klipu: oblíbené (hvězdička) a nahrát na Kine - jako na kartě v knihovně.
+  const favBtn = h('button', {
+    class: 'small quiet player-fav',
+    onclick: () => {
+      if (!options.onFavorite) return;
+      const next = !clip.favorite;
+      clip = { ...clip, favorite: next };
+      options.onFavorite(clip, next);
+      refreshHeadButtons();
+    },
+  }) as HTMLButtonElement;
+  const uploadBtn = h('button', { class: 'small quiet player-upload', onclick: () => options.onUpload?.(clip) }) as HTMLButtonElement;
+  /** Hvězdička a Nahrát podle klipu (oblíbený? nahrává se / nahraný?). */
+  function refreshHeadButtons() {
+    clear(favBtn);
+    favBtn.append(icon(clip.favorite ? 'starFilled' : 'star', 15));
+    favBtn.classList.toggle('on', !!clip.favorite);
+    const favLabel = clip.favorite ? t('libraryUnfavorite') : t('libraryFavorite');
+    favBtn.title = favLabel;
+    favBtn.setAttribute('aria-label', favLabel);
+    favBtn.setAttribute('aria-pressed', clip.favorite ? 'true' : 'false');
+    const u = clip.upload;
+    // Nahraný klip má v hlavičce "Kopírovat odkaz"; rozjetý jen stav (nahrává se / čeká).
+    uploadBtn.classList.toggle('hidden', u?.state === 'done' || !!clip.deletedAt);
+    clear(uploadBtn);
+    if (u?.state === 'uploading') {
+      uploadBtn.disabled = true;
+      uploadBtn.append(h('span', { class: 'spin' }), t('uploadUploading', { percent: u.percent }));
+    } else if (u?.state === 'queued') {
+      uploadBtn.disabled = true;
+      uploadBtn.append(icon('upload', 15), t('uploadQueued'));
+    } else if (u?.state === 'paused') {
+      // Čeká (hra / připojení): klik ho pošle hned, i během hraní.
+      uploadBtn.disabled = false;
+      uploadBtn.append(icon('upload', 15), t('uploadNow'));
+      uploadBtn.title = t('uploadNowHint');
+    } else {
+      uploadBtn.disabled = false;
+      uploadBtn.append(icon('upload', 15), t('libraryUpload'));
+      uploadBtn.title = '';
+    }
+  }
   const note = h('div', { class: 'player-note hidden' });
   const trim = h('div', { class: 'trim hidden' });
   const box = h(
@@ -385,6 +431,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       h(
         'div',
         { class: 'row', style: 'flex-wrap:nowrap' },
+        options.onFavorite ? favBtn : null,
+        options.onUpload ? uploadBtn : null,
         options.onCopyLink ? copyBtn : null,
         edit ? editBtn : null,
         h('button', { class: 'small quiet', title: t('playerOpenExternal'), onclick: () => options.onOpenExternal(clip) }, icon('external', 15), t('playerOpenExternal')),
@@ -565,6 +613,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     titleEl.textContent = clip.title;
     titleEl.title = clip.title;
     copyBtn.classList.toggle('hidden', clip.upload?.state !== 'done');
+    refreshHeadButtons();
     note.classList.add('hidden');
     syncAudioChoice();
     loadVideo(false);
@@ -1495,6 +1544,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
 
   // ---- klávesy ----------------------------------------------------------------------
   const onKey = (e: KeyboardEvent) => {
+    // Nad přehrávačem je otevřený dialog nahrání (Nahrát z hlavičky) - klávesy patří jemu.
+    if (document.querySelector('.upload-overlay')) return;
     if (e.key === 'Escape') {
       // Opravdovou celou obrazovku zavře Escape sám prohlížeč; náhradní (okno) tady.
       if (document.fullscreenElement) return;
@@ -1598,6 +1649,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       renderMarkers();
       uploadedNote.classList.toggle('hidden', clip.upload?.state !== 'done');
       copyBtn.classList.toggle('hidden', clip.upload?.state !== 'done');
+      refreshHeadButtons();
       refreshNav();
     },
   };
@@ -1606,6 +1658,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   titleEl.textContent = clip.title;
   titleEl.title = clip.title;
   copyBtn.classList.toggle('hidden', clip.upload?.state !== 'done');
+  refreshHeadButtons();
   document.body.append(overlay);
   loadVideo(false);
   renderMarkers();

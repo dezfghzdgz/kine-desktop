@@ -33,12 +33,14 @@ import {
   type AudioLevels,
   type CaptureEvent,
   type Clip,
+  type ClipCameraStatus,
   type DisplayInfo,
   type LiveAfterStream,
   type LiveQuality,
   type LiveScene,
   type LiveStatus,
   type ResourceUsage,
+  type SceneCamera,
   type Settings,
   type SmartAppControlState,
   type Status,
@@ -385,6 +387,7 @@ class KineApp {
         this.quietNotice(`capture:${kind}`, this.t('toastMicUnavailable', { message: clean }), 'warn', 'settings:audio');
       },
       onLevels: (levels) => this.onAudioLevels(levels),
+      onClipCamera: (camera) => this.onClipCamera(camera),
       onDefaultOutputChanged: (device) => {
         // Loopback zůstal na starém zařízení - rozjet znovu, ale ne pod rozjetou (nebo právě ukládanou) nahrávkou zápasu.
         if (this.capture.recordingInfo() || this.finishingRecording) {
@@ -1006,6 +1009,12 @@ class KineApp {
     lines.push(
       `Audio: game ${yesNo(s.systemAudio)} (${s.systemAudioDevice ? 'input device' : 'loopback'}) · mic ${yesNo(s.microphone)} (${s.microphoneDevice ? 'chosen' : 'default'}) · gain ${Math.round(s.systemGain * 100)}/${Math.round(s.micGain * 100)} % · separate tracks ${yesNo(s.separateMicTrack)} · offset ${s.audioOffsetMs} ms · latency ${c.lastStarted?.micLatencyMs ?? '?'} ms${c.lastStarted?.systemLatencyMs ? ` · game sound via helper (WASAPI, ${c.lastStarted.systemLatencyMs} ms)` : ''}`
     );
+    if (s.clipCamera) {
+      const cam = c.clipCamera;
+      lines.push(
+        `Camera in clips: on · ${s.clipCameraDevice ? 'chosen' : 'default'} camera · ${s.clipCameraPosition} ${s.clipCameraSize} ${s.clipCameraShape}${s.clipCameraMirror ? ' mirrored' : ''} · ${cam ? `${cam.state}${cam.message ? ` (${cam.message})` : ''}${cam.width ? ` ${cam.width}x${cam.height}` : ''}` : 'not running'}`
+      );
+    }
     const l = c.levels;
     const level = (v: number | null) => (v === null ? 'off' : v > 0 ? `${Math.round(20 * Math.log10(v))} dB` : 'silent');
     if (l) {
@@ -1630,7 +1639,12 @@ class KineApp {
       this.compressor.cancel();
       this.library.load(this.settings.clipsDir());
     }
-    const captureKeys: (keyof Settings)[] = ['maxHeight', 'fps', 'codec', 'videoMbps', 'systemAudio', 'systemAudioDevice', 'microphone', 'microphoneDevice', 'systemGain', 'micGain', 'displayId'];
+    // Kamera v klipech: jiná kamera / poloha / velikost / tvar / zrcadlo se projeví hned (bez restartu
+    // zásobníku); zapnutí a vypnutí znamená jiný obraz pro recorder = nový start (jako změna kvality).
+    const clipCameraKeys: (keyof Settings)[] = ['clipCameraDevice', 'clipCameraPosition', 'clipCameraSize', 'clipCameraShape', 'clipCameraMirror'];
+    if (s.clipCamera && prev.clipCamera && clipCameraKeys.some((k) => s[k] !== prev[k])) this.capture.setClipCamera(this.clipCameraScene(s));
+    if (!s.clipCamera && prev.clipCamera) this.dismissNotice('capture:camera');
+    const captureKeys: (keyof Settings)[] = ['maxHeight', 'fps', 'codec', 'videoMbps', 'systemAudio', 'systemAudioDevice', 'microphone', 'microphoneDevice', 'systemGain', 'micGain', 'displayId', 'clipCamera'];
     if (captureKeys.some((k) => s[k] !== prev[k])) {
       // Změna kvality = nový start zásobníku; rozjetá nahrávka se nejdřív uloží.
       void (async () => {
@@ -1917,6 +1931,38 @@ class KineApp {
     } else if (levels.system !== null && levels.systemSilentSeconds === 0 && this.notices.some((n) => n.id === 'audio-silent')) {
       this.dismissNotice('audio-silent');
     }
+  }
+
+  /**
+   * Kamera v klipech hlásí stav: nejde (obsazená, odpojená…) = tiché upozornění
+   * (okno, odkaz do Záznam -> Kamera) - nahrává se dál bez ní; zase jde = upozornění pryč.
+   */
+  private onClipCamera(camera: ClipCameraStatus): void {
+    if (!this.settings.get().clipCamera) return;
+    if (camera.state === 'error' && camera.message) {
+      // Stejná chyba při dalším pokusu (každých 15 s) už se nehlásí znovu.
+      const id = 'capture:camera';
+      const text = this.t('toastClipCameraFailed', { reason: this.cameraReason(camera.message) });
+      if (!this.notices.some((n) => n.id === id && n.text === text)) this.quietNotice(id, text, 'warn', 'settings:camera');
+    } else if (camera.state === 'on') {
+      this.dismissNotice('capture:camera');
+    }
+    this.pushStatusSoon();
+  }
+
+  /** Proč kamera v klipech nejde - texty jako u kamery ve vysílání (klíče z liveCompositor.cameraErrorText). */
+  private cameraReason(code: string): string {
+    if (code.startsWith('camera-busy')) return this.t('liveCameraBusy');
+    if (code.startsWith('camera-missing')) return this.t('liveCameraMissing');
+    if (code.startsWith('camera-denied')) return this.t('liveCameraDenied');
+    if (code.startsWith('camera-unsupported')) return this.t('clipCameraUnsupported');
+    if (code.startsWith('camera disconnected')) return this.t('liveCameraDisconnected');
+    return this.t('liveCameraFailed', { message: code.replace(/^camera:\s*/, '').slice(0, 120) });
+  }
+
+  /** Kamera v klipech podle nastavení (pro snímací stránku). */
+  private clipCameraScene(s: Settings): SceneCamera | null {
+    return s.clipCamera ? { deviceId: s.clipCameraDevice, position: s.clipCameraPosition, size: s.clipCameraSize, shape: s.clipCameraShape, mirror: s.clipCameraMirror } : null;
   }
 
   statusLine(): string {
@@ -2400,6 +2446,7 @@ class KineApp {
       batterySaverActive: this.batterySaving && (this.capture.state === 'on' || this.capture.state === 'starting'),
       notices: [...this.notices],
       hwEncoder: this.capture.hwEncoder,
+      clipCamera: this.settings.get().clipCamera ? this.capture.clipCamera : null,
       live: this.live.current(),
       update: updateProgress(),
       updateIssue: this.updateIssue,
@@ -2882,7 +2929,8 @@ class KineApp {
       if (clip) shell.showItemInFolder(clip.file);
     });
     ipcMain.handle('clips:upload', (_e, requests: unknown) => {
-      this.uploader.enqueue(sanitizeUploadRequests(requests, this.settings.get()));
+      // Hráč klikl Nahrát (knihovna, přehrávač, "Nahrát hned"): jede hned, i když se zrovna hraje.
+      this.uploader.enqueue(sanitizeUploadRequests(requests, this.settings.get()), { now: true });
       this.pushStatus();
     });
     ipcMain.handle('clips:openOnKine', (_e, id: string) => this.openClipOnKine(id));

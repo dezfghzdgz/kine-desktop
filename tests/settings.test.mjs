@@ -254,3 +254,26 @@ test('vzhled: velikost písma, rohy, karty klipů a klidný režim', () => {
   assert.deepEqual([bad.lookText, bad.lookCorners, bad.lookCards, bad.lookCalm], ['m', 'normal', 'm', false]);
   assert.equal(DEFAULT_SETTINGS.lookCalm, false);
 });
+
+test('kamera v klipech: výchozí vypnutá, nesmysly ze souboru se srovnají', () => {
+  assert.equal(DEFAULT_SETTINGS.clipCamera, false);
+  const d = sanitizeSettings({});
+  assert.equal(d.clipCamera, false);
+  assert.equal(d.clipCameraDevice, '');
+  assert.equal(d.clipCameraPosition, 'bottom-right');
+  assert.equal(d.clipCameraSize, 'small');
+  assert.equal(d.clipCameraShape, 'rounded');
+  assert.equal(d.clipCameraMirror, true);
+  const s = sanitizeSettings({ clipCamera: 'yes', clipCameraDevice: 42, clipCameraPosition: 'middle', clipCameraSize: 'huge', clipCameraShape: 'star', clipCameraMirror: 'no' });
+  assert.equal(s.clipCamera, false);
+  assert.equal(s.clipCameraDevice, '');
+  assert.equal(s.clipCameraPosition, 'bottom-right');
+  assert.equal(s.clipCameraSize, 'small');
+  assert.equal(s.clipCameraShape, 'rounded');
+  assert.equal(s.clipCameraMirror, true);
+  const ok = sanitizeSettings({ clipCamera: true, clipCameraDevice: 'abc', clipCameraPosition: 'top-left', clipCameraSize: 'large', clipCameraShape: 'circle', clipCameraMirror: false });
+  assert.deepEqual(
+    [ok.clipCamera, ok.clipCameraDevice, ok.clipCameraPosition, ok.clipCameraSize, ok.clipCameraShape, ok.clipCameraMirror],
+    [true, 'abc', 'top-left', 'large', 'circle', false]
+  );
+});

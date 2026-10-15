@@ -877,3 +877,32 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   a jednou řadou tlačítek, přehrát / pozastavit, posun kliknutím, ztlumení),
   `playerFullscreenOk` přes tlačítko v liště, `settingsSectionsOk` (Záznam
   pět oddílů, Appka vzhled / obecné / o appce, staré cíle).
+
+## Novinky 0.10.9
+
+- **Kamera v klipech** (Záznam -> Kamera, výchozí vypnuto): obraz z kamery se
+  do záznamu skládá rovnou při nahrávání (`renderer/capture.ts` -
+  `startClipCamera`, stejné skládání jako kamera ve vysílání -
+  `renderer/liveCompositor.ts`). Kamera je ve STEJNÉM snímku jako hra, takže
+  v klipu sedí přesně (nic se dodatečně nezarovnává a klip se při uložení
+  znovu nekóduje). Výběr kamery, roh, velikost, tvar, zrcadlo a náhled; poloha
+  / velikost / tvar / jiná kamera se mění za běhu povelem `clip-camera` (bez
+  restartu zásobníku), zapnutí / vypnutí snímání rozjede znovu (jako změna
+  kvality). Vypnutá = kamera se vůbec neotevře. Stav (zapíná se / nahrává se
+  / nejde) je v nastavení; nejde-li (obsazená, odpojená), nahrává se dál bez ní,
+  upozornění jednou a nový pokus každých 15 s. Vysílání bere obrazovku bez
+  téhle kamery (má svou scénu). Když obraz hry stojí (snímání pak nové snímky
+  neposílá), skládání kameru dokresluje samo - v záznamu ani ve vysílání
+  nezamrzne (časy snímků jen rostou). Odpojená kamera zmizí z obrazu (dřív
+  ve vysílání zůstal zamrzlý obličej).
+- **Nahrát na Kine i během hraní**: „Nahrát hned" u klipu, který čeká na konec
+  hry (karta v knihovně i lišta přehrávače), ho pošle hned (`uploader.enqueue`
+  s `now` - vynucené nahrání hra nepozastaví, jen chybějící připojení).
+  Automatické nahrávání během hry dál čeká.
+- **Hlavička přehrávače u klipu**: hvězdička (Oblíbené) a Nahrát na Kine (stav
+  nahrávání / „Nahrát hned") přímo v liště nad klipem.
+- Testy: e2e `clipCameraOk` (falešná kamera Chromia: kamera vpravo dole v klipu,
+  přesun doleva nahoru za běhu bez restartu, kamera se v klipu hýbe, vypnutí),
+  `playerHeadOk` (hvězdička mění oblíbené, Nahrát, „Nahrát hned" v liště i na
+  kartě), `settingsSectionsOk` (Záznam má šest oddílů), unit testy nastavení
+  kamery a vynuceného nahrávání během hry.

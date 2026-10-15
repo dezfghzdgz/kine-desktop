@@ -13,11 +13,14 @@ export const UPLOAD_ERROR_LOGIN = 'login-required';
 /**
  * Fronta nahrávání klipů na Kine.
  *
- * Pravidlo číslo jedna: NIKDY nenahrávat, když se hraje. Online hra na
- * slabší wifi by kvůli uploadu lagovala. Fronta proto běží jen když
+ * Pravidlo číslo jedna: samo od sebe NIKDY nenahrávat, když se hraje. Online
+ * hra na slabší wifi by kvůli uploadu lagovala. Fronta proto běží jen když
  * `blocked()` vrací null; jakmile se pustí hra, rozjeté nahrávání se
  * přeruší (AbortSignal) a po hře pokračuje od místa, kam došlo (tus umí
  * navázat). Podobně při výpadku připojení.
+ *
+ * Výjimka: klip, který hráč nahrát CHCE hned (tlačítko Nahrát / Nahrát hned,
+ * `enqueue(..., { now: true })`), jede i během hraní - je to jeho volba.
  *
  * Jeden klip po druhém - souběžně by si jen braly pásmo.
  */
@@ -51,6 +54,8 @@ export class Uploader {
   private listeners = new Set<(e: UploaderEvent) => void>();
   /** Klipy, u kterých se čeká, až je Kine zpracuje (id klipu -> zastavení čekání). */
   private waiting = new Map<string, () => void>();
+  /** Klipy, které hráč chce nahrát hned - jedou i během hraní (ne bez připojení). */
+  private forced = new Set<string>();
 
   constructor(
     private deps: {
@@ -95,16 +100,28 @@ export class Uploader {
     return this.queue.length + (this.current ? 1 : 0);
   }
 
+  /** Čeká něco kvůli hře? (Klipy "nahrát hned" jedou i během hraní - ty se nepočítají.) */
   isPausedByGame(): boolean {
-    return this.pending() > 0 && this.deps.blocked() === 'game';
+    if (this.deps.blocked() !== 'game') return false;
+    const pending = [...this.queue, ...(this.current ? [this.current.request] : [])];
+    return pending.some((r) => !this.forced.has(r.clipId));
   }
 
-  /** Zařadí klipy; už zařazené nebo hotové přeskočí. Nastavení nahrání se uloží ke klipu (přežije restart). */
-  enqueue(requests: UploadRequest[]): void {
+  /** Jede tenhle klip i během hraní (hráč ho chtěl nahrát hned)? */
+  isForced(clipId: string): boolean {
+    return this.forced.has(clipId);
+  }
+
+  /**
+   * Zařadí klipy; už zařazené nebo hotové přeskočí. Nastavení nahrání se uloží ke klipu (přežije restart).
+   * `now`: hráč klikl Nahrát - klipy jedou hned, i když se zrovna hraje (už zařazený klip se tím rozjede).
+   */
+  enqueue(requests: UploadRequest[], opts: { now?: boolean } = {}): void {
     for (const r of requests) {
       const clip = this.deps.library.get(r.clipId);
       if (!clip || clip.deletedAt) continue;
       if (clip.upload?.state === 'done') continue;
+      if (opts.now) this.forced.add(r.clipId);
       if (this.queue.some((q) => q.clipId === r.clipId) || this.current?.request.clipId === r.clipId) continue;
       const request: UploadRequest = { ...r, title: r.title?.trim().slice(0, 150) || undefined };
       this.queue.push(request);
@@ -201,12 +218,22 @@ export class Uploader {
   kick(): void {
     const blocked = this.deps.blocked();
     if (blocked && this.current) {
-      this.deps.log(`nahrávání pozastaveno (${blocked})`);
-      this.current.abort.abort();
+      // Klip "nahrát hned" se kvůli hře nepřeruší (bez připojení ano).
+      if (blocked === 'offline' || !this.forced.has(this.current.request.clipId)) {
+        this.deps.log(`nahrávání pozastaveno (${blocked})`);
+        this.current.abort.abort();
+      }
       return;
     }
     if (blocked) {
       this.markQueuedAsPaused(blocked);
+      // Během hraní se rozjede klip, který hráč chce nahrát hned.
+      if (blocked === 'game' && !this.current && !this.timer && this.queue.some((q) => this.forced.has(q.clipId))) {
+        this.timer = setTimeout(() => {
+          this.timer = null;
+          void this.next();
+        }, 50);
+      }
       return;
     }
     if (this.current) return;
@@ -219,6 +246,7 @@ export class Uploader {
 
   private markQueuedAsPaused(reason: 'game' | 'offline'): void {
     for (const r of this.queue) {
+      if (reason === 'game' && this.forced.has(r.clipId)) continue;
       const clip = this.deps.library.get(r.clipId);
       if (!clip?.upload) continue;
       if (clip.upload.state === 'queued') this.deps.library.setUpload(r.clipId, { state: 'paused', percent: 0, reason });
@@ -230,11 +258,19 @@ export class Uploader {
   private async next(): Promise<void> {
     if (this.current) return;
     const blocked = this.deps.blocked();
-    if (blocked) {
+    let request: UploadRequest | undefined;
+    if (blocked === 'game') {
+      // Během hraní jen klipy, které hráč chce nahrát hned; ostatní počkají.
+      const idx = this.queue.findIndex((q) => this.forced.has(q.clipId));
+      this.markQueuedAsPaused('game');
+      if (idx < 0) return;
+      request = this.queue.splice(idx, 1)[0];
+    } else if (blocked) {
       this.markQueuedAsPaused(blocked);
       return;
+    } else {
+      request = this.queue.shift();
     }
-    const request = this.queue.shift();
     if (!request) return;
     const clip = this.deps.library.get(request.clipId);
     if (!clip || clip.deletedAt) {
@@ -248,6 +284,7 @@ export class Uploader {
     try {
       const url = await this.uploadOne(clip, request, abort.signal);
       this.release(clip);
+      this.forced.delete(clip.id);
       const fresh = this.deps.library.get(clip.id) ?? clip;
       this.emit({ type: 'done', clip: fresh, url });
     } catch (e) {
@@ -264,6 +301,7 @@ export class Uploader {
         const status = (e as { status?: unknown })?.status;
         const message = status === 401 ? UPLOAD_ERROR_LOGIN : e instanceof Error ? e.message : String(e);
         this.release(clip);
+        this.forced.delete(clip.id);
         this.deps.log(`nahrání selhalo: ${clip.file}: ${message}`);
         this.deps.library.setUpload(clip.id, { state: 'error', message });
         this.emit({ type: 'error', clip, message });

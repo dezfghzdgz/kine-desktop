@@ -1,5 +1,5 @@
 import type { KineCaptureBridge } from '../preload/preload';
-import type { CaptureCommand, LiveAudio, LivePreset, LiveScene, Settings } from '../shared/types';
+import type { CaptureCommand, LiveAudio, LivePreset, LiveScene, SceneCamera, Settings } from '../shared/types';
 import { LiveCompositor } from './liveCompositor';
 
 /**
@@ -21,6 +21,12 @@ import { LiveCompositor } from './liveCompositor';
  * Kodek: H.264 první, protože ho grafiky kódují hardwarově a výsledek je
  * mp4, které přehraje všechno. Pak VP9 a VP8.
  *
+ * Kamera v klipech (nastavení, výchozí vypnuto): obraz obrazovky jde do
+ * zásobníku přes skládání (LiveCompositor) a kamera se kreslí do TÉHOŽ
+ * snímku jako hra - v klipu sedí přesně, nic se nezarovnává dodatečně a
+ * klip se při uložení nemusí znovu kódovat. Vysílání bere obrazovku bez
+ * téhle kamery (má svou scénu).
+ *
  * Živé vysílání (tlačítko Vysílat): třetí recorder na stejném snímání -
  * kopie obrazové stopy zmenšená na kvalitu vysílání, zvuk hry a mikrofon
  * smíchané přes Web Audio (s hlasitostmi z nastavení), vždy H.264 kvůli
@@ -30,8 +36,14 @@ import { LiveCompositor } from './liveCompositor';
 declare const window: Window & { kineCapture: KineCaptureBridge };
 const bridge = window.kineCapture;
 
-/** Proud obrazu (+ zvuk hry) pro hlavní recorder. */
+/** Proud obrazu (+ zvuk hry) pro hlavní recorder (obraz s kamerou, když je kamera v klipech zapnutá). */
 let stream: MediaStream | null = null;
+/** Obraz obrazovky tak, jak ho dává snímání (bez kamery v klipech) - z něj bere vysílání a rozměry. */
+let screenTrack: MediaStreamTrack | null = null;
+/** Kamera v klipech: skládání kamery do obrazu zásobníku; null = vypnutá / prohlížeč to neumí. */
+let clipCompositor: LiveCompositor | null = null;
+/** Poslední hlášený stav kamery v klipech - opakované pokusy (obsazená kamera) se hlásí jen při změně. */
+let clipCameraReported = '';
 /** Proud jen s mikrofonem pro druhý recorder (null = mikrofon není). */
 let micStream: MediaStream | null = null;
 let recorder: MediaRecorder | null = null;
@@ -439,6 +451,7 @@ async function getStreams(settings: Settings): Promise<void> {
   // Hra = pohyb: kodér a snímání mají držet plynulost, ne ostrost statického textu.
   const videoTrack = display.getVideoTracks()[0];
   if (videoTrack) videoTrack.contentHint = 'motion';
+  screenTrack = videoTrack ?? null;
 
   // Zvuk hry: z proudu obrazovky (loopback), nebo ze zvoleného zařízení (bez úprav - je to už hotový mix, ne řeč).
   let systemTrack: MediaStreamTrack | null = display.getAudioTracks()[0] ?? null;
@@ -492,10 +505,67 @@ async function getStreams(settings: Settings): Promise<void> {
   }
   micLatencyMs = trackLatencyMs(micTrack);
 
-  stream = new MediaStream([...display.getVideoTracks(), ...(systemTrack ? [systemTrack] : [])]);
+  // Kamera v klipech: do zásobníku jde obraz s kamerou (bez ní obrazovka tak, jak je).
+  const recordVideo = settings.clipCamera && screenTrack ? startClipCamera(settings, screenTrack) ?? screenTrack : screenTrack;
+  stream = new MediaStream([...(recordVideo ? [recordVideo] : []), ...(systemTrack ? [systemTrack] : [])]);
   micStream = micTrack ? new MediaStream([micTrack]) : null;
 
   startMeters(systemTrack, micTrack);
+}
+
+// ---- kamera v klipech -----------------------------------------------------------------------
+
+function clipCameraOf(settings: Settings): SceneCamera {
+  return {
+    deviceId: settings.clipCameraDevice,
+    position: settings.clipCameraPosition,
+    size: settings.clipCameraSize,
+    shape: settings.clipCameraShape,
+    mirror: settings.clipCameraMirror,
+  };
+}
+
+function clipScene(camera: SceneCamera | null): LiveScene {
+  return { camera, brb: false, brbText: '', micMuted: false };
+}
+
+/** Stav kamery v klipech do hlavního procesu (nastavení ho ukazuje) - opakovaný stejný stav jen jednou. */
+function reportClipCamera(state: 'starting' | 'on' | 'error', info: { message?: string; width?: number; height?: number } = {}) {
+  const key = `${state}:${info.message ?? ''}:${info.width ?? ''}x${info.height ?? ''}`;
+  if (key === clipCameraReported) return;
+  // "Otevírá se" mezi dvěma stejnými chybami (pokus každých 15 s) nic nového neříká.
+  if (state === 'starting' && clipCameraReported.startsWith('error:')) return;
+  clipCameraReported = key;
+  report({ type: 'clip-camera', generation, state, ...info });
+}
+
+/**
+ * Obraz pro zásobník s kamerou: obrazovka + kamera skládané do jednoho snímku.
+ * Kamera nejde (obsazená, odpojená) = nahrává se dál bez ní a za 15 s se zkusí
+ * znovu (třeba ji pustil Discord). Prohlížeč skládání neumí = null (bez kamery).
+ */
+function startClipCamera(settings: Settings, source: MediaStreamTrack): MediaStreamTrack | null {
+  clipCompositor?.stop();
+  clipCompositor = null;
+  clipCameraReported = '';
+  if (!LiveCompositor.supported()) {
+    reportClipCamera('error', { message: 'camera-unsupported' });
+    return null;
+  }
+  try {
+    clipCompositor = new LiveCompositor(source, clipScene(clipCameraOf(settings)), {
+      brand: settings.brandColor || '#00c9a7',
+      // Chyby kamery jdou přes onCamera (stav + upozornění v hlavním procesu).
+      onWarning: () => undefined,
+      onCamera: (state, info) => reportClipCamera(state, info),
+      retryMs: 15000,
+    });
+    return clipCompositor.track;
+  } catch (e) {
+    clipCompositor = null;
+    reportClipCamera('error', { message: `camera-unsupported: ${String(e)}` });
+    return null;
+  }
 }
 
 // ---- měřáky a hlídání ticha ----------------------------------------------------------------
@@ -676,9 +746,9 @@ function startRecorders(settings: Settings, gen: number) {
 
 // ---- rozměry obrazu (hra přepnula rozlišení) -------------------------------------------------
 
-/** Rozměry obrazu, které teď ze snímání chodí (podle stopy). */
+/** Rozměry obrazu, které teď ze snímání chodí (podle stopy obrazovky - kamera v klipech je nemění). */
 function videoSize(): { width: number; height: number } | null {
-  const s = stream?.getVideoTracks()[0]?.getSettings();
+  const s = screenTrack?.getSettings();
   return s && s.width && s.height ? { width: s.width, height: s.height } : null;
 }
 
@@ -766,7 +836,8 @@ function liveMime(): string | null {
 async function startLive(gen: number, preset: LivePreset, wanted: LiveAudio = { game: true, mic: true }, scene: LiveScene = EMPTY_SCENE): Promise<void> {
   stopLive();
   if (!stream) throw new Error('capture-off: snímání neběží');
-  const source = stream.getVideoTracks()[0];
+  // Obrazovka bez kamery v klipech - vysílání má vlastní scénu (kamera tam, kde ji chce vysílání).
+  const source = screenTrack ?? stream.getVideoTracks()[0];
   if (!source) throw new Error('capture-off: není obraz');
   const mime = liveMime();
   if (!mime) throw new Error('h264-unsupported');
@@ -889,11 +960,15 @@ function stopAll() {
   stopMeters();
   stopNativeLoopback();
   stopWatchSize();
+  clipCompositor?.stop();
+  clipCompositor = null;
+  clipCameraReported = '';
   for (const track of stream?.getTracks() ?? []) track.stop();
   for (const track of micStream?.getTracks() ?? []) track.stop();
   for (const track of sourceTracks) track.stop();
   sourceTracks.length = 0;
   stream = null;
+  screenTrack = null;
   micStream = null;
   defaultOutputAtStart = '';
 }
@@ -920,7 +995,7 @@ bridge.onCommand(async (command: CaptureCommand) => {
       testNativeLoopback = !!command.testNativeLoopback;
       if (command.nativeLoopbackKnown) nativeWorkedBefore = true;
       await getStreams(command.settings);
-      stream!.getVideoTracks()[0]?.addEventListener('ended', () => {
+      (screenTrack ?? stream!.getVideoTracks()[0])?.addEventListener('ended', () => {
         report({ type: 'error', generation, message: 'obrazovka přestala posílat obraz' });
       });
       startRecorders(command.settings, command.generation);
@@ -933,6 +1008,9 @@ bridge.onCommand(async (command: CaptureCommand) => {
       stopAll();
     } else if (command.type === 'meters') {
       metersFast = command.fast;
+    } else if (command.type === 'clip-camera') {
+      // Jiná kamera / poloha / velikost za běhu - bez restartu zásobníku (zapnutí a vypnutí restartuje hlavní proces).
+      if (clipCompositor) clipCompositor.setScene(clipScene(command.camera));
     }
   } catch (e) {
     report({ type: 'error', generation: 'generation' in command ? command.generation : generation, message: (e as Error).message ?? String(e) });

@@ -2,7 +2,7 @@ import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, re
 import { basename, join } from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { BrowserWindow, app } from 'electron';
-import type { AudioLevels, CaptureCommand, CaptureEvent, CaptureState, Settings } from '../shared/types';
+import type { AudioLevels, CaptureCommand, CaptureEvent, CaptureState, ClipCameraStatus, SceneCamera, Settings } from '../shared/types';
 import { clipFileBase } from '../shared/clipNaming';
 import { log } from './log';
 import { probe, runFfmpeg, spawnFfmpeg } from './ffmpeg';
@@ -120,6 +120,8 @@ export class CaptureManager {
   levels: AudioLevels | null = null;
   /** Hardwarový kodér H.264 (podle snímací stránky); null = neví se. */
   hwEncoder: boolean | null = null;
+  /** Kamera v klipech za běhu (null = vypnutá / snímání neběží / ještě nic nehlásila). */
+  clipCamera: ClipCameraStatus | null = null;
   /** Snímky za sekundu, se kterými se opravdu nahrává (bez hardwarového kodéru nejvýš 30). */
   effectiveFps: number | null = null;
   /** Chce někdo plynulé měřáky (nastavení je otevřené na Záznamu)? */
@@ -142,6 +144,8 @@ export class CaptureManager {
       onWarning?: (kind: Extract<CaptureEvent, { type: 'warning' }>['kind'], message: string) => void;
       /** Hladiny zvuku ze snímací stránky (zhruba každou sekundu). */
       onLevels?: (levels: AudioLevels) => void;
+      /** Kamera v klipech změnila stav (otevírá se / v záznamu / nejde). */
+      onClipCamera?: (status: ClipCameraStatus) => void;
       /** Výchozí výstup Windows se změnil - snímání se má rozjet znovu (loopback visí na starém). */
       onDefaultOutputChanged?: (device: string) => void;
       /** Název složky v %TEMP% - Kine a Kine Clipper mají každá svou, ať si nesahají na kousky. */
@@ -217,6 +221,8 @@ export class CaptureManager {
     this._state = state;
     this._error = error;
     if (state !== 'on') this.levels = null;
+    // Stav kamery patří k jednomu běhu snímání (nový start ho nahlásí znovu).
+    if (state === 'off' || state === 'error') this.clipCamera = null;
     this.deps.onState(state, error, runtime);
   }
 
@@ -411,6 +417,12 @@ export class CaptureManager {
     if (this.window && !this.window.isDestroyed()) this.window.webContents.send('capture:command', command);
   }
 
+  /** Kamera v klipech za běhu: jiná kamera, poloha, velikost, tvar, zrcadlo - zásobník se nerestartuje. */
+  setClipCamera(camera: SceneCamera | null): void {
+    if (this._state !== 'on') return;
+    this.sendSafe({ type: 'clip-camera', camera });
+  }
+
   /** Plynulé měřáky zvuku (10x za sekundu) jen když se na ně někdo dívá - jinak jednou za sekundu. */
   setMetersFast(fast: boolean): void {
     if (this.metersFast === fast) return;
@@ -585,6 +597,15 @@ export class CaptureManager {
     if (event.type === 'levels') {
       this.levels = event.levels;
       this.deps.onLevels?.(event.levels);
+      return;
+    }
+    if (event.type === 'clip-camera') {
+      // Snímání mezitím skončilo - stav kamery z dobíhající stránky už neplatí.
+      if (this._state !== 'on' && this._state !== 'starting') return;
+      const next: ClipCameraStatus = { state: event.state, message: event.message ?? null, width: event.width ?? null, height: event.height ?? null };
+      log(`kamera v klipech: ${event.state}${event.message ? ` (${event.message})` : ''}${event.width ? ` ${event.width}x${event.height}` : ''}`);
+      this.clipCamera = next;
+      this.deps.onClipCamera?.(next);
       return;
     }
     if (event.type === 'defaultOutputChanged') {

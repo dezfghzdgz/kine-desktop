@@ -878,4 +878,9 @@ export const pl: Record<Key, string> = {
   clipCameraPreviewGame: 'Gra',
   toastClipCameraFailed: 'Kamera w klipach: {reason} Na razie klipy nagrywają się bez niej.',
   updateRequiredNotice: 'Ta wersja aplikacji jest nieaktualna - przesyłanie na Kine i nadawanie zadziała po aktualizacji (O aplikacji → Aktualizuj).',
+  uploadCancel: 'Anuluj',
+  uploadCancelHint: 'Anuluj przesyłanie na Kine (klip zostaje w aplikacji i można go przesłać ponownie)',
+  uploadRestart: 'Ponów',
+  uploadRestartHint: 'Zacznij przesyłanie od początku (jeśli się zawiesiło)',
+  uploadCancelLong: 'Anuluj przesyłanie',
 };

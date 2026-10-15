@@ -22,9 +22,41 @@ export const UPLOAD_ERROR_LOGIN = 'login-required';
  * Výjimka: klip, který hráč nahrát CHCE hned (tlačítko Nahrát / Nahrát hned,
  * `enqueue(..., { now: true })`), jede i během hraní - je to jeho volba.
  *
- * Jeden klip po druhém - souběžně by si jen braly pásmo.
+ * Dva pruhy: klipy (do 5 minut) a dlouhá videa (nahrávky zápasů). V každém
+ * jede jedno nahrávání po druhém, ale klip nikdy nečeká, až se dohraje
+ * hodinová nahrávka - dřív se klipy "nenahrávaly", protože stály ve frontě
+ * za ní.
+ *
+ * Hráč může nahrávání zrušit (`cancel`) nebo zkusit znovu od začátku
+ * (`restart`). Zrušené i nepovedené nahrávání appka řekne Kine
+ * (cancelUpload) - jinak by tam dál drželo místo mezi rozpracovanými.
  */
 export type { UploadRequest };
+
+/** Klip do tolika sekund jede pruhem klipů (stejná hranice jako "klip" na Kine - lib/uploadLimits.ts). */
+export const CLIP_LANE_MAX_SECONDS = 300;
+
+export type UploadLane = 'clip' | 'long';
+
+/** Pruh nahrávání: nahrávka zápasu a cokoli delšího než 5 minut jede zvlášť. */
+export function uploadLane(clip: Pick<Clip, 'kind' | 'durationSeconds'>): UploadLane {
+  if (clip.kind === 'recording') return 'long';
+  const d = clip.durationSeconds;
+  return typeof d === 'number' && Number.isFinite(d) && d > CLIP_LANE_MAX_SECONDS ? 'long' : 'clip';
+}
+
+const LANES: UploadLane[] = ['clip', 'long'];
+
+type Running = {
+  request: UploadRequest;
+  abort: AbortController;
+  /** Nahrávání u Cloudflare (lístek na Kine) - po zrušení / chybě se uvolní. */
+  videoId?: string;
+  /** Hráč chce zrušit / začít znovu (abort pak není pauza). */
+  stop?: 'cancel' | 'restart';
+  /** Soubor je nahraný, Kine ho ukládá - teď už se nic neruší. */
+  confirming?: boolean;
+};
 
 export type UploaderEvent =
   | { type: 'done'; clip: Clip; url: string }
@@ -49,7 +81,8 @@ export function readySchedule(): number[] {
 
 export class Uploader {
   private queue: UploadRequest[] = [];
-  private current: { request: UploadRequest; abort: AbortController } | null = null;
+  /** Co se právě nahrává - v každém pruhu nejvýš jedno. */
+  private running = new Map<UploadLane, Running>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private listeners = new Set<(e: UploaderEvent) => void>();
   /** Klipy, u kterých se čeká, až je Kine zpracuje (id klipu -> zastavení čekání). */
@@ -97,14 +130,90 @@ export class Uploader {
 
   /** Kolik klipů čeká nebo se nahrává. */
   pending(): number {
-    return this.queue.length + (this.current ? 1 : 0);
+    return this.queue.length + this.running.size;
   }
 
   /** Čeká něco kvůli hře? (Klipy "nahrát hned" jedou i během hraní - ty se nepočítají.) */
   isPausedByGame(): boolean {
     if (this.deps.blocked() !== 'game') return false;
-    const pending = [...this.queue, ...(this.current ? [this.current.request] : [])];
+    const pending = [...this.queue, ...[...this.running.values()].map((r) => r.request)];
     return pending.some((r) => !this.forced.has(r.clipId));
+  }
+
+  private runningFor(clipId: string): Running | undefined {
+    for (const r of this.running.values()) if (r.request.clipId === clipId) return r;
+    return undefined;
+  }
+
+  private laneOf(request: UploadRequest): UploadLane {
+    const clip = this.deps.library.get(request.clipId);
+    return clip ? uploadLane(clip) : 'clip';
+  }
+
+  /** Uvolní nahrávání na Kine (lístek + rezerva u Cloudflare). Na pozadí, chyba nevadí - lístek jinak vyprší sám. */
+  private releaseOnKine(videoId: string | undefined): void {
+    if (!videoId || !this.deps.api.cancelUpload) return;
+    void this.deps.api.cancelUpload(videoId).catch((e: unknown) => {
+      this.deps.log(`uvolnění nahrávání ${videoId} na Kine: ${(e as Error)?.message ?? e}`);
+    });
+  }
+
+  /**
+   * Zrušit nahrávání klipu (tlačítko Zrušit): rozjeté se přeruší, čekající
+   * vypadne z fronty, klip zůstane v appce jako nenahraný (jde nahrát znovu).
+   * Vrací false, když není co rušit (nebo se právě ukládá na Kine).
+   */
+  cancel(clipId: string): boolean {
+    const run = this.runningFor(clipId);
+    if (run) {
+      if (run.confirming) return false;
+      run.stop = 'cancel';
+      run.abort.abort();
+      return true;
+    }
+    const idx = this.queue.findIndex((q) => q.clipId === clipId);
+    if (idx >= 0) this.queue.splice(idx, 1);
+    const clip = this.deps.library.get(clipId);
+    const u = clip?.upload;
+    if (clip && u && u.state !== 'done') {
+      this.forced.delete(clipId);
+      this.release(clip);
+      this.deps.library.setUpload(clipId, null);
+      this.releaseOnKine(u.state === 'uploading' || u.state === 'paused' ? u.videoId : undefined);
+      this.deps.log(`nahrávání zrušeno: ${clip.title}`);
+      this.emit({ type: 'changed' });
+      return true;
+    }
+    if (idx >= 0) {
+      this.emit({ type: 'changed' });
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Zkusit nahrát znovu od začátku (tlačítko Znovu / Zkusit znovu): staré
+   * nahrávání se zahodí (i na Kine) a klip jde hned znovu - i během hraní,
+   * jako "Nahrát hned".
+   */
+  restart(clipId: string): boolean {
+    const clip = this.deps.library.get(clipId);
+    if (!clip || clip.deletedAt || clip.upload?.state === 'done') return false;
+    const run = this.runningFor(clipId);
+    if (run) {
+      if (run.confirming) return false;
+      run.stop = 'restart';
+      run.abort.abort();
+      return true;
+    }
+    const request = this.queue.find((q) => q.clipId === clipId) ?? clip.uploadOptions ?? { clipId, visibility: this.deps.settings().visibility };
+    this.queue = this.queue.filter((q) => q.clipId !== clipId);
+    const u = clip.upload;
+    this.release(clip);
+    this.releaseOnKine(u && (u.state === 'uploading' || u.state === 'paused') ? u.videoId : undefined);
+    this.deps.library.setUpload(clipId, null);
+    this.enqueue([{ ...request, clipId }], { now: true });
+    return true;
   }
 
   /** Jede tenhle klip i během hraní (hráč ho chtěl nahrát hned)? */
@@ -122,7 +231,7 @@ export class Uploader {
       if (!clip || clip.deletedAt) continue;
       if (clip.upload?.state === 'done') continue;
       if (opts.now) this.forced.add(r.clipId);
-      if (this.queue.some((q) => q.clipId === r.clipId) || this.current?.request.clipId === r.clipId) continue;
+      if (this.queue.some((q) => q.clipId === r.clipId) || this.runningFor(r.clipId)) continue;
       const request: UploadRequest = { ...r, title: r.title?.trim().slice(0, 150) || undefined };
       this.queue.push(request);
       const patch: Partial<Clip> = { uploadOptions: request };
@@ -217,30 +326,27 @@ export class Uploader {
   /** Zavolat, když se změní stav hry / připojení: přeruší nebo rozjede. */
   kick(): void {
     const blocked = this.deps.blocked();
-    if (blocked && this.current) {
-      // Klip "nahrát hned" se kvůli hře nepřeruší (bez připojení ano).
-      if (blocked === 'offline' || !this.forced.has(this.current.request.clipId)) {
-        this.deps.log(`nahrávání pozastaveno (${blocked})`);
-        this.current.abort.abort();
-      }
-      return;
-    }
     if (blocked) {
-      this.markQueuedAsPaused(blocked);
-      // Během hraní se rozjede klip, který hráč chce nahrát hned.
-      if (blocked === 'game' && !this.current && !this.timer && this.queue.some((q) => this.forced.has(q.clipId))) {
-        this.timer = setTimeout(() => {
-          this.timer = null;
-          void this.next();
-        }, 50);
+      for (const run of this.running.values()) {
+        // Klip "nahrát hned" se kvůli hře nepřeruší (bez připojení ano).
+        if (!run.stop && (blocked === 'offline' || !this.forced.has(run.request.clipId))) {
+          this.deps.log(`nahrávání pozastaveno (${blocked})`);
+          run.abort.abort();
+        }
       }
+      this.markQueuedAsPaused(blocked);
+      // Během hraní se rozjede klip, který hráč chce nahrát hned (když je jeho pruh volný).
+      if (blocked === 'game' && this.queue.some((q) => this.forced.has(q.clipId) && !this.running.has(this.laneOf(q)))) this.schedule();
       return;
     }
-    if (this.current) return;
+    if (this.queue.some((q) => !this.running.has(this.laneOf(q)))) this.schedule();
+  }
+
+  private schedule(): void {
     if (this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.next();
+      this.fill();
     }, 50);
   }
 
@@ -255,40 +361,53 @@ export class Uploader {
     this.emit({ type: 'changed' });
   }
 
-  private async next(): Promise<void> {
-    if (this.current) return;
+  /** Rozjede nahrávání v každém volném pruhu (během hraní jen klipy "nahrát hned"). */
+  private fill(): void {
     const blocked = this.deps.blocked();
-    let request: UploadRequest | undefined;
-    if (blocked === 'game') {
-      // Během hraní jen klipy, které hráč chce nahrát hned; ostatní počkají.
-      const idx = this.queue.findIndex((q) => this.forced.has(q.clipId));
-      this.markQueuedAsPaused('game');
-      if (idx < 0) return;
-      request = this.queue.splice(idx, 1)[0];
-    } else if (blocked) {
+    if (blocked && blocked !== 'game') {
       this.markQueuedAsPaused(blocked);
       return;
-    } else {
-      request = this.queue.shift();
     }
-    if (!request) return;
-    const clip = this.deps.library.get(request.clipId);
-    if (!clip || clip.deletedAt) {
-      // Klip mezitím skončil v koši - nahrávat ho nemá smysl.
-      void this.next();
-      return;
+    if (blocked === 'game') this.markQueuedAsPaused('game');
+    for (const lane of LANES) {
+      if (this.running.has(lane)) continue;
+      for (;;) {
+        const idx = this.queue.findIndex((q) => this.laneOf(q) === lane && (blocked !== 'game' || this.forced.has(q.clipId)));
+        if (idx < 0) break;
+        const request = this.queue.splice(idx, 1)[0];
+        const clip = this.deps.library.get(request.clipId);
+        // Klip mezitím skončil v koši - nahrávat ho nemá smysl.
+        if (!clip || clip.deletedAt) continue;
+        void this.run(lane, request, clip);
+        break;
+      }
     }
+  }
 
+  private async run(lane: UploadLane, request: UploadRequest, clip: Clip): Promise<void> {
     const abort = new AbortController();
-    this.current = { request, abort };
+    const run: Running = { request, abort };
+    this.running.set(lane, run);
+    let again: UploadRequest | null = null;
     try {
-      const url = await this.uploadOne(clip, request, abort.signal);
+      const url = await this.uploadOne(clip, request, abort.signal, run);
       this.release(clip);
       this.forced.delete(clip.id);
       const fresh = this.deps.library.get(clip.id) ?? clip;
       this.emit({ type: 'done', clip: fresh, url });
     } catch (e) {
-      if (e instanceof TusAborted || abort.signal.aborted) {
+      if (run.stop) {
+        // Hráč nahrávání zrušil (nebo ho chce znovu od začátku): nic se nenavazuje,
+        // klip je zase nenahraný a Kine nahrávání uvolní.
+        const prev = this.deps.library.get(clip.id)?.upload;
+        const videoId = run.videoId ?? (prev && (prev.state === 'uploading' || prev.state === 'paused') ? prev.videoId : undefined);
+        this.release(clip);
+        this.forced.delete(clip.id);
+        this.deps.library.setUpload(clip.id, null);
+        this.releaseOnKine(videoId);
+        this.deps.log(run.stop === 'restart' ? `nahrávání znovu od začátku: ${clip.title}` : `nahrávání zrušeno: ${clip.title}`);
+        if (run.stop === 'restart') again = { ...request };
+      } else if (e instanceof TusAborted || abort.signal.aborted) {
         // Pauza - klip jde zpátky do čela fronty a pokračuje, až bude možné.
         const fresh = this.deps.library.get(clip.id);
         const prev = fresh?.upload;
@@ -302,14 +421,17 @@ export class Uploader {
         const message = status === 401 ? UPLOAD_ERROR_LOGIN : e instanceof Error ? e.message : String(e);
         this.release(clip);
         this.forced.delete(clip.id);
+        // Nepovedený pokus nesmí na Kine dál držet místo mezi rozpracovanými (Zkusit znovu začne od začátku).
+        if (!run.confirming) this.releaseOnKine(run.videoId);
         this.deps.log(`nahrání selhalo: ${clip.file}: ${message}`);
         this.deps.library.setUpload(clip.id, { state: 'error', message });
         this.emit({ type: 'error', clip, message });
       }
     } finally {
-      this.current = null;
+      this.running.delete(lane);
       this.emit({ type: 'changed' });
-      if (this.queue.length > 0) this.kick();
+      if (again) this.enqueue([again], { now: true });
+      else if (this.queue.length > 0) this.kick();
     }
   }
 
@@ -321,9 +443,10 @@ export class Uploader {
     }
   }
 
-  private async uploadOne(clip: Clip, request: UploadRequest, signal: AbortSignal): Promise<string> {
+  private async uploadOne(clip: Clip, request: UploadRequest, signal: AbortSignal, run?: Running): Promise<string> {
     const { library, api } = this.deps;
     const prepared = this.deps.prepareFile ? await this.deps.prepareFile(clip) : { file: clip.file, fresh: false };
+    if (signal.aborted) throw new TusAborted();
     const file = prepared.file;
     const size = statSync(file).size;
     const prev = clip.upload;
@@ -336,14 +459,18 @@ export class Uploader {
     let mode: 'tus' | 'basic' = 'tus';
 
     if (!tusUrl || !videoId) {
+      // Staré rozjeté nahrávání, na které se už nenaváže (nová kopie souboru): ať na Kine nedrží místo.
+      if (prev && (prev.state === 'paused' || prev.state === 'uploading') && prev.videoId) this.releaseOnKine(prev.videoId);
       // Délka jde Kine (rezerva u Cloudflare a limity - na webu lib/uploadLimits.ts). Upravený
       // klip (zpomalení, střih) může mít jinou délku než originál - pak ji Kine odhadne sama.
       const duration = file === clip.file && Number.isFinite(clip.durationSeconds) && clip.durationSeconds > 0 ? clip.durationSeconds : null;
-      const target = await api.createUploadUrl(size, duration);
+      const target = await api.createUploadUrl(size, duration, signal);
       tusUrl = target.uploadURL;
       videoId = target.videoId;
       mode = target.mode;
     }
+    if (run) run.videoId = videoId;
+    if (signal.aborted) throw new TusAborted();
 
     const setProgress = (uploaded: number) => {
       library.setUpload(clip.id, { state: 'uploading', percent: Math.min(100, Math.round((uploaded / size) * 100)), tusUrl, videoId });
@@ -381,6 +508,9 @@ export class Uploader {
       setProgress(size);
     }
 
+    // Soubor je celý u Cloudflare: od teď se ukládá na Kine a nic se neruší.
+    if (signal.aborted) throw new TusAborted();
+    if (run) run.confirming = true;
     const settings = this.deps.settings();
     const { id } = await api.confirm({
       title: (request.title ?? clip.title).trim().slice(0, 150) || clip.title,

@@ -878,6 +878,23 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   `playerFullscreenOk` přes tlačítko v liště, `settingsSectionsOk` (Záznam
   pět oddílů, Appka vzhled / obecné / o appce, staré cíle).
 
+## Novinky 0.11.1
+
+- **Zrušit / Znovu u nahrávání** (karta klipu, hlavička přehrávače): rozjeté,
+  čekající i pozastavené nahrávání jde zrušit (`Uploader.cancel` - klip
+  zůstane nenahraný, nic se nenavazuje) a zaseknuté zkusit znovu od začátku
+  (`Uploader.restart` - jede hned, i během hraní, se stejným nastavením).
+  Zrušené i nepovedené nahrávání appka řekne Kine (`/api/videos/cancel-upload`),
+  takže tam přestane držet místo mezi rozpracovanými; dřív jeden nepovedený
+  pokus blokoval další nahrávání až do vypršení lístku (24 h).
+- **Dva pruhy nahrávání**: klipy (do 5 minut) a dlouhá videa / nahrávky
+  zápasů (`uploadLane`). V každém jede jedno nahrávání po druhém, ale klip už
+  nikdy nečeká, až se dohraje hodinová nahrávka.
+- Čekání na Kine při přípravě a uložení nahrávání má strop 60 s (dřív mohl
+  zaseknutý dotaz zastavit celou frontu) a jde ho přerušit (hra, Zrušit).
+- Testy: `tests/uploader.test.mjs` (pruhy, Zrušit rozjeté / čekající /
+  pozastavené, Zkusit znovu, uvolnění nepovedeného pokusu).
+
 ## Novinky 0.11.0
 
 - **Verze appky v každém dotazu na Kine** (`X-Kine-App: clipper/0.11.0` -

@@ -893,6 +893,11 @@ export const en = {
   clipCameraPreviewGame: 'Game',
   toastClipCameraFailed: 'Camera in clips: {reason} Clips are recorded without it for now.',
   updateRequiredNotice: 'This version of the app is out of date - uploading to Kine and streaming will work again after you update (About → Update).',
+  uploadCancel: 'Cancel',
+  uploadCancelHint: 'Stop uploading to Kine (the clip stays in the app and can be uploaded again)',
+  uploadRestart: 'Retry',
+  uploadRestartHint: 'Start the upload again from the beginning (if it got stuck)',
+  uploadCancelLong: 'Cancel upload',
 } as const;
 
 export type Key = keyof typeof en;

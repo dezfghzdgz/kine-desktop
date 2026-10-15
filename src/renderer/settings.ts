@@ -3477,11 +3477,52 @@ function discordPanel() {
 
 // ---- klipy ---------------------------------------------------------------------------------
 
+/** Zrušit nahrávání (klip zůstane v appce nenahraný). */
+function uploadCancelButton(clip: Clip) {
+  return h(
+    'button',
+    {
+      class: 'small quiet upload-cancel',
+      title: t('uploadCancelHint'),
+      onclick: (e: Event) => {
+        e.stopPropagation();
+        void kine.cancelUpload(clip.id);
+      },
+    },
+    icon('close', 12),
+    t('uploadCancel')
+  );
+}
+
+/** Zkusit nahrát znovu od začátku (zaseknuté nahrávání). */
+function uploadRestartButton(clip: Clip) {
+  return h(
+    'button',
+    {
+      class: 'small quiet upload-restart',
+      title: t('uploadRestartHint'),
+      onclick: (e: Event) => {
+        e.stopPropagation();
+        void kine.restartUpload(clip.id);
+      },
+    },
+    icon('refresh', 12),
+    t('uploadRestart')
+  );
+}
+
 function uploadState(clip: Clip) {
   const u = clip.upload;
   if (!u) return null;
-  if (u.state === 'queued') return h('div', { class: 'state' }, t('uploadQueued'));
-  if (u.state === 'uploading') return h('div', {}, h('div', { class: 'progress' }, h('span', { style: `width:${u.percent}%` })), h('div', { class: 'state' }, t('uploadUploading', { percent: u.percent })));
+  if (u.state === 'queued') return h('div', { class: 'state upload-paused-row' }, t('uploadQueued'), uploadCancelButton(clip));
+  if (u.state === 'uploading') {
+    return h(
+      'div',
+      {},
+      h('div', { class: 'progress' }, h('span', { style: `width:${u.percent}%` })),
+      h('div', { class: 'state upload-paused-row' }, t('uploadUploading', { percent: u.percent }), uploadRestartButton(clip), uploadCancelButton(clip))
+    );
+  }
   if (u.state === 'paused') {
     // Čeká, až dohraješ: "Nahrát hned" ho pošle i během hraní (hráčova volba - na slabší wifi může hra lagovat).
     const now =
@@ -3504,7 +3545,7 @@ function uploadState(clip: Clip) {
       'div',
       {},
       h('div', { class: 'progress' }, h('span', { style: `width:${u.percent}%` })),
-      h('div', { class: 'state upload-paused-row' }, t(u.reason === 'game' ? 'uploadPausedGame' : 'uploadPausedOffline', { percent: u.percent }), now)
+      h('div', { class: 'state upload-paused-row' }, t(u.reason === 'game' ? 'uploadPausedGame' : 'uploadPausedOffline', { percent: u.percent }), now, uploadCancelButton(clip))
     );
   }
   if (u.state === 'done' && u.ready === false) {
@@ -3610,6 +3651,7 @@ function showClip(clip: Clip, edit = false) {
     // Hlavička přehrávače přímo u klipu: hvězdička (oblíbené) a Nahrát na Kine (dialog jako na kartě).
     onFavorite: (c, favorite) => void kine.setFavorite(c.id, favorite),
     onUpload: (c) => startUpload([clips.find((x) => x.id === c.id) ?? c]),
+    onCancelUpload: (c) => void kine.cancelUpload(c.id),
     edit: {
       run: (c, request) => kine.trimClip(c.id, request),
       onProgress: (cb) => kine.onTrimProgress(cb),

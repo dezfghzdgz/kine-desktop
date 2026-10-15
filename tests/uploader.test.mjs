@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Uploader } from '../dist/esm/uploader.js';
+import { Uploader, uploadLane } from '../dist/esm/uploader.js';
 import { ClipLibrary } from '../dist/esm/clips.js';
 import { createKineApi } from '../dist/esm/kineApi.js';
 
@@ -18,8 +18,13 @@ function startMockServer() {
   const uploads = new Map();
   const confirmed = [];
   const statusCalls = [];
+  const canceled = [];
   let slowPatch = false;
   let processingLeft = 0;
+  // Zaseknuté nahrávání: PATCH souboru téhle velikosti visí, dokud ho appka nepřeruší.
+  let hangIfSize = null;
+  // Cloudflare kus odmítne (403) - nahrávání skončí chybou.
+  let failPatch = false;
   async function handle(req, res) {
     const chunks = [];
     for await (const c of req) chunks.push(c);
@@ -37,6 +42,11 @@ function startMockServer() {
       if (!up) { res.writeHead(404); return res.end(); }
       if (req.method === 'HEAD') { res.writeHead(200, { 'Upload-Offset': String(up.data.length) }); return res.end(); }
       if (req.method === 'PATCH') {
+        if (failPatch) { res.writeHead(403); return res.end(); }
+        if (hangIfSize !== null && up.size === hangIfSize) {
+          await new Promise((r) => { req.on('close', r); res.on('close', r); });
+          return;
+        }
         if (slowPatch) await new Promise((r) => setTimeout(r, 300));
         if (Number(req.headers['upload-offset']) !== up.data.length) { res.writeHead(409); return res.end(); }
         up.data = Buffer.concat([up.data, body]);
@@ -49,6 +59,11 @@ function startMockServer() {
       confirmed.push(meta);
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({ video: { id: 'video-' + confirmed.length } }));
+    }
+    if (req.method === 'POST' && url.pathname === '/api/videos/cancel-upload') {
+      canceled.push(JSON.parse(body.toString()).cloudflareVideoId);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end('{"ok":true}');
     }
     // Stav zpracování: napodobenina Kine odpoví "processing" tolikrát, kolik je v processingLeft, pak "ready".
     if (req.method === 'POST' && url.pathname === '/api/videos/status') {
@@ -78,7 +93,12 @@ function startMockServer() {
   });
   return new Promise((resolve) =>
     server.listen(0, '127.0.0.1', () =>
-      resolve({ server, uploads, confirmed, statusCalls, setSlow: (v) => (slowPatch = v), setProcessing: (n) => (processingLeft = n), port: server.address().port })
+      resolve({
+        server, uploads, confirmed, statusCalls, canceled,
+        setSlow: (v) => (slowPatch = v), setProcessing: (n) => (processingLeft = n),
+        hangIfSize: (n) => (hangIfSize = n), failPatch: (v) => (failPatch = v),
+        port: server.address().port,
+      })
     )
   );
 }
@@ -512,4 +532,151 @@ test('hlášení vysílání: Kine řekne, jestli je přenos živě, co viděl C
   assert.equal(c.hidden, false);
   assert.equal(c.live, null);
   server.close();
+});
+
+// ---- Zrušit / Zkusit znovu / dva pruhy (kolo 0115) -------------------------------------------
+
+/** Počká, až platí podmínka (nejvýš ms). */
+async function until(fn, ms = 5000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (fn()) return true;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return fn();
+}
+
+function addClip(library, id, sizeBytes, extra = {}) {
+  const file = join(mkdtempSync(join(tmpdir(), 'kine-clip-')), `${id}.mp4`);
+  writeFileSync(file, Buffer.alloc(sizeBytes, 3));
+  library.add({ id, file, thumb: null, title: id, game: null, createdAt: new Date().toISOString(), durationSeconds: 30, sizeBytes, width: 1920, height: 1080, sessionId: 's1', upload: null, ...extra });
+}
+
+test('pruhy: nahrávka zápasu jede zvlášť, klipy na ni nečekají', () => {
+  assert.equal(uploadLane({ kind: 'recording', durationSeconds: 40 }), 'long');
+  assert.equal(uploadLane({ durationSeconds: 3600 }), 'long');
+  assert.equal(uploadLane({ durationSeconds: 300 }), 'clip');
+  assert.equal(uploadLane({ durationSeconds: 45 }), 'clip');
+  assert.equal(uploadLane({ durationSeconds: NaN }), 'clip');
+});
+
+test('klip se nahraje, i když se zrovna nahrává dlouhá nahrávka zápasu', async () => {
+  const mock = await startMockServer();
+  const { library } = makeLibrary(1024);
+  addClip(library, 'rec', 2 * 1024 * 1024, { kind: 'recording', durationSeconds: 3600 });
+  mock.hangIfSize(2 * 1024 * 1024);
+  const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${mock.port}`, getToken: async () => 'token-123' });
+  const uploader = new Uploader({ library, api, blocked: () => null, settings: () => settings, log: () => {}, readySchedule: fast });
+  const done = new Promise((resolve) => uploader.on((e) => e.type === 'done' && resolve(e)));
+  uploader.enqueue([{ clipId: 'rec', visibility: 'private' }]);
+  assert.ok(await until(() => library.get('rec').upload?.state === 'uploading'), 'nahrávka se nahrává');
+  uploader.enqueue([{ clipId: 'c1', visibility: 'private' }]);
+  const result = await done;
+  assert.equal(result.clip.id, 'c1', 'klip hotový dřív než nahrávka');
+  assert.equal(library.get('rec').upload.state, 'uploading', 'nahrávka pořád běží');
+  assert.equal(uploader.pending(), 1);
+  // Zrušit nahrávku: přestane, je nenahraná a Kine nahrávání uvolní.
+  assert.equal(uploader.cancel('rec'), true);
+  assert.ok(await until(() => library.get('rec').upload === null && uploader.pending() === 0));
+  const recUid = [...mock.uploads.entries()].find(([, u]) => u.size === 2 * 1024 * 1024)[0];
+  assert.ok(await until(() => mock.canceled.includes(recUid)), 'Kine dostala zrušení');
+  uploader.stopWaiting();
+  mock.server.close();
+});
+
+test('Zrušit: rozjeté nahrávání se přeruší, klip je zase nenahraný a Kine ho uvolní (žádná chyba)', async () => {
+  const mock = await startMockServer();
+  const { library } = makeLibrary(3 * 1024 * 1024);
+  mock.hangIfSize(3 * 1024 * 1024);
+  const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${mock.port}`, getToken: async () => 'token-123' });
+  const events = [];
+  const uploader = new Uploader({ library, api, blocked: () => null, settings: () => settings, log: () => {}, readySchedule: fast });
+  uploader.on((e) => events.push(e.type));
+  uploader.enqueue([{ clipId: 'c1', visibility: 'private' }], { now: true });
+  assert.ok(await until(() => library.get('c1').upload?.state === 'uploading'));
+  assert.equal(uploader.cancel('c1'), true);
+  assert.ok(await until(() => library.get('c1').upload === null && uploader.pending() === 0));
+  assert.ok(await until(() => mock.canceled.includes('cf1')));
+  assert.equal(events.includes('error'), false, 'zrušení není chyba');
+  assert.equal(uploader.isForced('c1'), false);
+  assert.equal(mock.confirmed.length, 0);
+  // Jde nahrát znovu (nové nahrávání od začátku).
+  mock.hangIfSize(null);
+  const done = new Promise((resolve) => uploader.on((e) => e.type === 'done' && resolve(e)));
+  uploader.enqueue([{ clipId: 'c1', visibility: 'private' }], { now: true });
+  await done;
+  assert.equal(mock.confirmed.at(-1).cloudflareVideoId, 'cf2');
+  uploader.stopWaiting();
+  mock.server.close();
+});
+
+test('Zkusit znovu: zaseknuté nahrávání začne od začátku (staré se na Kine uvolní)', async () => {
+  const mock = await startMockServer();
+  const { library } = makeLibrary(3 * 1024 * 1024);
+  mock.hangIfSize(3 * 1024 * 1024);
+  const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${mock.port}`, getToken: async () => 'token-123' });
+  const uploader = new Uploader({ library, api, blocked: () => null, settings: () => settings, log: () => {}, readySchedule: fast });
+  const done = new Promise((resolve) => uploader.on((e) => e.type === 'done' && resolve(e)));
+  uploader.enqueue([{ clipId: 'c1', visibility: 'public', title: 'Ace' }]);
+  assert.ok(await until(() => library.get('c1').upload?.state === 'uploading'));
+  mock.hangIfSize(null);
+  assert.equal(uploader.restart('c1'), true);
+  await done;
+  assert.ok(mock.canceled.includes('cf1'), 'první pokus uvolněný');
+  assert.equal(mock.confirmed.length, 1);
+  assert.equal(mock.confirmed[0].cloudflareVideoId, 'cf2', 'uložené je nové nahrávání');
+  assert.equal(mock.confirmed[0].title, 'Ace', 'nastavení nahrání zůstalo');
+  assert.equal(library.get('c1').upload.state, 'done');
+  uploader.stopWaiting();
+  mock.server.close();
+});
+
+test('nepovedené nahrávání se na Kine uvolní; Zkusit znovu ho nahraje', async () => {
+  const mock = await startMockServer();
+  const { library } = makeLibrary(1024);
+  mock.failPatch(true);
+  const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${mock.port}`, getToken: async () => 'token-123' });
+  const uploader = new Uploader({ library, api, blocked: () => null, settings: () => settings, log: () => {}, readySchedule: fast });
+  const failed = new Promise((resolve) => uploader.on((e) => e.type === 'error' && resolve(e)));
+  uploader.enqueue([{ clipId: 'c1', visibility: 'private' }]);
+  await failed;
+  assert.equal(library.get('c1').upload.state, 'error');
+  assert.ok(await until(() => mock.canceled.includes('cf1')), 'lístek nepovedeného pokusu uvolněný');
+  mock.failPatch(false);
+  const done = new Promise((resolve) => uploader.on((e) => e.type === 'done' && resolve(e)));
+  assert.equal(uploader.restart('c1'), true);
+  await done;
+  assert.equal(mock.confirmed[0].cloudflareVideoId, 'cf2');
+  uploader.stopWaiting();
+  mock.server.close();
+});
+
+test('Zrušit čekající (během hraní) a pozastavené nahrávání', async () => {
+  const mock = await startMockServer();
+  const { library } = makeLibrary(3 * 1024 * 1024);
+  const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${mock.port}`, getToken: async () => 'token-123' });
+  let blocked = 'game';
+  const uploader = new Uploader({ library, api, blocked: () => blocked, settings: () => settings, log: () => {}, readySchedule: fast });
+  // Čeká, až hráč dohraje (ještě nic na Kine): zrušení ho jen vyřadí z fronty.
+  uploader.enqueue([{ clipId: 'c1', visibility: 'private' }]);
+  assert.ok(await until(() => library.get('c1').upload?.state === 'paused'));
+  assert.equal(uploader.cancel('c1'), true);
+  assert.equal(library.get('c1').upload, null);
+  assert.equal(uploader.pending(), 0);
+  assert.equal(mock.canceled.length, 0, 'na Kine nic nebylo');
+  // Rozjeté a pozastavené hrou (u Cloudflare už je kus): zrušení ho uvolní i na Kine.
+  blocked = null;
+  mock.hangIfSize(3 * 1024 * 1024);
+  uploader.enqueue([{ clipId: 'c1', visibility: 'private' }]);
+  assert.ok(await until(() => library.get('c1').upload?.state === 'uploading'));
+  blocked = 'game';
+  uploader.kick();
+  assert.ok(await until(() => library.get('c1').upload?.state === 'paused' && library.get('c1').upload.videoId === 'cf1'));
+  assert.equal(uploader.cancel('c1'), true);
+  assert.equal(library.get('c1').upload, null);
+  assert.ok(await until(() => mock.canceled.includes('cf1')));
+  assert.equal(uploader.pending(), 0);
+  assert.equal(uploader.cancel('c1'), false, 'podruhé není co rušit');
+  uploader.stopWaiting();
+  mock.server.close();
 });

@@ -878,4 +878,9 @@ export const de: Record<Key, string> = {
   clipCameraPreviewGame: 'Spiel',
   toastClipCameraFailed: 'Kamera in Clips: {reason} Clips werden vorerst ohne sie aufgenommen.',
   updateRequiredNotice: 'Diese App-Version ist veraltet - Hochladen auf Kine und Streamen gehen erst nach dem Update wieder (Info → Aktualisieren).',
+  uploadCancel: 'Abbrechen',
+  uploadCancelHint: 'Hochladen auf Kine abbrechen (der Clip bleibt in der App und kann erneut hochgeladen werden)',
+  uploadRestart: 'Neu starten',
+  uploadRestartHint: 'Hochladen von vorn neu starten (falls es hängt)',
+  uploadCancelLong: 'Hochladen abbrechen',
 };

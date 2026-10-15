@@ -75,6 +75,8 @@ export type PlayerOptions = {
   onFavorite?: (clip: Clip, favorite: boolean) => void;
   /** Nahrát na Kine z hlavičky (jako tlačítko Nahrát na kartě); bez tohohle tlačítko není. */
   onUpload?: (clip: Clip) => void;
+  /** Zrušit rozjeté / čekající nahrávání klipu. */
+  onCancelUpload?: (clip: Clip) => void;
   /** Rovnou otevřít úpravy (tlačítko Upravit na kartě). */
   startEditing?: boolean;
   /**
@@ -389,6 +391,12 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     },
   }) as HTMLButtonElement;
   const uploadBtn = h('button', { class: 'small quiet player-upload', onclick: () => options.onUpload?.(clip) }) as HTMLButtonElement;
+  const cancelUploadBtn = h(
+    'button',
+    { class: 'small quiet player-upload-cancel hidden', title: t('uploadCancelHint'), 'aria-label': t('uploadCancelHint'), onclick: () => options.onCancelUpload?.(clip) },
+    icon('close', 14),
+    t('uploadCancelLong')
+  ) as HTMLButtonElement;
   /** Hvězdička a Nahrát podle klipu (oblíbený? nahrává se / nahraný?). */
   function refreshHeadButtons() {
     clear(favBtn);
@@ -401,6 +409,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     const u = clip.upload;
     // Nahraný klip má v hlavičce "Kopírovat odkaz"; rozjetý jen stav (nahrává se / čeká).
     uploadBtn.classList.toggle('hidden', u?.state === 'done' || !!clip.deletedAt);
+    // Rozjeté / čekající nahrávání jde zrušit přímo odsud.
+    cancelUploadBtn.classList.toggle('hidden', !(u?.state === 'uploading' || u?.state === 'queued' || u?.state === 'paused') || !!clip.deletedAt);
     clear(uploadBtn);
     if (u?.state === 'uploading') {
       uploadBtn.disabled = true;
@@ -433,6 +443,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
         { class: 'row', style: 'flex-wrap:nowrap' },
         options.onFavorite ? favBtn : null,
         options.onUpload ? uploadBtn : null,
+        options.onCancelUpload ? cancelUploadBtn : null,
         options.onCopyLink ? copyBtn : null,
         edit ? editBtn : null,
         h('button', { class: 'small quiet', title: t('playerOpenExternal'), onclick: () => options.onOpenExternal(clip) }, icon('external', 15), t('playerOpenExternal')),

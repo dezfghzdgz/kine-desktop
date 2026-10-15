@@ -2961,6 +2961,19 @@ class KineApp {
       this.uploader.enqueue(sanitizeUploadRequests(requests, this.settings.get()), { now: true });
       this.pushStatus();
     });
+    // Zrušit nahrávání / zkusit znovu od začátku (karta klipu, přehrávač).
+    ipcMain.handle('clips:cancelUpload', (_e, id: unknown) => {
+      if (typeof id !== 'string') return false;
+      const ok = this.uploader.cancel(id);
+      this.pushStatus();
+      return ok;
+    });
+    ipcMain.handle('clips:restartUpload', (_e, id: unknown) => {
+      if (typeof id !== 'string') return false;
+      const ok = this.uploader.restart(id);
+      this.pushStatus();
+      return ok;
+    });
     ipcMain.handle('clips:openOnKine', (_e, id: string) => this.openClipOnKine(id));
     ipcMain.handle('clips:openDir', () => shell.openPath(this.settings.clipsDir()));
     ipcMain.handle('clips:pickDir', async () => {

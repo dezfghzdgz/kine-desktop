@@ -314,6 +314,39 @@ export async function runTestDriver(kine: {
       );
     }
 
+    // Zrušit / Znovu u nahrávání: karta klipu (nahrává se 37 %) má Zrušit a Znovu,
+    // Zrušit vrátí klip mezi nenahrané; čekající jde zrušit i z hlavičky přehrávače.
+    kine.openSettings('clips');
+    await sleep(700);
+    if (kine.settingsWindow && !kine.settingsWindow.isDestroyed() && clip2) {
+      const sw2 = kine.settingsWindow;
+      (kine.library as any).setUpload(clip2.id, { state: 'uploading', percent: 37, videoId: 'e2e' + '0'.repeat(29) });
+      await sleep(700);
+      const card = await sw2.webContents.executeJavaScript(
+        `(() => { const c = [...document.querySelectorAll('.clips .clip')].find((x) => x.querySelector('.upload-cancel')); return c ? { cancel: !!c.querySelector('.upload-cancel'), restart: !!c.querySelector('.upload-restart'), text: c.querySelector('.upload-paused-row')?.textContent ?? '' } : null; })()`
+      );
+      await shot(sw2, 'upload-cancel-card');
+      await sw2.webContents.executeJavaScript(`(() => { const b = document.querySelector('.clips .clip .upload-cancel'); if (b) b.click(); return !!b; })()`);
+      await sleep(700);
+      const cleared = kine.library.get(clip2.id)?.upload == null;
+      const buttonsGone = await sw2.webContents.executeJavaScript(`!document.querySelector('.clips .clip .upload-cancel')`);
+      // Čekající nahrávání a přehrávač: Zrušit v hlavičce.
+      (kine.library as any).setUpload(clip2.id, { state: 'queued' });
+      await sleep(600);
+      await sw2.webContents.executeJavaScript(`(() => { const c = [...document.querySelectorAll('.clips .clip')].find((x) => x.querySelector('.upload-cancel')); const t = c && c.querySelector('.thumb'); if (t) t.click(); return !!t; })()`);
+      await sleep(900);
+      const headCancel = await sw2.webContents.executeJavaScript(`(() => { const b = document.querySelector('.overlay .player-head .player-upload-cancel'); return !!b && !b.classList.contains('hidden'); })()`);
+      await shot(sw2, 'upload-cancel-player');
+      await sw2.webContents.executeJavaScript(`(() => { const b = document.querySelector('.overlay .player-head .player-upload-cancel'); if (b) b.click(); return !!b; })()`);
+      await sleep(700);
+      const headCleared = kine.library.get(clip2.id)?.upload == null;
+      const headHidden = await sw2.webContents.executeJavaScript(`(() => { const b = document.querySelector('.overlay .player-head .player-upload-cancel'); return !b || b.classList.contains('hidden'); })()`);
+      await sw2.webContents.executeJavaScript(`(() => { const b = document.querySelector('.overlay .player-close'); if (b) b.click(); return !!b; })()`);
+      await sleep(500);
+      result.uploadCancelUi = { card, cleared, buttonsGone, headCancel, headCleared, headHidden };
+      result.uploadCancelUiOk = !!card && card.cancel && card.restart && /37/.test(card.text) && cleared && buttonsGone && headCancel && headCleared && headHidden;
+    }
+
     // Přehrávač jako vrstva přes okno: klik na náhled prvního klipu otevře
     // .overlay s <video> (mřížka pod ním zůstává - žádná karta se neroztahuje).
     kine.openSettings('clips');
@@ -2111,7 +2144,7 @@ export async function runTestDriver(kine: {
       'playerNav', 'playerControlsOk', 'playerHeadOk', 'playerTracksOk', 'playerSpeedOk', 'playerMuteOk', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
       'autoClipContext', 'dota2Clip', 'minecraftClip', 'rocketLeagueClip', 'rocketLeagueConfig', 'verticalBlur', 'trash', 'trashUndoOk', 'trashDoubleOk', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
       'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'clipToastInstant', 'recordingStopOnceOk', 'updateProgressOk', 'playerFullscreenOk', 'lookOk', 'lookSizesOk', 'lookFollowOk',
-      'updateIssueOk', 'settingsSectionsOk', 'compressOk',
+      'updateIssueOk', 'settingsSectionsOk', 'compressOk', 'uploadCancelUiOk',
     ];
     if (process.env.KINE_TEST_LIVE_URL) common.push('liveOk', 'liveCompatOk');
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];

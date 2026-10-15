@@ -9,6 +9,8 @@ import type { LiveCloudflareSeen, Visibility } from '../shared/types';
  *       -> { video: { id } }
  *  POST /api/videos/status             { videoId }
  *       -> { status: 'ready' | 'processing' }   (Kine se zeptá Cloudflare)
+ *  POST /api/videos/cancel-upload      { cloudflareVideoId }
+ *       -> { ok }   (zrušené / nepovedené nahrávání uvolní místo na Kine)
  *
  * Token je přístupový token Supabase (Bearer); dodává ho auth.ts.
  */
@@ -16,12 +18,15 @@ import type { LiveCloudflareSeen, Visibility } from '../shared/types';
 export class KineApiError extends Error {
   /** Kine říká "zkus to znovu za chvíli" (záznam vysílání ještě není / se uzavírá). */
   readonly retry: boolean;
-  constructor(message: string, readonly status: number, retry = false) {
+  constructor(message: string, readonly status: number, retry = false, readonly code: string | null = null) {
     super(message);
     this.name = 'KineApiError';
     this.retry = retry;
   }
 }
+
+/** Jak dlouho čekat na Kine při přípravě a uložení nahrávání (pak chyba - fronta se nezasekne). */
+export const UPLOAD_API_TIMEOUT_MS = 60_000;
 
 export type UploadTarget = { mode: 'tus' | 'basic'; uploadURL: string; videoId: string };
 
@@ -72,9 +77,14 @@ export type PublishedRecording = { videoId: string; status: 'ready' | 'processin
 
 export type KineApi = {
   siteUrl(): string;
-  /** `durationSeconds`: délka klipu (Kine podle ní hlídá limity a rezervuje místo); null = neznámá. */
-  createUploadUrl(fileSize: number, durationSeconds?: number | null): Promise<UploadTarget>;
+  /**
+   * `durationSeconds`: délka klipu (Kine podle ní hlídá limity a rezervuje místo); null = neznámá.
+   * `signal`: hráč nahrávání zrušil / rozjela se hra - čekání na Kine skončí hned.
+   */
+  createUploadUrl(fileSize: number, durationSeconds?: number | null, signal?: AbortSignal): Promise<UploadTarget>;
   confirm(input: ConfirmInput): Promise<{ id: string }>;
+  /** Zrušené / nepovedené nahrávání: Kine ho přestane počítat mezi rozpracovaná a smaže rezervu u Cloudflare. */
+  cancelUpload?(cloudflareVideoId: string): Promise<void>;
   /**
    * Je video na Kine už zpracované? Kine se zeptá Cloudflare a když je
    * hotovo, přepne ho na "ready" - do té doby není v žádném seznamu na
@@ -175,17 +185,32 @@ export function createKineApi(deps: {
     return res;
   }) as typeof fetch;
 
-  async function post(path: string, body: unknown, timeoutMs?: number): Promise<any> {
+  async function post(path: string, body: unknown, timeoutMs?: number, signal?: AbortSignal): Promise<any> {
     const token = await deps.getToken();
     if (!token) throw new KineApiError('Nejsi přihlášený.', 401);
-    const res = await fetchImpl(`${deps.siteUrl()}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify(body),
-      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
-    });
+    const signals = [...(timeoutMs ? [AbortSignal.timeout(timeoutMs)] : []), ...(signal ? [signal] : [])];
+    let res: Response;
+    try {
+      res = await fetchImpl(`${deps.siteUrl()}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+        ...(signals.length > 0 ? { signal: signals.length === 1 ? signals[0] : AbortSignal.any(signals) } : {}),
+      });
+    } catch (e) {
+      // Kine neodpověděla včas: srozumitelná chyba místo "The operation was aborted due to timeout".
+      if ((e as { name?: string })?.name === 'TimeoutError' && !signal?.aborted) throw new KineApiError('Kine teď neodpovídá - zkus to prosím za chvíli znovu.', 504, true);
+      throw e;
+    }
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new KineApiError(typeof data?.error === 'string' ? data.error : `Kine odpověděla ${res.status}.`, res.status, data?.retry === true);
+    if (!res.ok) {
+      throw new KineApiError(
+        typeof data?.error === 'string' ? data.error : `Kine odpověděla ${res.status}.`,
+        res.status,
+        data?.retry === true,
+        typeof data?.code === 'string' ? data.code : null
+      );
+    }
     return data;
   }
 
@@ -200,14 +225,28 @@ export function createKineApi(deps: {
 
   return {
     siteUrl: deps.siteUrl,
-    async createUploadUrl(fileSize, durationSeconds) {
-      const data = await post('/api/videos/create-upload-url', {
-        fileSize,
-        preferResumable: true,
-        ...(typeof durationSeconds === 'number' && durationSeconds > 0 ? { durationSeconds } : {}),
-      });
+    async createUploadUrl(fileSize, durationSeconds, signal) {
+      const data = await post(
+        '/api/videos/create-upload-url',
+        {
+          fileSize,
+          preferResumable: true,
+          ...(typeof durationSeconds === 'number' && durationSeconds > 0 ? { durationSeconds } : {}),
+        },
+        UPLOAD_API_TIMEOUT_MS,
+        signal
+      );
       if (!data?.uploadURL || !data?.videoId) throw new KineApiError('Kine nevrátila adresu pro nahrání.', 500);
       return { mode: data.mode === 'tus' ? 'tus' : 'basic', uploadURL: data.uploadURL, videoId: data.videoId };
+    },
+    async cancelUpload(cloudflareVideoId) {
+      // 404 / 409 = starší Kine (bez zrušení) nebo už uložené video - není co uvolnit, chyba to není.
+      try {
+        await post('/api/videos/cancel-upload', { cloudflareVideoId }, 20_000);
+      } catch (e) {
+        if (e instanceof KineApiError && (e.status === 404 || e.status === 409 || e.status === 405)) return;
+        throw e;
+      }
     },
     async confirm(input) {
       const data = await post('/api/videos/confirm', {
@@ -227,7 +266,7 @@ export function createKineApi(deps: {
         chapters: input.chapters ?? [],
         captions: [],
         hashtags: input.hashtags,
-      });
+      }, UPLOAD_API_TIMEOUT_MS);
       if (!data?.video?.id) throw new KineApiError('Kine video neuložila.', 500);
       return { id: data.video.id as string };
     },

@@ -37,6 +37,10 @@ const kine = {
   openClip: (id: string): Promise<string> => ipcRenderer.invoke('clips:open', id),
   revealClip: (id: string): Promise<void> => ipcRenderer.invoke('clips:reveal', id),
   uploadClips: (requests: UploadRequest[]): Promise<void> => ipcRenderer.invoke('clips:upload', requests),
+  /** Zrušit nahrávání klipu (klip zůstane nenahraný). */
+  cancelUpload: (id: string): Promise<boolean> => ipcRenderer.invoke('clips:cancelUpload', id),
+  /** Zkusit nahrát znovu od začátku (hned, i během hraní). */
+  restartUpload: (id: string): Promise<boolean> => ipcRenderer.invoke('clips:restartUpload', id),
   openOnKine: (id: string): Promise<void> => ipcRenderer.invoke('clips:openOnKine', id),
   openClipsDir: (): Promise<string> => ipcRenderer.invoke('clips:openDir'),
   pickClipsDir: (): Promise<string | null> => ipcRenderer.invoke('clips:pickDir'),

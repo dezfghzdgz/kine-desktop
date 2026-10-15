@@ -878,4 +878,9 @@ export const sk: Record<Key, string> = {
   clipCameraPreviewGame: 'Hra',
   toastClipCameraFailed: 'Kamera v klipoch: {reason} Klipy sa zatiaľ nahrávajú bez nej.',
   updateRequiredNotice: 'Táto verzia appky je zastaraná - nahrávať na Kine a vysielať pôjde až po aktualizácii (O appke → Aktualizovať).',
+  uploadCancel: 'Zrušiť',
+  uploadCancelHint: 'Zrušiť nahrávanie na Kine (klip zostane v appke a dá sa nahrať znova)',
+  uploadRestart: 'Znova',
+  uploadRestartHint: 'Skúsiť nahrať znova od začiatku (keď sa nahrávanie zaseklo)',
+  uploadCancelLong: 'Zrušiť nahrávanie',
 };

@@ -878,4 +878,9 @@ export const uk: Record<Key, string> = {
   clipCameraPreviewGame: 'Гра',
   toastClipCameraFailed: 'Камера в кліпах: {reason} Поки що кліпи записуються без неї.',
   updateRequiredNotice: 'Ця версія застосунку застаріла - завантаження на Kine і трансляції запрацюють після оновлення (Про застосунок → Оновити).',
+  uploadCancel: 'Скасувати',
+  uploadCancelHint: 'Скасувати завантаження на Kine (кліп лишиться в застосунку, його можна завантажити знову)',
+  uploadRestart: 'Повторити',
+  uploadRestartHint: 'Почати завантаження спочатку (якщо воно зависло)',
+  uploadCancelLong: 'Скасувати завантаження',
 };

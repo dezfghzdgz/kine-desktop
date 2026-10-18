@@ -3,6 +3,9 @@
  * argumentů pro sestřih několika klipů do jednoho a pro export GIFu.
  */
 
+import { cameraRect, type CameraRect } from '../shared/liveLayout';
+import type { LiveCameraShape } from '../shared/types';
+
 /** Co o vstupním klipu víme (z knihovny a z hlavičky souboru). */
 export type MergeInput = {
   file: string;
@@ -349,6 +352,72 @@ export function textOverlayPosition(position: TextPosition): string {
   return `x='(W-w)/2':y='${y}'`;
 }
 
+// ---- překryvy: text, obrázek, GIF kdekoli v obraze ---------------------------------------
+
+/**
+ * Jeden překryv přes video. Poloha a velikost jsou zlomky výsledného obrazu
+ * (0-1), ať sedí stejně v náhledu v okně i ve výsledku: `cx`, `cy` = střed,
+ * `w` = šířka (výška podle poměru stran souboru). `from` / `to` = od kdy do
+ * kdy je vidět (sekundy výsledku; chybí = celou dobu). Text přijde z okna už
+ * nakreslený jako PNG (soubor), takže pro ffmpeg je to obrázek.
+ */
+export type OverlayItem = {
+  kind: 'image' | 'gif';
+  file: string;
+  cx: number;
+  cy: number;
+  w: number;
+  from?: number | null;
+  to?: number | null;
+};
+
+/** Nejvíc překryvů na jeden klip - každý je další vstup ffmpeg a filtr navíc. */
+export const OVERLAY_MAX = 8;
+
+const clamp01 = (n: unknown, fallback: number) => (Number.isFinite(Number(n)) ? Math.max(0, Math.min(1, Number(n))) : fallback);
+
+/** Očistí překryvy z okna: zlomky do 0-1, šířka aspoň 2 %, časy jen rozumné, nejvýš OVERLAY_MAX. */
+export function normalizeOverlays(items: unknown): OverlayItem[] {
+  if (!Array.isArray(items)) return [];
+  const out: OverlayItem[] = [];
+  for (const raw of items) {
+    const o = raw as Partial<OverlayItem> | null;
+    if (!o || typeof o.file !== 'string' || !o.file) continue;
+    const kind = o.kind === 'gif' ? 'gif' : 'image';
+    const from = Number.isFinite(Number(o.from)) && Number(o.from) > 0 ? Number(o.from) : null;
+    const to = Number.isFinite(Number(o.to)) && Number(o.to) > 0 ? Number(o.to) : null;
+    out.push({ kind, file: o.file, cx: clamp01(o.cx, 0.5), cy: clamp01(o.cy, 0.5), w: Math.max(0.02, clamp01(o.w, 0.3)), from, to: to !== null && from !== null && to <= from ? null : to });
+    if (out.length >= OVERLAY_MAX) break;
+  }
+  return out;
+}
+
+/** Vstupní volby ffmpeg pro soubor překryvu: obrázek se opakuje donekonečna, GIF ve smyčce. */
+export function overlayInputArgs(item: OverlayItem): string[] {
+  return item.kind === 'gif' ? ['-stream_loop', '-1', '-i', item.file] : ['-loop', '1', '-i', item.file];
+}
+
+/** Šířka překryvu v pixelech výsledku (sudá kvůli yuv420p, aspoň 2). */
+export function overlayPixelWidth(item: OverlayItem, frameWidth: number): number {
+  return Math.max(2, Math.round((frameWidth * item.w) / 2) * 2);
+}
+
+/**
+ * Filtr pro jeden překryv: zmenšit na šířku `w` výsledku (výška podle poměru,
+ * sudá kvůli yuv420p) a položit středem na (cx, cy); `enable` ho ukáže jen
+ * v daném čase. `shortest=1`: překryvy jsou nekonečné (smyčka), výsledek
+ * končí s videem. `frameWidth` = šířka výsledného obrazu (po výřezu na výšku).
+ */
+export function overlayFilter(item: OverlayItem, inputIndex: number, inLabel: string, outLabel: string, tag: string, frameWidth: number): string {
+  const px = overlayPixelWidth(item, frameWidth);
+  const parts = [`[${inputIndex}:v]format=rgba,scale=w=${px}:h=-2[${tag}s]`];
+  const from = item.from ?? null;
+  const to = item.to ?? null;
+  const enable = from !== null ? (to !== null ? `:enable='between(t,${from.toFixed(3)},${to.toFixed(3)})'` : `:enable='gte(t,${from.toFixed(3)})'`) : to !== null ? `:enable='lte(t,${to.toFixed(3)})'` : '';
+  parts.push(`${inLabel}[${tag}s]overlay=x='W*${item.cx.toFixed(4)}-w/2':y='H*${item.cy.toFixed(4)}-h/2':shortest=1:format=auto${enable}${outLabel}`);
+  return parts.join(';');
+}
+
 export type TrimPlanOptions = {
   /** Sekundy od začátku původního klipu. */
   start: number;
@@ -363,10 +432,95 @@ export type TrimPlanOptions = {
   speed?: number;
   /** Snímková frekvence zdroje - po změně rychlosti se na ni výsledek srovná (neznámá = 60). */
   sourceFps?: number | null;
-  /** Text přes video: PNG s průhledností (nakreslený ve stránce) a kde má ležet. */
+  /** Text přes video (starší okno): PNG s průhledností (nakreslený ve stránce) a kde má ležet. */
   overlay?: { file: string; position: TextPosition } | null;
+  /** Překryvy kdekoli v obraze: text jako PNG, obrázky, GIFy (normalizeOverlays). */
+  overlays?: OverlayItem[] | null;
+  /** Šířka zdrojového obrazu (px) - pro velikost překryvů; bez ní se bere 1920. */
+  sourceWidth?: number | null;
+  sourceHeight?: number | null;
+  /** Kamera nahraná zvlášť (Clip.camera) - zapeče se do obrazu podle polohy a velikosti. */
+  camera?: CameraBake | null;
+  /** Jen první (smíchaná) zvuková stopa - kopie k nahrání na Kine z klipu se samostatnými stopami. */
+  firstAudioOnly?: boolean;
   webm: boolean;
 };
+
+/**
+ * Kamera zvlášť ke klipu (Clip.camera): soubor s obrazem kamery, kde v klipu
+ * začíná (offsetMs, jako u mikrofonu) a jak leží v obraze - levý horní roh
+ * (x, y) a šířka (w) jako podíly výsledného obrazu, tvar a zrcadlení.
+ */
+export type CameraBake = {
+  file: string;
+  offsetMs: number;
+  x: number;
+  y: number;
+  w: number;
+  shape: LiveCameraShape;
+  mirror: boolean;
+  /** Rozměr obrazu kamery (px), když je známý - jinak se počítá 16:9. */
+  width?: number | null;
+  height?: number | null;
+};
+
+/** Kde a jak velká je kamera ve výsledném obrazu (px) - stejná funkce jako pro živé vysílání a pro přehrávač. */
+export function cameraBakeRect(cam: CameraBake, frameW: number, frameH: number): CameraRect {
+  return cameraRect(frameW, frameH, cam.width ?? 1280, cam.height ?? 720, { position: 'bottom-right', size: 'medium', shape: cam.shape, width: cam.w, x: cam.x, y: cam.y });
+}
+
+/**
+ * Průhlednost pro kruh / zaoblené rohy: vzdálenost od "vnitřního obdélníku"
+ * (obdélník zmenšený o poloměr) - uvnitř 255, za poloměrem 0, na hraně
+ * měkký přechod 1 px. Kruh je zaoblení s poloměrem = polovina šířky.
+ */
+export function roundedAlphaExpr(width: number, height: number, radius: number): string {
+  const r = Math.max(0, Math.min(radius, Math.min(width, height) / 2));
+  const cx = ((width - 1) / 2).toFixed(2);
+  const cy = ((height - 1) / 2).toFixed(2);
+  const ix = (width / 2 - r).toFixed(2);
+  const iy = (height / 2 - r).toFixed(2);
+  // Čárky jsou uvnitř uvozovek (geq=lum='...'), takže je parser filtrů nebere jako oddělovač.
+  return `255*clip(${(r + 0.5).toFixed(2)}-hypot(max(abs(X-${cx})-${ix},0),max(abs(Y-${cy})-${iy},0)),0,1)`;
+}
+
+/**
+ * Filtry kamery: čas (kde v klipu začíná, posun o začátek výběru, rychlost),
+ * zrcadlo, výřez (kruh bere čtverec ze středu), velikost a tvar. Vrací řetězec
+ * do filter_complex, který z `[N:v]` udělá `[outLabel]` připravený pro overlay.
+ * Tvar se dělá maskou z jednoho snímku (color + geq) opakovanou do nekonečna
+ * (loop), ať se výraz počítá jen jednou a ne pro každý snímek kamery.
+ */
+export function cameraChain(cam: CameraBake, inputIndex: number, outLabel: string, frameW: number, frameH: number, startSeconds = 0, speed = 1): { filter: string; rect: CameraRect } {
+  const rect = cameraBakeRect(cam, frameW, frameH);
+  const k = normalizeSpeed(speed);
+  const shift = (Number.isFinite(cam.offsetMs) ? cam.offsetMs : 0) / 1000 - Math.max(0, startSeconds);
+  const time: string[] = [];
+  if (shift < 0) time.push(`trim=start=${(-shift).toFixed(3)}`, `setpts=(PTS-STARTPTS)/${k}`);
+  else time.push(`setpts=(PTS-STARTPTS+${shift.toFixed(3)}/TB)/${k}`);
+  const steps = [...time];
+  if (cam.mirror) steps.push('hflip');
+  if (rect.sx > 0 || rect.sy > 0) steps.push(`crop=${Math.round(rect.sw)}:${Math.round(rect.sh)}:${Math.round(rect.sx)}:${Math.round(rect.sy)}`);
+  const w = Math.max(2, Math.round(rect.w));
+  const hgt = Math.max(2, Math.round(rect.h));
+  steps.push(`scale=${w}:${hgt}`, 'format=rgba');
+  const tag = outLabel.replace(/[\[\]]/g, '');
+  if (rect.radius > 0) {
+    const alpha = roundedAlphaExpr(w, hgt, rect.radius);
+    const filter = [
+      `[${inputIndex}:v]${steps.join(',')}[${tag}raw]`,
+      `color=c=black:s=${w}x${hgt}:r=1:d=1,format=gray,geq=lum='${alpha}',loop=loop=-1:size=1:start=0[${tag}mask]`,
+      `[${tag}raw][${tag}mask]alphamerge${outLabel}`,
+    ].join(';');
+    return { filter, rect };
+  }
+  return { filter: `[${inputIndex}:v]${steps.join(',')}${outLabel}`, rect };
+}
+
+/** Položení kamery na obraz: před jejím začátkem a po konci jde obraz dál beze změny. */
+export function cameraOverlayFilter(inLabel: string, camLabel: string, outLabel: string, rect: CameraRect): string {
+  return `${inLabel}${camLabel}overlay=x=${Math.round(rect.x)}:y=${Math.round(rect.y)}:eof_action=pass:format=auto${outLabel}`;
+}
 
 export type TrimPlan = {
   args: string[];
@@ -386,17 +540,21 @@ export function trimArgs(input: string, output: string, o: TrimPlanOptions): Tri
   const speed = normalizeSpeed(o.speed ?? 1);
   const outputSeconds = length / speed;
   const args = ['-y', '-ss', start.toFixed(3), '-t', length.toFixed(3), '-i', input];
+  const overlays = o.overlays ?? [];
+  const camera = o.camera ?? null;
   if (o.overlay) args.push('-i', o.overlay.file);
+  for (const item of overlays) args.push(...overlayInputArgs(item));
+  if (camera) args.push('-i', camera.file);
   args.push('-progress', 'pipe:1', '-nostats', '-loglevel', 'error');
 
-  // Obraz: [výřez] -> [rychlost] -> [text]. Bez textu stačí jednoduchý filtr.
+  // Obraz: [výřez] -> [rychlost] -> [text] -> [překryvy]. Bez nich stačí jednoduchý filtr.
   const crop = verticalCropFilter(o.vertical);
   const speedFilters: string[] = [];
   if (speed !== 1) {
     // Po setpts neví kodér snímkovou frekvenci (a vzal by 25 fps, zpomalení by ztrácelo snímky) - srovná se na frekvenci zdroje.
     speedFilters.push(`setpts=(PTS-STARTPTS)/${speed}`, `fps=${Math.min(120, Math.max(1, Math.round(o.sourceFps ?? 60)))}`);
   }
-  if (o.overlay) {
+  if (o.overlay || overlays.length > 0 || camera) {
     const chains: string[] = [];
     let label = '[0:v:0]';
     if (crop) {
@@ -407,7 +565,28 @@ export function trimArgs(input: string, output: string, o: TrimPlanOptions): Tri
       chains.push(`${label}${speedFilters.join(',')}[vs]`);
       label = '[vs]';
     }
-    chains.push(`${label}[1:v]overlay=${textOverlayPosition(o.overlay.position)}[vout]`);
+    let inputIndex = 1;
+    if (o.overlay) {
+      const next = overlays.length > 0 || camera ? '[vt]' : '[vout]';
+      chains.push(`${label}[${inputIndex}:v]overlay=${textOverlayPosition(o.overlay.position)}${next}`);
+      label = next;
+      inputIndex += 1;
+    }
+    // Šířka výsledného obrazu (po výřezu na výšku) - podle ní se překryvy zmenší.
+    const srcW = o.sourceWidth && o.sourceWidth > 0 ? o.sourceWidth : 1920;
+    const srcH = o.sourceHeight && o.sourceHeight > 0 ? o.sourceHeight : 1080;
+    const frameWidth = o.vertical ? Math.max(2, Math.floor(Math.min(srcW, (srcH * 9) / 16) / 2) * 2) : srcW;
+    overlays.forEach((item, i) => {
+      const next = i === overlays.length - 1 && !camera ? '[vout]' : `[vo${i}]`;
+      chains.push(overlayFilter(item, inputIndex + i, label, next, `o${i}`, frameWidth));
+      label = next;
+    });
+    if (camera) {
+      // Kamera zvlášť až navrch (nad překryvy), podle polohy v hotovém obraze; čas se posune o začátek výběru a rychlost.
+      const cam = cameraChain(camera, inputIndex + overlays.length, '[cam]', frameWidth, srcH, start, speed);
+      chains.push(cam.filter, cameraOverlayFilter(label, '[cam]', '[vout]', cam.rect));
+      label = '[vout]';
+    }
     args.push('-filter_complex', chains.join(';'), '-map', '[vout]');
   } else {
     const vf = [crop, ...speedFilters].filter((f): f is string => !!f);
@@ -420,7 +599,7 @@ export function trimArgs(input: string, output: string, o: TrimPlanOptions): Tri
     args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart');
   }
   // Zvuk podle volby (všechny stopy / jen hra / jen mikrofon / nic); rychlost přes atempo (výška hlasu zůstane).
-  const audio = trimAudioPlan(o.audioTracks, o.mute ? 'none' : o.audio);
+  const audio = o.firstAudioOnly && !o.mute ? { maps: ['-map', '0:a:0?'], tracks: (o.audioTracks ?? []).slice(0, 1) } : trimAudioPlan(o.audioTracks, o.mute ? 'none' : o.audio);
   args.push(...audio.maps);
   if (audio.maps.length === 0) args.push('-an');
   else {
@@ -428,6 +607,8 @@ export function trimArgs(input: string, output: string, o: TrimPlanOptions): Tri
     if (tempo) args.push('-af', tempo);
     args.push('-c:a', o.webm ? 'libopus' : 'aac', '-b:a', o.webm ? '128k' : '192k');
   }
+  // Překryvy (a maska kamery) jsou nekonečné vstupy (smyčka) - výsledek se pro jistotu usekne na délku videa.
+  if (overlays.length > 0 || camera) args.push('-t', (outputSeconds + 0.05).toFixed(3));
   args.push(output);
   return { args, outputSeconds, tracks: audio.tracks };
 }

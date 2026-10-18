@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergePlan, gifArgs, parseProbe, progressPercent, verticalCropFilter, GIF_MAX_SECONDS, trimArgs, normalizeSpeed, atempoChain, shiftMarkers, textOverlayPosition, SPEEDS } from '../dist/esm/editPlan.js';
+import { mergePlan, gifArgs, parseProbe, progressPercent, verticalCropFilter, GIF_MAX_SECONDS, trimArgs, normalizeSpeed, atempoChain, shiftMarkers, textOverlayPosition, SPEEDS, normalizeOverlays, overlayFilter, overlayInputArgs, overlayPixelWidth, OVERLAY_MAX } from '../dist/esm/editPlan.js';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const HEADER = `Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'a.mp4':
   Duration: 00:00:07.33, start: 0.000000, bitrate: 36 kb/s
@@ -277,4 +281,202 @@ test('momenty po zkrácení: jen uvnitř výběru, posunuté a přepočtené ryc
   ]);
   assert.equal(shiftMarkers(markers, 13, 20), undefined);
   assert.equal(shiftMarkers(undefined, 0, 10), undefined);
+});
+
+// ---- překryvy: text / obrázek / GIF kdekoli v obraze (kolo 0116) ----------------------------
+
+test('překryvy: očištění z okna (zlomky 0-1, šířka aspoň 2 %, časy, nejvýš 8, jen se souborem)', () => {
+  const items = normalizeOverlays([
+    { kind: 'image', file: 'a.png', cx: 0.5, cy: 0.5, w: 0.3 },
+    { kind: 'gif', file: 'b.gif', cx: 1.7, cy: -2, w: 0, from: 1.5, to: 4 },
+    { kind: 'image', file: 'c.png', cx: 'x', cy: 0.2, w: 0.5, from: 5, to: 2 },
+    { kind: 'image', file: '', cx: 0.5, cy: 0.5, w: 0.3 },
+    { kind: 'image', cx: 0.5, cy: 0.5, w: 0.3 },
+    null,
+    'nesmysl',
+  ]);
+  assert.equal(items.length, 3);
+  assert.deepEqual(items[0], { kind: 'image', file: 'a.png', cx: 0.5, cy: 0.5, w: 0.3, from: null, to: null });
+  assert.deepEqual(items[1], { kind: 'gif', file: 'b.gif', cx: 1, cy: 0, w: 0.02, from: 1.5, to: 4 });
+  assert.equal(items[2].cx, 0.5, 'nesmyslný střed = doprostřed');
+  assert.equal(items[2].to, null, '"do" před "od" se zahodí');
+  assert.equal(normalizeOverlays(Array.from({ length: 12 }, (_, i) => ({ kind: 'image', file: `${i}.png`, cx: 0.5, cy: 0.5, w: 0.2 }))).length, OVERLAY_MAX);
+  assert.deepEqual(normalizeOverlays('x'), []);
+});
+
+test('překryvy: vstup ffmpeg (obrázek ve smyčce, GIF ve smyčce), šířka v px sudá', () => {
+  assert.deepEqual(overlayInputArgs({ kind: 'image', file: 'a.png', cx: 0.5, cy: 0.5, w: 0.3 }), ['-loop', '1', '-i', 'a.png']);
+  assert.deepEqual(overlayInputArgs({ kind: 'gif', file: 'b.gif', cx: 0.5, cy: 0.5, w: 0.3 }), ['-stream_loop', '-1', '-i', 'b.gif']);
+  assert.equal(overlayPixelWidth({ kind: 'image', file: 'a', cx: 0.5, cy: 0.5, w: 0.25 }, 1920), 480);
+  assert.equal(overlayPixelWidth({ kind: 'image', file: 'a', cx: 0.5, cy: 0.5, w: 0.3333 }, 1280), 426, 'sudé');
+  assert.equal(overlayPixelWidth({ kind: 'image', file: 'a', cx: 0.5, cy: 0.5, w: 0.0001 }, 1280), 2, 'aspoň 2');
+});
+
+test('překryvy: filtr = zmenšit a položit středem, časové okno přes enable, shortest', () => {
+  const f = overlayFilter({ kind: 'image', file: 'a.png', cx: 0.25, cy: 0.75, w: 0.5, from: 1, to: 3.5 }, 1, '[0:v:0]', '[vout]', 'o0', 1920);
+  assert.equal(f, "[1:v]format=rgba,scale=w=960:h=-2[o0s];[0:v:0][o0s]overlay=x='W*0.2500-w/2':y='H*0.7500-h/2':shortest=1:format=auto:enable='between(t,1.000,3.500)'[vout]");
+  assert.match(overlayFilter({ kind: 'image', file: 'a.png', cx: 0.5, cy: 0.5, w: 0.5, from: 2 }, 1, '[a]', '[b]', 'o1', 1000), /enable='gte\(t,2\.000\)'/);
+  assert.match(overlayFilter({ kind: 'image', file: 'a.png', cx: 0.5, cy: 0.5, w: 0.5, to: 2 }, 1, '[a]', '[b]', 'o1', 1000), /enable='lte\(t,2\.000\)'/);
+  assert.doesNotMatch(overlayFilter({ kind: 'image', file: 'a.png', cx: 0.5, cy: 0.5, w: 0.5 }, 1, '[a]', '[b]', 'o1', 1000), /enable/);
+});
+
+test('zkrácení s překryvy: každý další vstup, řetěz výřez -> rychlost -> text -> překryvy -> [vout], výstup useknutý na délku', () => {
+  const overlays = normalizeOverlays([
+    { kind: 'image', file: 'logo.png', cx: 0.9, cy: 0.1, w: 0.2 },
+    { kind: 'gif', file: 'wow.gif', cx: 0.5, cy: 0.5, w: 0.4, from: 1, to: 2 },
+  ]);
+  const plan = trimArgs('in.mp4', 'out.mp4', { start: 2, end: 6, mute: false, videoMbps: 20, speed: 2, sourceFps: 60, vertical: 'center', overlay: { file: 'text.png', position: 'top' }, overlays, sourceWidth: 1920, sourceHeight: 1080, webm: false });
+  const a = plan.args;
+  // Vstupy: video, text PNG, logo (loop), gif (stream_loop).
+  assert.deepEqual(a.slice(a.indexOf('-i'), a.indexOf('-progress')), ['-i', 'in.mp4', '-i', 'text.png', '-loop', '1', '-i', 'logo.png', '-stream_loop', '-1', '-i', 'wow.gif']);
+  const fc = a[a.indexOf('-filter_complex') + 1];
+  const chains = fc.split(';');
+  assert.match(chains[0], /^\[0:v:0\]crop=.*\[vc\]$/);
+  assert.match(chains[1], /^\[vc\]setpts=.*fps=60\[vs\]$/);
+  assert.match(chains[2], /^\[vs\]\[1:v\]overlay=.*\[vt\]$/, 'text po rychlosti');
+  // Na výšku z 1920x1080 = 606 px široký výsledek (sudé); logo 20 % = 122 px, gif 40 % = 242 px.
+  assert.match(chains[3], /^\[2:v\]format=rgba,scale=w=122:h=-2\[o0s\]$/);
+  assert.match(chains[4], /^\[vt\]\[o0s\]overlay=.*\[vo0\]$/);
+  assert.match(chains[5], /^\[3:v\]format=rgba,scale=w=242:h=-2\[o1s\]$/);
+  assert.match(chains[6], /^\[vo0\]\[o1s\]overlay=.*enable='between\(t,1\.000,2\.000\)'\[vout\]$/);
+  assert.equal(a[a.indexOf('-map') + 1], '[vout]');
+  assert.equal(plan.outputSeconds, 2);
+  // Nekonečné vstupy (smyčky): výstup se usekne na délku výsledku.
+  assert.equal(a[a.lastIndexOf('-t') + 1], '2.050');
+  assert.equal(a[a.length - 1], 'out.mp4');
+  // Bez překryvů žádné useknutí navíc a jednoduchý filtr.
+  const plain = trimArgs('in.mp4', 'out.mp4', { start: 0, end: 4, mute: true, videoMbps: 20, webm: false });
+  assert.equal(plain.args.filter((x) => x === '-t').length, 1);
+  assert.ok(!plain.args.includes('-filter_complex'));
+});
+
+// Opravdový ffmpeg: překryvy musí projít filtergrafem (ne jen vypadat správně). Krátké video + PNG + GIF.
+const FFMPEG = join(process.cwd(), 'node_modules', 'ffmpeg-static', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+test('překryvy doopravdy: ffmpeg položí text, obrázek i GIF na video (výsledek má správnou délku)', { skip: !existsSync(FFMPEG) && 'ffmpeg-static chybí' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kine-ov-'));
+  const video = join(dir, 'in.mp4');
+  const png = join(dir, 'logo.png');
+  const gif = join(dir, 'anim.gif');
+  const text = join(dir, 'text.png');
+  const out = join(dir, 'out.mp4');
+  const run = (args) => execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', ...args], { stdio: 'pipe', timeout: 120000 });
+  run(['-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30:duration=3', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', video]);
+  run(['-f', 'lavfi', '-i', 'color=c=red@0.8:size=120x60:rate=1:duration=1', '-frames:v', '1', '-pix_fmt', 'rgba', png]);
+  run(['-f', 'lavfi', '-i', 'color=c=0x4488ff:size=80x80:rate=1:duration=1', '-frames:v', '1', '-pix_fmt', 'rgba', text]);
+  run(['-f', 'lavfi', '-i', 'testsrc=size=100x50:rate=5:duration=1', '-loop', '0', gif]);
+  const overlays = normalizeOverlays([
+    { kind: 'image', file: png, cx: 0.85, cy: 0.12, w: 0.2 },
+    { kind: 'gif', file: gif, cx: 0.5, cy: 0.5, w: 0.3, from: 0.5, to: 1.5 },
+    { kind: 'image', file: text, cx: 0.5, cy: 0.9, w: 0.1 },
+  ]);
+  const plan = trimArgs(video, out, { start: 0.5, end: 2.5, mute: false, videoMbps: 20, speed: 1, overlays, sourceWidth: 640, sourceHeight: 360, webm: false });
+  const args = plan.args.filter((x, i, arr) => !(x === '-progress' || arr[i - 1] === '-progress' || x === '-nostats'));
+  run(args.filter((x) => x !== '-y'));
+  assert.ok(existsSync(out) && statSync(out).size > 1000, 'výsledek existuje');
+  const header = (() => {
+    try {
+      execFileSync(FFMPEG, ['-hide_banner', '-i', out], { stdio: 'pipe' });
+    } catch (e) {
+      return String(e.stderr ?? '');
+    }
+    return '';
+  })();
+  const info = parseProbe(header);
+  assert.ok(info.durationSeconds !== null && Math.abs(info.durationSeconds - 2) < 0.3, `délka 2 s (je ${info.durationSeconds})`);
+  assert.equal(info.width, 640);
+  assert.equal(info.hasAudio, true, 'zvuk zůstal');
+});
+
+// ---- kamera zvlášť (Clip.camera) zapečená do obrazu -----------------------------------------
+import { cameraChain, cameraOverlayFilter, cameraBakeRect, roundedAlphaExpr } from '../dist/esm/editPlan.js';
+
+test('kamera zvlášť: čas (offset, začátek výběru, rychlost), zrcadlo, výřez pro kruh, maska jen u kruhu / zaoblení', () => {
+  const cam = { file: 'cam.webm', offsetMs: 1000, x: 0.7, y: 0.6, w: 0.25, shape: 'circle', mirror: true, width: 1280, height: 720 };
+  const c = cameraChain(cam, 2, '[cam]', 1920, 1080, 0, 1);
+  assert.match(c.filter, /^\[2:v\]setpts=\(PTS-STARTPTS\+1\.000\/TB\)\/1,hflip,crop=720:720:280:0,scale=\d+:\d+,format=rgba\[camraw\];/);
+  assert.match(c.filter, /color=c=black:s=\d+x\d+:r=1:d=1,format=gray,geq=lum='255\*clip\(.*\)',loop=loop=-1:size=1:start=0\[cammask\];\[camraw\]\[cammask\]alphamerge\[cam\]$/);
+  assert.equal(c.rect.w, c.rect.h, 'kruh je čtverec');
+  assert.equal(c.rect.w, Math.round(1920 * 0.25));
+  // Záporný posun (kamera začala před obrazem) + výběr od 2 s + dvojnásobná rychlost: trim a dělení rychlostí.
+  const later = cameraChain({ ...cam, offsetMs: -500, shape: 'rect', mirror: false }, 1, '[cam]', 1280, 720, 2, 2);
+  assert.match(later.filter, /^\[1:v\]trim=start=2\.500,setpts=\(PTS-STARTPTS\)\/2,scale=\d+:\d+,format=rgba\[cam\]$/);
+  assert.ok(!later.filter.includes('hflip') && !later.filter.includes('crop=') && !later.filter.includes('geq'), 'obdélník bez zrcadla: žádný výřez ani maska');
+  // Položení: před začátkem a po konci kamery jde obraz dál (eof_action=pass).
+  const ov = cameraOverlayFilter('[v]', '[cam]', '[vout]', later.rect);
+  assert.equal(ov, `[v][cam]overlay=x=${later.rect.x}:y=${later.rect.y}:eof_action=pass:format=auto[vout]`);
+  // Zaoblení: maska je, poloměr menší než polovina.
+  const rounded = cameraChain({ ...cam, shape: 'rounded', mirror: false }, 1, '[cam]', 1920, 1080, 0, 1);
+  assert.ok(rounded.filter.includes('alphamerge') && rounded.rect.radius > 0 && rounded.rect.radius < rounded.rect.w / 2);
+  // Výraz průhlednosti: uvnitř 255, mimo roh 0 (hodnoty se nepočítají tady, jen tvar výrazu bez čárek navíc mimo závorky).
+  const expr = roundedAlphaExpr(100, 60, 10);
+  assert.ok(expr.startsWith('255*clip(10.50-hypot(') && expr.endsWith(',0,1)'));
+  // Poloha podle shared/liveLayout: stejná jako v přehrávači.
+  const r = cameraBakeRect({ ...cam, x: 0.02, y: 0.02, shape: 'rect', mirror: false }, 1280, 720);
+  assert.equal(r.x, Math.round(1280 * 0.02));
+  assert.equal(r.y, Math.round(720 * 0.02));
+});
+
+test('kamera zvlášť v trimArgs: vstup navíc, kamera navrch nad překryvy, výstup useknutý na délku', () => {
+  const camera = { file: 'cam.webm', offsetMs: 0, x: 0.7, y: 0.6, w: 0.25, shape: 'rect', mirror: false, width: 1280, height: 720 };
+  const plan = trimArgs('in.mp4', 'out.mp4', { start: 1, end: 5, mute: false, videoMbps: 8, speed: 1, sourceWidth: 1920, sourceHeight: 1080, overlays: [{ kind: 'image', file: 'a.png', cx: 0.5, cy: 0.5, w: 0.2 }], camera, webm: false });
+  const a = plan.args;
+  assert.equal(a[a.indexOf('-i') + 1], 'in.mp4');
+  assert.ok(a.includes('cam.webm'), 'kamera je vstup');
+  const fc = a[a.indexOf('-filter_complex') + 1];
+  assert.ok(fc.lastIndexOf('overlay=x=') > fc.indexOf("overlay=x='W*") && fc.indexOf("overlay=x='W*") >= 0, 'kamera se pokládá až po překryvech (navrch)');
+  assert.ok(fc.includes('[2:v]trim=start=1.000') || fc.includes('[2:v]setpts='), 'kamera je vstup č. 2 (po obrázku) posunutá o začátek výběru');
+  assert.ok(fc.endsWith('[vout]'));
+  assert.equal(a[a.lastIndexOf('-t') + 1], (4 + 0.05).toFixed(3), 'výstup useknutý na délku (maska kamery je nekonečná)');
+  // Bez kamery a překryvů se nic nemění (žádný filter_complex).
+  const plain = trimArgs('in.mp4', 'out.mp4', { start: 1, end: 5, mute: false, videoMbps: 8, webm: false });
+  assert.ok(!plain.args.includes('-filter_complex'));
+});
+
+test('kamera zvlášť doopravdy: ffmpeg zapeče kameru (kruh, zrcadlo, posun) a výsledek má délku výběru', { skip: !existsSync(FFMPEG) && 'ffmpeg-static chybí' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kine-cam-'));
+  const run = (args) => execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', ...args], { stdio: 'pipe', timeout: 120000 });
+  const main = join(dir, 'main.mp4');
+  run(['-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30:duration=3', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', main]);
+  const cam = join(dir, 'cam.webm');
+  run(['-f', 'lavfi', '-i', 'smptebars=size=320x240:rate=30:duration=3', '-c:v', 'libvpx', '-b:v', '500k', '-deadline', 'realtime', '-cpu-used', '8', cam]);
+  const out = join(dir, 'out.mp4');
+  const camera = { file: cam, offsetMs: 500, x: 0.6, y: 0.5, w: 0.3, shape: 'circle', mirror: true, width: 320, height: 240 };
+  const plan = trimArgs(main, out, { start: 0.5, end: 2.5, mute: false, videoMbps: 8, audio: 'mix', audioTracks: ['mix'], speed: 1, sourceWidth: 640, sourceHeight: 360, camera, webm: false });
+  execFileSync(FFMPEG, ['-hide_banner', ...plan.args.filter((x, i, arr) => !(x === '-progress' || arr[i - 1] === '-progress' || x === '-nostats'))], { stdio: 'pipe', timeout: 120000 });
+  assert.ok(statSync(out).size > 1000);
+  let info = '';
+  try {
+    execFileSync(FFMPEG, ['-hide_banner', '-i', out], { stdio: 'pipe' });
+  } catch (e) {
+    info = e.stderr.toString();
+  }
+  const m = /Duration: (\d+):(\d+):([\d.]+)/.exec(info);
+  const seconds = m ? +m[1] * 3600 + +m[2] * 60 + +m[3] : 0;
+  assert.ok(Math.abs(seconds - 2) < 0.2, `délka ${seconds} s`);
+  assert.ok(/, 640x360/.test(info), 'rozměr obrazu zůstal');
+  assert.ok(/Audio:/.test(info), 'zvuk zůstal');
+  // Snímek v čase 1,5 s: uprostřed kruhu (x 0,6+0,15 šířky; y 0,5 + …) jsou pruhy SMPTE (ne testsrc) - jas ve středu kruhu se liší od obrazu bez kamery.
+  const frameWith = execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-ss', '1.5', '-i', out, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'], { stdio: 'pipe' });
+  const frameWithout = execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-ss', '2.0', '-i', main, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'], { stdio: 'pipe' });
+  const r = cameraBakeRect(camera, 640, 360);
+  const px = (buf, x, y) => [buf[(y * 640 + x) * 3], buf[(y * 640 + x) * 3 + 1], buf[(y * 640 + x) * 3 + 2]];
+  const center = [Math.round(r.x + r.w / 2), Math.round(r.y + r.h / 2)];
+  const d = px(frameWith, ...center).map((v, i) => Math.abs(v - px(frameWithout, ...center)[i])).reduce((a, b) => a + b, 0);
+  assert.ok(d > 30, `střed kruhu se liší od obrazu bez kamery (rozdíl ${d})`);
+  // Roh rámečku kamery (mimo kruh) je pořád původní obraz.
+  const corner = [Math.round(r.x + 2), Math.round(r.y + 2)];
+  const dc = px(frameWith, ...corner).map((v, i) => Math.abs(v - px(frameWithout, ...corner)[i])).reduce((a, b) => a + b, 0);
+  assert.ok(dc < 60, `roh mimo kruh je původní obraz (rozdíl ${dc})`);
+});
+
+test('kopie k nahrání: jen první zvuková stopa (firstAudioOnly), bez zvuku má přednost', () => {
+  const camera = { file: 'cam.webm', offsetMs: 0, x: 0.7, y: 0.6, w: 0.25, shape: 'rect', mirror: false, width: 1280, height: 720 };
+  const plan = trimArgs('in.mp4', 'out.mp4', { start: 0, end: 10, mute: false, videoMbps: 8, audio: 'mix', audioTracks: ['mix', 'game', 'mic'], camera, firstAudioOnly: true, webm: false });
+  const a = plan.args;
+  assert.equal(a[a.indexOf('-map', a.indexOf('-map') + 1) + 1], '0:a:0?', 'jen první stopa');
+  assert.deepEqual(plan.tracks, ['mix']);
+  const all = trimArgs('in.mp4', 'out.mp4', { start: 0, end: 10, mute: false, videoMbps: 8, audio: 'mix', audioTracks: ['mix', 'game', 'mic'], webm: false });
+  assert.ok(all.args.includes('0:a?'), 'v úpravách "všechny stopy" zůstává');
+  const muted = trimArgs('in.mp4', 'out.mp4', { start: 0, end: 10, mute: true, videoMbps: 8, audioTracks: ['mix', 'game'], firstAudioOnly: true, webm: false });
+  assert.ok(muted.args.includes('-an'));
 });

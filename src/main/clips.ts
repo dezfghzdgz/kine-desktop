@@ -170,6 +170,16 @@ export class ClipLibrary {
       target = clip.file;
     }
     clip.file = target;
+    // Kamera zvlášť jde do koše s klipem.
+    if (clip.camera) {
+      try {
+        const camTarget = uniqueIn(this.trashDir, basename(clip.camera.file));
+        moveFile(clip.camera.file, camTarget);
+        clip.camera = { ...clip.camera, file: camTarget };
+      } catch (e) {
+        this.log(`koš: ${clip.camera.file} nejde přesunout: ${(e as Error).message}`);
+      }
+    }
     clip.deletedAt = new Date().toISOString();
     this.save();
   }
@@ -186,6 +196,15 @@ export class ClipLibrary {
       // Zůstane v .trash, ale bude zase vidět - lepší než přijít o klip.
       this.log(`koš: ${clip.file} nejde vrátit: ${(e as Error).message}`);
     }
+    if (clip.camera) {
+      try {
+        const camTarget = uniqueIn(this.dir, basename(clip.camera.file));
+        if (camTarget !== clip.camera.file) moveFile(clip.camera.file, camTarget);
+        clip.camera = { ...clip.camera, file: camTarget };
+      } catch (e) {
+        this.log(`koš: ${clip.camera.file} nejde vrátit: ${(e as Error).message}`);
+      }
+    }
     delete clip.deletedAt;
     this.save();
     return clip;
@@ -195,7 +214,7 @@ export class ClipLibrary {
   purge(id: string): void {
     const clip = this.get(id);
     if (!clip) return;
-    for (const f of [clip.file, clip.thumb]) {
+    for (const f of [clip.file, clip.thumb, clip.camera?.file ?? null]) {
       if (f) {
         try {
           unlinkSync(f);

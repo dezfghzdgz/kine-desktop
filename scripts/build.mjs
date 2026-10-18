@@ -9,7 +9,15 @@ uklid();
 rmSync('dist', { recursive: true, force: true });
 mkdirSync('dist', { recursive: true });
 
-const common = { bundle: true, sourcemap: 'inline', logLevel: 'warning', target: 'es2022' };
+// KINE_RELEASE=1 (Vydání na GitHubu): to, co se zabalí do appky, se zmenší a
+// zamotá (minify, bez zdrojových map). Kód z nainstalované appky jde pořád
+// vytáhnout - ochrana to není; o placených věcech rozhoduje server Kine, ne
+// appka. Jen se v tom hůř hrabe a instalátor je menší. Při vývoji a testech
+// zůstává čitelný kód se zdrojovými mapami.
+const release = process.env.KINE_RELEASE === '1';
+// keepNames: názvy tříd a funkcí zůstanou (hlášky v deníku, instanceof podle jména) - zamotá se zbytek.
+const common = { bundle: true, sourcemap: release ? false : 'inline', minify: release, keepNames: release, logLevel: 'warning', target: 'es2022' };
+if (release) console.log('sestavení pro vydání: minify, bez zdrojových map');
 
 // Zdrojáky pomocníků v C# (src/helper/*.cs) jdou do hlavního procesu jako text - zapíše je a přeloží PowerShell.
 const loader = { '.cs': 'text' };
@@ -51,9 +59,10 @@ for (const f of ['settings.html', 'review.html', 'toast.html', 'capture.html', '
 }
 cpSync('src/renderer/fonts', 'dist/renderer/fonts', { recursive: true });
 
-// Čisté moduly (bez electronu) zvlášť jako ESM pro testy.
+// Čisté moduly (bez electronu) zvlášť jako ESM pro testy (do appky se nebalí - vždy čitelné).
 await build({
   ...common,
+  minify: false,
   sourcemap: false,
   entryPoints: {
     segments: 'src/main/segments.ts',

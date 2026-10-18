@@ -1,5 +1,6 @@
 import type { Clip } from '../shared/types';
 import type { Key } from '../shared/i18n';
+import { CAMERA_WIDTH_MAX, CAMERA_WIDTH_MIN, cameraRect } from '../shared/liveLayout';
 import { chapterTime, MARKER_LEAD_SECONDS } from '../shared/upload';
 import { clear, errorText, fileUrl, formatBytes, h } from './ui';
 import { followImage, playerAmbient, type PlayerAmbient } from './ambient';
@@ -37,8 +38,43 @@ export type TrimRequest = {
   speed?: number;
   /** Text přes video: PNG v rozměru výsledku (jen oblast textu) a kde leží. */
   text?: { png: Uint8Array; position: TextPosition } | null;
+  /** Překryvy kdekoli v obraze (text jako PNG, obrázek / GIF jako soubor z dialogu). */
+  overlays?: OverlayRequest[] | null;
 };
+export type OverlayRequest = { kind: 'text' | 'image' | 'gif'; png?: Uint8Array; file?: string; cx: number; cy: number; w: number; from?: number | null; to?: number | null };
 type TextPosition = 'top' | 'center' | 'bottom';
+
+/**
+ * Překryv v úpravách: text (nakreslený do canvasu), obrázek nebo GIF (soubor
+ * vybraný dialogem). Poloha a šířka jsou zlomky výsledného obrazu (0-1) -
+ * stejné v náhledu i ve výsledku; výška podle poměru stran. `from` / `to`
+ * = od kdy do kdy je vidět (s výsledku), null = celou dobu.
+ */
+type OverlayItemUi = {
+  id: string;
+  kind: 'text' | 'image' | 'gif';
+  text: string;
+  textStyle: TextStyle;
+  textSize: TextSize;
+  file: string | null;
+  url: string | null;
+  name: string;
+  cx: number;
+  cy: number;
+  w: number;
+  from: number | null;
+  to: number | null;
+  /** Poměr stran souboru (šířka / výška) - u textu z nakresleného canvasu. */
+  ratio: number;
+  /** Nakreslený text (pro náhled i uložení). */
+  canvas: HTMLCanvasElement | null;
+  /** Hráč velikost nastavil sám (posuvník, roh) - změna textu ji pak nepřepíše. */
+  userSized: boolean;
+  /** Hráč překryv posunul - nový text se jinak drží dole uprostřed (jako titulek). */
+  userPlaced: boolean;
+};
+/** Nejvíc překryvů na klip (stejně jako v hlavním procesu - editPlan.OVERLAY_MAX). */
+export const OVERLAY_MAX = 8;
 type TextStyle = 'outline' | 'box' | 'yellow';
 type TextSize = 's' | 'm' | 'l';
 /** Rychlosti v úpravách - stejné jako v hlavním procesu (editPlan.SPEEDS). */
@@ -93,6 +129,11 @@ export type PlayerOptions = {
   stageFullscreen?: () => void;
   /** Přepnuto na jiný klip (šipky) - okno ví, který soubor přehrávač drží. */
   onClipChange?: (clip: Clip) => void;
+  /**
+   * Kamera nahraná zvlášť (Clip.camera) posunutá / zvětšená tažením v přehrávači -
+   * uloží se ke klipu (hlavní proces vrátí klip s novou polohou). Bez tohohle se kamera jen ukazuje.
+   */
+  onCameraLayout?: (clip: Clip, layout: { x: number; y: number; w: number }) => Promise<Clip | null>;
   /** Bez tohohle se klip jen přehrává (žádné tlačítko Upravit). */
   edit?: {
     run: (clip: Clip, request: TrimRequest) => Promise<Clip>;
@@ -105,6 +146,8 @@ export type PlayerOptions = {
     discord?: (file: string, title: string) => Promise<void>;
     /** Náhled klipu ze snímku v daném čase; bez tohohle tlačítko není. */
     thumbnail?: (clip: Clip, atSeconds: number) => Promise<unknown>;
+    /** Obrázek / GIF do klipu (dialog v hlavním procesu); bez tohohle jsou v překryvech jen texty. */
+    pickImage?: () => Promise<{ file: string; kind: 'image' | 'gif'; name: string; url: string } | null>;
   };
 };
 
@@ -265,13 +308,9 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   let speed = 1;
   /** Rychlost přehrávání při prohlížení (tlačítko vpravo dole u celé obrazovky); platí i pro další klipy. */
   let viewRate = 1;
-  /** Text přes video (prázdný = žádný) a jak vypadá. */
-  let overlayText = '';
-  let textPosition: TextPosition = 'bottom';
-  let textStyle: TextStyle = 'outline';
-  let textSize: TextSize = 'm';
-  /** Nakreslený text v pixelech výsledku - stejný obrázek pro náhled i uložení. */
-  let textImage: HTMLCanvasElement | null = null;
+  /** Překryvy (text, obrázky, GIFy) kdekoli v obraze a který je zrovna vybraný. */
+  let overlays: OverlayItemUi[] = [];
+  let selectedOverlay: string | null = null;
   let editing = false;
   let saving: { mode: 'new' | 'replace' | 'gif'; percent: number } | null = null;
   let confirmReplace = false;
@@ -298,8 +337,15 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   // Stínování mimo výřez 9:16 (jen v úpravách s formátem na výšku).
   const shadeLeft = h('div', { class: 'crop-shade hidden' });
   const shadeRight = h('div', { class: 'crop-shade hidden' });
-  // Náhled textu (v úpravách) - přesně ten obrázek, který se pak položí do videa.
-  const textLayer = h('div', { class: 'text-preview hidden' });
+  // Překryvy v úpravách (text, obrázky, GIFy): každý jako rámeček přes video - přesně to,
+  // co se pak položí do videa; tažením se posouvá, rohem zvětšuje.
+  const overlayLayer = h('div', { class: 'overlay-layer hidden' });
+  // Kamera nahraná zvlášť (Clip.camera): druhé video přes obraz, hraje v rytmu s klipem; tažením se
+  // posouvá, rohem zvětšuje - kdykoli, i po uložení klipu (poloha se uloží ke klipu).
+  const camVideo = h('video', { class: 'player-cam-video', preload: 'auto', muted: true, playsinline: true, disablepictureinpicture: true, disableremoteplayback: true }) as HTMLVideoElement;
+  camVideo.muted = true;
+  const camHandle = h('span', { class: 'player-cam-handle', title: t('trimOverlayResize') });
+  const camWrap = h('div', { class: 'player-cam hidden', title: t('playerCameraDragHint') }, camVideo, camHandle) as HTMLElement;
   // Přes celou obrazovku: šipky po stranách (předchozí / další klip), nahoře název, pozice a zavření.
   const stagePrev = h('button', { class: 'stage-nav prev', title: `${t('playerPrev')} (←)`, 'aria-label': t('playerPrev'), onclick: () => go(-1) }, icon('chevronLeft', 34));
   const stageNext = h('button', { class: 'stage-nav next', title: `${t('playerNext')} (→)`, 'aria-label': t('playerNext'), onclick: () => go(1) }, icon('chevronRight', 34));
@@ -371,7 +417,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     h('div', { class: 'pc-row' }, playBtn, h('div', { class: 'pc-vol' }, muteBtn, volumeRange), h('span', { class: 'pc-time' }, timeNow, ' / ', timeAll), h('span', { class: 'pc-spacer' }), tools, fullBtn)
   );
   const stageChrome = [stagePrev, stageNext, stageTop, fullscreenBtn, controls];
-  const stage = h('div', { class: 'player-stage' }, video, shadeLeft, shadeRight, textLayer, ...stageChrome);
+  const stage = h('div', { class: 'player-stage' }, video, camWrap, shadeLeft, shadeRight, overlayLayer, ...stageChrome);
   /** Momenty nahrávky (uložené klipy během hraní) - skok kousek před ně. */
   const markersRow = h('div', { class: 'player-markers hidden' });
   const titleEl = h('div', { class: 'title' });
@@ -982,49 +1028,23 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     (value) => h('button', { class: `small quiet seg ${value === 1 ? 'active' : ''}`, onclick: () => setSpeed(value) }, `${numberFormat.format(value)}×`) as HTMLButtonElement
   );
   const speedRow = h('div', { class: 'row trim-speed', style: 'gap:6px', title: t('trimSpeedHint') }, h('span', { class: 'faint', style: 'margin-right:4px' }, t('trimSpeed')), ...speedBtns);
-  // Text přes video: pole, poloha, styl, velikost.
-  const textInput = h('input', {
-    type: 'text',
-    class: 'trim-text',
-    maxlength: String(TEXT_MAX),
-    placeholder: t('trimTextPlaceholder'),
-    oninput: (e: Event) => {
-      overlayText = (e.target as HTMLInputElement).value;
-      void refreshText();
-    },
-  }) as HTMLInputElement;
-  const positionBtns: Record<TextPosition, HTMLButtonElement> = {
-    top: h('button', { class: 'small quiet seg', onclick: () => setTextPosition('top') }, t('trimTextTop')),
-    center: h('button', { class: 'small quiet seg', onclick: () => setTextPosition('center') }, t('trimTextCenter')),
-    bottom: h('button', { class: 'small quiet seg active', onclick: () => setTextPosition('bottom') }, t('trimTextBottom')),
-  };
-  const selectStyle = 'width:auto;min-height:32px;padding:4px 10px';
-  const styleSelect = h(
-    'select',
-    { class: 'trim-text-style', style: selectStyle, onchange: (e: Event) => { textStyle = (e.target as HTMLSelectElement).value as TextStyle; void refreshText(); } },
-    h('option', { value: 'outline' }, t('trimTextStyleOutline')),
-    h('option', { value: 'box' }, t('trimTextStyleBox')),
-    h('option', { value: 'yellow' }, t('trimTextStyleYellow'))
-  ) as HTMLSelectElement;
-  const sizeSelect = h(
-    'select',
-    { class: 'trim-text-size', style: selectStyle, onchange: (e: Event) => { textSize = (e.target as HTMLSelectElement).value as TextSize; void refreshText(); } },
-    h('option', { value: 's' }, t('trimTextSizeS')),
-    h('option', { value: 'm' }, t('trimTextSizeM')),
-    h('option', { value: 'l' }, t('trimTextSizeL'))
-  ) as HTMLSelectElement;
-  sizeSelect.value = 'm';
-  const textRow = h(
+  // Překryvy: text, obrázek, GIF kdekoli v obraze. Seznam (čipy) + nastavení vybraného.
+  const addTextBtn = h('button', { class: 'small quiet trim-add-text', onclick: () => addOverlay('text') }, icon('pencil', 13), t('trimAddText')) as HTMLButtonElement;
+  const addImageBtn = h('button', { class: 'small quiet trim-add-image', onclick: () => void addImageOverlay('image') }, icon('image', 13), t('trimAddImage')) as HTMLButtonElement;
+  const addGifBtn = h('button', { class: 'small quiet trim-add-gif', onclick: () => void addImageOverlay('gif') }, icon('sparkle', 13), 'GIF') as HTMLButtonElement;
+  const overlayChips = h('div', { class: 'row trim-ov-chips', style: 'gap:6px' });
+  const overlayEditor = h('div', { class: 'trim-ov-editor hidden' });
+  const overlayHint = h('p', { class: 'hint trim-ov-hint' }, t('trimOverlayHint'));
+  const overlaysRow = h(
     'div',
-    { class: 'row trim-text-row', style: 'gap:6px' },
-    h('span', { class: 'faint', style: 'margin-right:4px' }, t('trimText')),
-    textInput,
-    positionBtns.top,
-    positionBtns.center,
-    positionBtns.bottom,
-    styleSelect,
-    sizeSelect
+    { class: 'trim-section trim-overlays' },
+    h('div', { class: 'row', style: 'gap:6px' }, h('span', { class: 'faint', style: 'margin-right:4px' }, t('trimOverlays')), addTextBtn, edit?.pickImage ? addImageBtn : null, edit?.pickImage ? addGifBtn : null, h('span', { class: 'faint trim-ov-count' })),
+    overlayChips,
+    overlayEditor,
+    overlayHint
   );
+  // Kamera zvlášť: v úpravách jen vysvětlení - posouvá se přímo v obraze a při uložení se zapeče.
+  const cameraRow = h('div', { class: 'trim-section trim-camera hidden' }, h('div', { class: 'row', style: 'gap:6px' }, icon('camera', 14), h('span', { class: 'faint' }, t('playerCameraTitle'))), h('p', { class: 'hint', style: 'margin:0' }, t('playerCameraEditHint')));
   trim.append(
     timeline,
     h(
@@ -1042,11 +1062,17 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       edit?.thumbnail ? h('button', { class: 'small quiet thumb-frame', title: t('thumbFrameHint'), onclick: () => void useFrameAsThumb() }, icon('image', 14), t('thumbFrame')) : null
     ),
     h('p', { class: 'hint' }, t('trimHint')),
-    h('div', { class: 'row', style: 'gap:6px' }, h('span', { class: 'faint', style: 'margin-right:4px' }, t('exportFormat')), formatBtns.original, formatBtns.vertical, edit?.gif ? formatBtns.gif : null),
-    anchorRow,
-    gifHint,
-    speedRow,
-    textRow,
+    // Výstup (formát, výřez, rychlost) a překryvy ve dvou rámečcích - ať je na první pohled jasné, co k čemu patří.
+    h(
+      'div',
+      { class: 'trim-section trim-output' },
+      h('div', { class: 'row', style: 'gap:6px' }, h('span', { class: 'faint', style: 'margin-right:4px' }, t('exportFormat')), formatBtns.original, formatBtns.vertical, edit?.gif ? formatBtns.gif : null),
+      anchorRow,
+      gifHint,
+      speedRow
+    ),
+    overlaysRow,
+    cameraRow,
     uploadedNote,
     h('div', { class: 'row trim-actions' }, saveNewBtn, replaceBtn, progress, progressText)
   );
@@ -1079,10 +1105,11 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     editBtn.disabled = false;
     stage.classList.remove('broken');
     clear(stage);
-    stage.append(video, shadeLeft, shadeRight, textLayer, ...stageChrome);
+    stage.append(video, camWrap, shadeLeft, shadeRight, overlayLayer, ...stageChrome);
     if (guard) clearTimeout(guard);
     video.src = fileUrl(clip.file) + (bust ? `?v=${Date.now()}` : '');
     video.load();
+    loadCamera(bust);
     // Soubor se otevřel, ale nic se nerozjelo (žádná metadata do 8 s) - taky chyba.
     guard = setTimeout(() => {
       if (video.readyState === 0 && video.isConnected && !saving) fail('no-metadata');
@@ -1103,7 +1130,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     }
     layout();
     layoutTicks();
-    if (overlayText.trim()) void refreshText();
+    if (overlays.length > 0) void redrawTextOverlays();
     // Nový zdroj začíná vším zvukem a rychlostí 1 - vrátit, co je vybrané.
     applyPreviewAudio();
     applyRate();
@@ -1164,11 +1191,148 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     shadeRight.style.left = `${offX + cropX + cropW}px`;
     shadeRight.style.width = `${Math.max(0, dw - cropX - cropW)}px`;
   }
-  /** Náhled textu: kde obrázek leží ve výsledku (vodorovně uprostřed, svisle podle volby), přepočtené na video v okně. */
-  function layoutText() {
-    const on = editing && !gif && !!textImage && video.videoWidth > 0 && video.videoHeight > 0;
-    textLayer.classList.toggle('hidden', !on);
-    if (!on || !textImage) return;
+  // ---- kamera zvlášť --------------------------------------------------------------------
+  let camDuration = 0;
+  let camLastSync = 0;
+  let camDragging = false;
+  /** Druhé video s kamerou podle klipu (nebo nic). */
+  function loadCamera(bust: boolean) {
+    const cam = clip.camera;
+    camDuration = 0;
+    if (!cam) {
+      camWrap.classList.add('hidden');
+      if (camVideo.getAttribute('src')) {
+        camVideo.removeAttribute('src');
+        camVideo.load();
+      }
+      return;
+    }
+    camWrap.classList.remove('hidden');
+    camWrap.classList.toggle('mirror', cam.mirror);
+    camVideo.src = fileUrl(cam.file) + (bust ? `?v=${Date.now()}` : '');
+    camVideo.load();
+    layoutCamera();
+  }
+  camVideo.addEventListener('loadedmetadata', () => {
+    camDuration = Number.isFinite(camVideo.duration) ? camVideo.duration : 0;
+    layoutCamera();
+    syncCamera(true);
+  });
+  camVideo.addEventListener('error', () => {
+    // Soubor kamery chybí / nejde přehrát - klip hraje dál bez ní.
+    if (!camVideo.getAttribute('src')) return;
+    camWrap.classList.add('hidden');
+    options.onLog?.(`přehrávač: kamera zvlášť nejde přehrát - ${clip.camera?.file ?? ''}`);
+  });
+  /** Kamera na místě podle klipu (shared/liveLayout - stejné číslo jako při zapečení). */
+  function layoutCamera() {
+    const cam = clip.camera;
+    if (!cam || camWrap.classList.contains('hidden')) return;
+    const g = frameGeometry();
+    if (!g) return;
+    const cw = camVideo.videoWidth || cam.width || 1280;
+    const ch = camVideo.videoHeight || cam.height || 720;
+    const r = cameraRect(g.out.w, g.out.h, cw, ch, { position: 'bottom-right', size: 'medium', shape: cam.shape, width: cam.w, x: cam.x, y: cam.y });
+    camWrap.style.left = `${g.left + r.x * g.scale}px`;
+    camWrap.style.top = `${g.top + r.y * g.scale}px`;
+    camWrap.style.width = `${r.w * g.scale}px`;
+    camWrap.style.height = `${r.h * g.scale}px`;
+    camWrap.style.borderRadius = cam.shape === 'circle' ? '50%' : cam.shape === 'rounded' ? `${(r.radius / r.w) * 100}% / ${(r.radius / r.h) * 100}%` : '0';
+  }
+  /** Kamera hraje v rytmu s klipem: stejný čas (posunutý o offset), stejná rychlost, hraje / stojí spolu. */
+  function syncCamera(force = false) {
+    const cam = clip.camera;
+    if (!cam || camWrap.classList.contains('hidden') || camVideo.readyState === 0) return;
+    const target = video.currentTime - cam.offsetMs / 1000;
+    const inRange = target >= 0 && (camDuration <= 0 || target <= camDuration + 0.05);
+    // Před začátkem / po konci kamery je rámeček jen naznačený (ať jde pořád chytit a posunout).
+    camWrap.classList.toggle('off-time', !inRange);
+    if (!inRange) {
+      if (!camVideo.paused) camVideo.pause();
+      return;
+    }
+    const now = performance.now();
+    if (force || Math.abs(camVideo.currentTime - target) > 0.25) {
+      if (force || now - camLastSync > 500) {
+        camVideo.currentTime = Math.max(0, target);
+        camLastSync = now;
+      }
+    }
+    if (camVideo.playbackRate !== video.playbackRate) camVideo.playbackRate = video.playbackRate;
+    if (video.paused || video.ended) {
+      if (!camVideo.paused) camVideo.pause();
+    } else if (camVideo.paused) void camVideo.play().catch(() => undefined);
+  }
+  video.addEventListener('play', () => syncCamera(true));
+  video.addEventListener('pause', () => syncCamera(true));
+  video.addEventListener('seeked', () => syncCamera(true));
+  video.addEventListener('ratechange', () => syncCamera());
+  video.addEventListener('timeupdate', () => syncCamera());
+  video.addEventListener('loadedmetadata', layoutCamera);
+  /** Tažení kamery = jiná poloha (levý horní roh ve zlomcích obrazu), roh = jiná šířka. Uloží se ke klipu. */
+  {
+    let drag: { mode: 'move' | 'size'; x: number; y: number; cx: number; cy: number; w: number; moved: boolean } | null = null;
+    let layoutDraft: { x: number; y: number; w: number } | null = null;
+    const onMove = (e: PointerEvent) => {
+      const cam = clip.camera;
+      if (!drag || !cam) return;
+      const g = frameGeometry();
+      if (!g) return;
+      if (Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) > 3) drag.moved = true;
+      if (!drag.moved) return;
+      const dx = (e.clientX - drag.x) / g.scale / g.out.w;
+      const dy = (e.clientY - drag.y) / g.scale / g.out.h;
+      if (drag.mode === 'move') layoutDraft = { x: clamp(drag.cx + dx, 0, 1), y: clamp(drag.cy + dy, 0, 1), w: cam.w };
+      else layoutDraft = { x: cam.x, y: cam.y, w: clamp(drag.w + dx, CAMERA_WIDTH_MIN, CAMERA_WIDTH_MAX) };
+      clip = { ...clip, camera: { ...cam, ...layoutDraft } };
+      layoutCamera();
+    };
+    const onUp = () => {
+      const d = drag;
+      drag = null;
+      camDragging = false;
+      camWrap.classList.remove('dragging');
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      if (!d) return;
+      if (!d.moved) {
+        // Obyčejný klik do kamery = jako klik do videa.
+        togglePlay();
+        return;
+      }
+      const draft = layoutDraft;
+      layoutDraft = null;
+      if (!draft || !options.onCameraLayout) return;
+      void options.onCameraLayout(clip, draft)
+        .then((saved) => {
+          if (saved && saved.id === clip.id && !closed) {
+            clip = { ...saved };
+            layoutCamera();
+            showNote(t('playerCameraSaved'), 'ok');
+          }
+        })
+        .catch((e: unknown) => showNote(errorText(e, t), 'error'));
+    };
+    const begin = (e: PointerEvent, mode: 'move' | 'size') => {
+      const cam = clip.camera;
+      if (!cam || e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      drag = { mode, x: e.clientX, y: e.clientY, cx: cam.x, cy: cam.y, w: cam.w, moved: false };
+      camDragging = true;
+      camWrap.classList.add('dragging');
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    };
+    camWrap.addEventListener('pointerdown', (e) => begin(e, 'move'));
+    camHandle.addEventListener('pointerdown', (e) => begin(e, 'size'));
+    camWrap.addEventListener('dblclick', (e) => e.stopPropagation());
+  }
+
+  // ---- překryvy -----------------------------------------------------------------------
+  /** Kde ve scéně leží výsledný obraz (po výřezu na výšku): levý horní roh a měřítko px výsledku -> px okna. */
+  function frameGeometry(): { left: number; top: number; scale: number; out: { w: number; h: number } } | null {
+    if (video.videoWidth <= 0 || video.videoHeight <= 0) return null;
     const box = video.getBoundingClientRect();
     const stageBox = stage.getBoundingClientRect();
     const scale = Math.min(box.width / video.videoWidth, box.height / video.videoHeight);
@@ -1178,31 +1342,305 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     const offY = box.top - stageBox.top + (box.height - dh) / 2;
     const out = outputSize(video.videoWidth, video.videoHeight, !!vertical);
     const k = vertical === 'left' ? 0 : vertical === 'right' ? 1 : 0.5;
-    const regionX = offX + (dw - out.w * scale) * k;
-    const x = (out.w - textImage.width) / 2;
-    const y = textPosition === 'top' ? out.h * 0.07 : textPosition === 'center' ? (out.h - textImage.height) / 2 : out.h - textImage.height - out.h * 0.08;
-    textLayer.style.left = `${regionX + x * scale}px`;
-    textLayer.style.top = `${offY + y * scale}px`;
-    textLayer.style.width = `${textImage.width * scale}px`;
-    textLayer.style.height = `${textImage.height * scale}px`;
+    return { left: offX + (dw - out.w * scale) * k, top: offY, scale, out };
   }
-  /** Text znovu nakreslit (změna textu, stylu, velikosti nebo formátu - na výšku je užší). */
-  async function refreshText() {
+  function overlayById(id: string | null): OverlayItemUi | null {
+    return overlays.find((o) => o.id === id) ?? null;
+  }
+  /** Šířka a výška překryvu v px výsledku. */
+  function overlaySize(o: OverlayItemUi, out: { w: number; h: number }): { w: number; h: number } {
+    const w = Math.max(2, out.w * o.w);
+    return { w, h: w / (o.ratio > 0 ? o.ratio : 1) };
+  }
+  /** Rámečky překryvů ve scéně podle polohy ve výsledku (jen v úpravách, ne u GIFu). */
+  function layoutOverlays() {
+    const on = editing && !gif && overlays.length > 0;
+    overlayLayer.classList.toggle('hidden', !on);
+    if (!on) return;
+    const g = frameGeometry();
+    if (!g) return;
+    for (const el of overlayLayer.querySelectorAll<HTMLElement>('.ov-item')) {
+      const o = overlayById(el.dataset.id ?? null);
+      if (!o) continue;
+      const size = overlaySize(o, g.out);
+      el.style.left = `${g.left + (g.out.w * o.cx - size.w / 2) * g.scale}px`;
+      el.style.top = `${g.top + (g.out.h * o.cy - size.h / 2) * g.scale}px`;
+      el.style.width = `${size.w * g.scale}px`;
+      el.style.height = `${size.h * g.scale}px`;
+      el.classList.toggle('selected', o.id === selectedOverlay);
+      // Mimo svůj čas je překryv v náhledu průsvitný (ať je vidět, že tam je, ale teď se neukazuje).
+      const now = (video.currentTime - start) / (speed || 1);
+      const visible = (o.from === null || now >= o.from - 0.01) && (o.to === null || now <= o.to + 0.01);
+      el.classList.toggle('off-time', !visible);
+    }
+  }
+  /** Text překryvu znovu nakreslit (změna textu / stylu / velikosti, jiný formát - na výšku je užší). */
+  async function redrawTextOverlays(only?: OverlayItemUi) {
     await ensureFont();
     if (closed) return;
     const vw = video.videoWidth || clip.width || 0;
     const vh = video.videoHeight || clip.height || 0;
     const out = outputSize(vw, vh, !!vertical);
-    textImage = overlayText.trim() && vw > 0 && vh > 0 ? drawTextImage(overlayText, textStyle, textSize, out.w, out.h) : null;
-    clear(textLayer);
-    if (textImage) textLayer.append(textImage);
-    layoutText();
+    for (const o of overlays) {
+      if (o.kind !== 'text' || (only && o !== only)) continue;
+      o.canvas = o.text.trim() && vw > 0 && vh > 0 ? drawTextImage(o.text, o.textStyle, o.textSize, out.w, out.h) : null;
+      if (o.canvas) {
+        // Text má přirozenou velikost podle písma (jako dřív) - šířka ve zlomcích podle ní; výška z poměru.
+        o.ratio = o.canvas.width / o.canvas.height;
+        if (!o.userSized) o.w = Math.min(1, o.canvas.width / out.w);
+        // Dokud ho hráč neposune, drží se dole uprostřed jako titulek (8 % od spodního okraje).
+        if (!o.userPlaced) {
+          o.cx = 0.5;
+          o.cy = clamp(1 - 0.08 - (o.w * out.w) / o.ratio / out.h / 2, 0.02, 0.98);
+        }
+      }
+      const el = overlayLayer.querySelector<HTMLElement>(`.ov-item[data-id="${o.id}"] .ov-body`);
+      if (el) {
+        clear(el);
+        if (o.canvas) el.append(o.canvas);
+      }
+    }
+    layoutOverlays();
     refreshButtons();
   }
-  function setTextPosition(position: TextPosition) {
-    textPosition = position;
-    for (const [key, btn] of Object.entries(positionBtns)) btn.classList.toggle('active', key === position);
-    layoutText();
+  function renderOverlayLayer() {
+    clear(overlayLayer);
+    for (const o of overlays) {
+      const body = h('div', { class: 'ov-body' });
+      if (o.kind === 'text') {
+        if (o.canvas) body.append(o.canvas);
+      } else if (o.url) {
+        body.append(h('img', { src: o.url, alt: '', draggable: 'false' }));
+      }
+      const handle = h('span', { class: 'ov-handle', title: t('trimOverlayResize') });
+      const el = h('div', { class: 'ov-item', 'data-id': o.id }, body, handle) as HTMLElement;
+      attachOverlayDrag(el, handle, o);
+      overlayLayer.append(el);
+    }
+    layoutOverlays();
+  }
+  /** Tažení = posun (střed ve zlomcích výsledku), roh = změna šířky. Drží se uvnitř obrazu. */
+  function attachOverlayDrag(el: HTMLElement, handle: HTMLElement, o: OverlayItemUi) {
+    let drag: { mode: 'move' | 'size'; x: number; y: number; cx: number; cy: number; w: number } | null = null;
+    const onMove = (e: PointerEvent) => {
+      if (!drag) return;
+      const g = frameGeometry();
+      if (!g) return;
+      const dx = (e.clientX - drag.x) / g.scale / g.out.w;
+      const dy = (e.clientY - drag.y) / g.scale / g.out.h;
+      if (drag.mode === 'move') {
+        o.cx = clamp(drag.cx + dx, 0.02, 0.98);
+        o.cy = clamp(drag.cy + dy, 0.02, 0.98);
+        o.userPlaced = true;
+      } else {
+        o.w = clamp(drag.w + dx * 2, 0.04, 1);
+        o.userSized = true;
+        syncOverlayEditor();
+      }
+      layoutOverlays();
+    };
+    const onUp = () => {
+      drag = null;
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    const begin = (e: PointerEvent, mode: 'move' | 'size') => {
+      if (!editing) return;
+      e.preventDefault();
+      e.stopPropagation();
+      selectOverlay(o.id);
+      drag = { mode, x: e.clientX, y: e.clientY, cx: o.cx, cy: o.cy, w: o.w };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    };
+    el.addEventListener('pointerdown', (e) => begin(e, 'move'));
+    handle.addEventListener('pointerdown', (e) => begin(e, 'size'));
+  }
+  function overlayLabel(o: OverlayItemUi): string {
+    if (o.kind === 'text') return o.text.trim() ? o.text.trim().slice(0, 18) : t('trimAddText');
+    return o.name.length > 18 ? `${o.name.slice(0, 16)}…` : o.name;
+  }
+  function renderOverlayChips() {
+    clear(overlayChips);
+    const count = overlayChips.parentElement?.querySelector('.trim-ov-count');
+    if (count) count.textContent = overlays.length > 0 ? `${overlays.length}/${OVERLAY_MAX}` : '';
+    const full = overlays.length >= OVERLAY_MAX;
+    addTextBtn.disabled = full;
+    addImageBtn.disabled = full;
+    addGifBtn.disabled = full;
+    for (const o of overlays) {
+      overlayChips.append(
+        h(
+          'button',
+          { class: `small quiet seg ov-chip ${o.id === selectedOverlay ? 'active' : ''}`, onclick: () => selectOverlay(o.id === selectedOverlay ? null : o.id) },
+          icon(o.kind === 'text' ? 'pencil' : o.kind === 'gif' ? 'sparkle' : 'image', 12),
+          overlayLabel(o),
+          h('span', { class: 'ov-chip-x', title: t('trimOverlayRemove'), onclick: (e: Event) => { e.stopPropagation(); removeOverlay(o.id); } }, icon('close', 11))
+        )
+      );
+    }
+  }
+  function selectOverlay(id: string | null) {
+    selectedOverlay = id;
+    renderOverlayChips();
+    syncOverlayEditor(true);
+    layoutOverlays();
+  }
+  function removeOverlay(id: string) {
+    overlays = overlays.filter((o) => o.id !== id);
+    if (selectedOverlay === id) selectedOverlay = null;
+    renderOverlayLayer();
+    renderOverlayChips();
+    syncOverlayEditor(true);
+    refreshButtons();
+  }
+  function newOverlayId(): string {
+    return `ov${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
+  }
+  /** Nový text: dole uprostřed (jako dřív), hned se dá psát. */
+  function addOverlay(kind: 'text') {
+    if (overlays.length >= OVERLAY_MAX) return;
+    const o: OverlayItemUi = { id: newOverlayId(), kind, text: '', textStyle: 'outline', textSize: 'm', file: null, url: null, name: '', cx: 0.5, cy: 0.5, w: 0.3, from: null, to: null, ratio: 4, canvas: null, userSized: false, userPlaced: false };
+    overlays.push(o);
+    selectedOverlay = o.id;
+    renderOverlayLayer();
+    renderOverlayChips();
+    syncOverlayEditor(true);
+    refreshButtons();
+    const input = overlayEditor.querySelector<HTMLInputElement>('input.trim-text');
+    input?.focus();
+  }
+  /** Obrázek / GIF ze souboru (dialog hlavního procesu); poměr stran se zjistí načtením. */
+  async function addImageOverlay(kind: 'image' | 'gif') {
+    if (!edit?.pickImage || overlays.length >= OVERLAY_MAX) return;
+    let picked: { file: string; kind: 'image' | 'gif'; name: string; url: string } | null = null;
+    try {
+      picked = await edit.pickImage();
+    } catch (e) {
+      showNote(/too-large/.test(String((e as Error)?.message ?? e)) ? t('trimOverlayTooLarge') : t('trimFailed', { message: errorText(e, t) }), 'error');
+      return;
+    }
+    if (!picked || closed) return;
+    const ratio = await new Promise<number>((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve(img.naturalWidth > 0 && img.naturalHeight > 0 ? img.naturalWidth / img.naturalHeight : 1);
+      img.onerror = () => resolve(1);
+      img.src = picked!.url;
+    });
+    if (closed) return;
+    // Druh podle souboru (GIF se pozná podle přípony) - tlačítko jen napovídá, co vybrat.
+    void kind;
+    const o: OverlayItemUi = { id: newOverlayId(), kind: picked.kind, text: '', textStyle: 'outline', textSize: 'm', file: picked.file, url: picked.url, name: picked.name, cx: 0.8, cy: 0.22, w: 0.25, from: null, to: null, ratio, canvas: null, userSized: true, userPlaced: true };
+    overlays.push(o);
+    selectedOverlay = o.id;
+    renderOverlayLayer();
+    renderOverlayChips();
+    syncOverlayEditor(true);
+    refreshButtons();
+  }
+  /** Nastavení vybraného překryvu: text (pole, styl, velikost), velikost, od kdy do kdy. */
+  function syncOverlayEditor(rebuild = false) {
+    const o = overlayById(selectedOverlay);
+    overlayEditor.classList.toggle('hidden', !o);
+    if (!o) {
+      clear(overlayEditor);
+      return;
+    }
+    if (!rebuild) {
+      const size = overlayEditor.querySelector<HTMLInputElement>('input.trim-ov-size');
+      if (size) size.value = String(Math.round(o.w * 100));
+      const sizeVal = overlayEditor.querySelector<HTMLElement>('.trim-ov-size-val');
+      if (sizeVal) sizeVal.textContent = `${Math.round(o.w * 100)} %`;
+      return;
+    }
+    clear(overlayEditor);
+    const rows: HTMLElement[] = [];
+    if (o.kind === 'text') {
+      const textInput = h('input', {
+        type: 'text',
+        class: 'trim-text',
+        maxlength: String(TEXT_MAX),
+        placeholder: t('trimTextPlaceholder'),
+        value: o.text,
+        oninput: (e: Event) => {
+          o.text = (e.target as HTMLInputElement).value;
+          renderOverlayChips();
+          void redrawTextOverlays(o);
+        },
+      }) as HTMLInputElement;
+      const selectStyle = 'width:auto;min-height:32px;padding:4px 10px';
+      const styleSelect = h(
+        'select',
+        { class: 'trim-text-style', style: selectStyle, onchange: (e: Event) => { o.textStyle = (e.target as HTMLSelectElement).value as TextStyle; void redrawTextOverlays(o); } },
+        h('option', { value: 'outline' }, t('trimTextStyleOutline')),
+        h('option', { value: 'box' }, t('trimTextStyleBox')),
+        h('option', { value: 'yellow' }, t('trimTextStyleYellow'))
+      ) as HTMLSelectElement;
+      styleSelect.value = o.textStyle;
+      const sizeSelect = h(
+        'select',
+        { class: 'trim-text-size', style: selectStyle, onchange: (e: Event) => { o.textSize = (e.target as HTMLSelectElement).value as TextSize; o.userSized = false; void redrawTextOverlays(o); } },
+        h('option', { value: 's' }, t('trimTextSizeS')),
+        h('option', { value: 'm' }, t('trimTextSizeM')),
+        h('option', { value: 'l' }, t('trimTextSizeL'))
+      ) as HTMLSelectElement;
+      sizeSelect.value = o.textSize;
+      rows.push(h('div', { class: 'row trim-text-row', style: 'gap:6px' }, h('span', { class: 'faint', style: 'margin-right:4px' }, t('trimText')), textInput, styleSelect, sizeSelect));
+    }
+    // Velikost (šířka v % obrazu) - posuvník; u textu přepíše velikost písma.
+    const sizeVal = h('span', { class: 'faint trim-ov-size-val' }, `${Math.round(o.w * 100)} %`);
+    const sizeInput = h('input', {
+      type: 'range',
+      class: 'trim-ov-size',
+      min: '4',
+      max: '100',
+      value: String(Math.round(o.w * 100)),
+      oninput: (e: Event) => {
+        o.w = clamp(Number((e.target as HTMLInputElement).value) / 100, 0.04, 1);
+        o.userSized = true;
+        sizeVal.textContent = `${Math.round(o.w * 100)} %`;
+        layoutOverlays();
+      },
+    }) as HTMLInputElement;
+    // Od kdy do kdy (s výsledku): "celou dobu", nebo od / do podle polohy přehrávání.
+    const outNow = () => Math.max(0, Math.round(((video.currentTime - start) / (speed || 1)) * 10) / 10);
+    const wholeBox = h('input', { type: 'checkbox', checked: o.from === null && o.to === null, onchange: (e: Event) => { if ((e.target as HTMLInputElement).checked) { o.from = null; o.to = null; } else { o.from = outNow(); o.to = null; } syncOverlayEditor(true); layoutOverlays(); } }) as HTMLInputElement;
+    const timeRow = h('div', { class: 'row trim-ov-time', style: 'gap:6px' }, h('label', { class: 'check' }, wholeBox, ' ', t('trimOverlayWhole')));
+    if (!(o.from === null && o.to === null)) {
+      const fromVal = h('b', {}, formatTime(o.from ?? 0));
+      const toVal = h('b', {}, o.to === null ? t('trimOverlayToEnd') : formatTime(o.to));
+      timeRow.append(
+        h('span', { class: 'faint' }, t('trimOverlayFrom'), ' ', fromVal),
+        h('button', { class: 'small quiet', onclick: () => { o.from = outNow(); if (o.to !== null && o.to <= o.from) o.to = null; syncOverlayEditor(true); layoutOverlays(); } }, t('trimOverlayFromNow')),
+        h('span', { class: 'faint' }, t('trimOverlayTo'), ' ', toVal),
+        h('button', { class: 'small quiet', onclick: () => { const v = outNow(); o.to = o.from !== null && v <= o.from ? null : v; syncOverlayEditor(true); layoutOverlays(); } }, t('trimOverlayToNow'))
+      );
+    }
+    rows.push(
+      h('div', { class: 'row trim-ov-size-row', style: 'gap:8px' }, h('span', { class: 'faint' }, t('trimOverlaySize')), sizeInput, sizeVal),
+      timeRow,
+      h('div', { class: 'row', style: 'gap:6px' }, h('button', { class: 'small quiet danger trim-ov-remove', onclick: () => removeOverlay(o.id) }, icon('trash', 13), t('trimOverlayRemove')))
+    );
+    overlayEditor.append(...rows);
+  }
+  /** Překryvy pro uložení: text jako PNG z náhledu, obrázky a GIFy jako soubor. */
+  async function overlayRequests(): Promise<OverlayRequest[]> {
+    const out: OverlayRequest[] = [];
+    for (const o of overlays) {
+      if (o.kind === 'text') {
+        if (!o.canvas) continue;
+        const image = o.canvas;
+        const blob = await new Promise<Blob | null>((resolve) => image.toBlob(resolve, 'image/png'));
+        if (!blob) continue;
+        out.push({ kind: 'text', png: new Uint8Array(await blob.arrayBuffer()), cx: o.cx, cy: o.cy, w: o.w, from: o.from, to: o.to });
+      } else if (o.file) {
+        out.push({ kind: o.kind, file: o.file, cx: o.cx, cy: o.cy, w: o.w, from: o.from, to: o.to });
+      }
+    }
+    return out;
+  }
+  function hasOverlays(): boolean {
+    return overlays.some((o) => (o.kind === 'text' ? !!o.canvas : !!o.file));
   }
   function setSpeed(value: number) {
     speed = value;
@@ -1256,9 +1694,9 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     for (const [key, btn] of Object.entries(anchorBtns)) btn.classList.toggle('active', key === anchor);
     anchorHint.textContent = anchor === 'blur' ? t('exportBlurHint') : t('exportVerticalHint');
     layoutCrop();
-    // Na výšku je výsledek užší - text se musí zalomit znovu.
-    if (overlayText.trim()) void refreshText();
-    else layoutText();
+    // Na výšku je výsledek užší - texty se musí zalomit znovu a rámečky přepočítat.
+    if (overlays.some((o) => o.kind === 'text')) void redrawTextOverlays();
+    else layoutOverlays();
     refreshButtons();
   }
   function setFormat(format: ExportFormat) {
@@ -1271,7 +1709,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   }
   const onResize = () => {
     layoutCrop();
-    layoutText();
+    layoutOverlays();
   };
   window.addEventListener('resize', onResize);
 
@@ -1286,6 +1724,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     lenVal.textContent = speed !== 1 ? `${(end - start).toFixed(1)} s → ${((end - start) / speed).toFixed(1)} s` : `${(end - start).toFixed(1)} s`;
     layoutPlayhead();
     layoutCrop();
+    layoutOverlays();
+    layoutCamera();
     refreshButtons();
   }
   function setStart(time: number) {
@@ -1373,10 +1813,11 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       syncAudioChoice(false);
       confirmReplace = false;
       gif = false;
-      overlayText = '';
-      textInput.value = '';
-      textImage = null;
-      clear(textLayer);
+      overlays = [];
+      selectedOverlay = null;
+      renderOverlayLayer();
+      renderOverlayChips();
+      syncOverlayEditor(true);
       setSpeed(1);
       setVertical(null);
     } else {
@@ -1389,12 +1830,13 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
         muteBox.checked = false;
         applyPreviewAudio();
       }
-      layoutText();
+      layoutOverlays();
     }
     layout();
   }
   function nothingToDo(): boolean {
-    return start <= 0.05 && end >= duration - 0.05 && !mute && audioChoice === 'mix' && !vertical && !gif && speed === 1 && !textImage;
+    // S kamerou zvlášť je i "nic nezměněno" práce: uložení ji zapeče do obrazu.
+    return start <= 0.05 && end >= duration - 0.05 && !mute && audioChoice === 'mix' && !vertical && !gif && speed === 1 && !hasOverlays() && !clip.camera;
   }
   /** GIF: úsek musí být nejvýš GIF_MAX_SECONDS. */
   function gifTooLong(): boolean {
@@ -1411,7 +1853,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     audioSelect.disabled = gif;
     // GIF je bez rychlosti a textu (krátká smyčka) - volby se schovají.
     speedRow.classList.toggle('hidden', gif);
-    textRow.classList.toggle('hidden', gif);
+    overlaysRow.classList.toggle('hidden', gif);
+    cameraRow.classList.toggle('hidden', gif || !clip.camera);
     saveNewBtn.title = nothingToDo() ? t('trimNothingToDo') : gifTooLong() ? t('gifTooLong', { max: GIF_MAX_SECONDS }) : '';
     replaceBtn.title = nothingToDo() ? t('trimNothingToDo') : '';
     replaceBtn.textContent = confirmReplace ? t('trimReplaceConfirm') : t('trimReplace');
@@ -1522,14 +1965,9 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
       video.load();
     }
     try {
-      // Text jako PNG (stejný obrázek jako v náhledu); ffmpeg ho jen položí na obraz.
-      let text: TrimRequest['text'] = null;
-      if (textImage) {
-        const image = textImage;
-        const blob = await new Promise<Blob | null>((resolve) => image.toBlob(resolve, 'image/png'));
-        if (blob) text = { png: new Uint8Array(await blob.arrayBuffer()), position: textPosition };
-      }
-      const result = await edit.run(original, { start, end, mute, mode, vertical: vertical ?? undefined, audio: audioChoice, speed, text });
+      // Překryvy: text jako PNG (stejný obrázek jako v náhledu), obrázky a GIFy jako soubor; ffmpeg je položí na obraz.
+      const overlayList = await overlayRequests();
+      const result = await edit.run(original, { start, end, mute, mode, vertical: vertical ?? undefined, audio: audioChoice, speed, overlays: overlayList });
       clip = result;
       renderMarkers();
       titleEl.textContent = clip.title;
@@ -1654,10 +2092,14 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
         if (!saving) close();
         return;
       }
+      const cameraBefore = clip.camera;
       clip = { ...fresh };
       titleEl.textContent = clip.title;
       titleEl.title = clip.title;
       renderMarkers();
+      // Kamera zvlášť přibyla / zmizela (zapečená) / má jiný soubor - načíst znovu; jen jiná poloha - přeskládat.
+      if ((cameraBefore?.file ?? null) !== (clip.camera?.file ?? null)) loadCamera(false);
+      else if (!camDragging) layoutCamera();
       uploadedNote.classList.toggle('hidden', clip.upload?.state !== 'done');
       copyBtn.classList.toggle('hidden', clip.upload?.state !== 'done');
       refreshHeadButtons();

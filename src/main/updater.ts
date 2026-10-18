@@ -3,7 +3,7 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { app } from 'electron';
 import type { SmartAppControlState, UpdateProgress, Variant } from '../shared/types';
-import { isNewerVersion, parseUpdateYml, type FeedConfig } from './updaterParse';
+import { AUTO_INSTALL_GRACE_DAYS, autoInstallDue, isNewerVersion, parseSeen, parseUpdateYml, type FeedConfig } from './updaterParse';
 import { judgeUpdateOutcome, parseInstallerResult, parseSmartAppControl, parseUpdateAttempt, type UpdateOutcome } from './updateOutcome';
 import { log } from './log';
 
@@ -19,11 +19,19 @@ import { log } from './log';
  * aktualizace" vždycky řekne něco užitečného, ne jen "nejde to".
  *
  * Stahuje se jen když se nehraje (nikdy během hry - lagovalo by to).
- * Instaluje se jen tlačítkem "Aktualizovat" (O appce, lišta u hodin) a s
+ * Instaluje se tlačítkem "Aktualizovat" (O appce, lišta u hodin) a s
  * okénkem instalátoru - ne potichu po ukončení appky: tichá instalace při
  * vypínání Windows nebo hned po zavření appky (hráč klikne na zástupce,
  * zatímco se soubory vyměňují) mohla nechat hráče bez appky. Jak instalace
  * dopadla, appka zjistí po dalším startu (takeUpdateOutcome).
+ *
+ * Sama se stažená verze nainstaluje (stejnou cestou, s okénkem instalátoru
+ * a restartem appky, ne při vypínání) ve dvou případech - viz autoInstallDue:
+ * když hráč "Aktualizovat" AUTO_INSTALL_GRACE_DAYS dní ignoroval, a hned,
+ * když Kine řekla, že tahle verze už nesmí nahrávat ani vysílat (426). Vždy
+ * jen v klidu: ne během hry, vysílání, nahrávání zápasu a ne, když má hráč
+ * zrovna otevřené okno appky (canAutoInstall v main.ts). Jde to vypnout
+ * v nastavení (autoUpdate) - zastaralou verzi pak Kine stejně odmítne.
  */
 export type UpdateCheck = {
   status:
@@ -56,6 +64,12 @@ type Deps = {
   checkHours?: () => number;
   /** fetch s hlavičkou appky (src/shared/kineClient.ts) pro dotaz na web Kine. */
   fetchImpl?: typeof fetch;
+  /** Smí se stažená verze nainstalovat sama (nastavení)? Bez toho ano. */
+  autoUpdate?: () => boolean;
+  /** Je teď klid na instalaci (nehraje se, nevysílá, nenahrává zápas, okno není v ruce)? */
+  canAutoInstall?: () => boolean;
+  /** Instalace stejnou cestou jako tlačítko Aktualizovat (main.ts installUpdate - zastaví snímání, restart). */
+  autoInstall?: () => Promise<unknown>;
 };
 
 let updater: typeof import('electron-updater').autoUpdater | null = null;
@@ -67,12 +81,17 @@ let lastCheck: UpdateCheck | null = null;
 /** Kdy appka předala instalaci instalátoru (0 = nepředala). */
 let installStartedAt = 0;
 let relaunching = false;
+/** Kine tuhle verzi odmítla (zastaralá) - stažená aktualizace se nainstaluje hned, jak je klid. */
+let forceInstall = false;
+let autoInstalling = false;
 
 let progress: UpdateProgress = { phase: 'idle', version: null, percent: null, bytesPerSecond: null, transferred: null, total: null, error: null };
 const listeners = new Set<(p: UpdateProgress) => void>();
 
 function setProgress(patch: Partial<UpdateProgress>): void {
   progress = { ...progress, ...patch };
+  // Okno O appce: do kdy se stažená verze nainstaluje sama.
+  progress.autoInstallAt = progress.phase === 'ready' ? autoInstallAfter() : null;
   for (const fn of listeners) {
     try {
       fn(progress);
@@ -139,8 +158,9 @@ export function initUpdater(d: Deps): void {
     });
     autoUpdater.on('update-downloaded', (info) => {
       downloading = false;
-      log(`aktualizace ${info.version} stažená - nainstaluje se tlačítkem Aktualizovat`);
+      log(`aktualizace ${info.version} stažená - nainstaluje se tlačítkem Aktualizovat (nebo sama, až uplyne lhůta)`);
       setProgress({ phase: 'ready', version: info.version, percent: 100, error: null });
+      void maybeAutoInstall();
     });
     autoUpdater.on('error', (e) => {
       downloading = false;
@@ -167,16 +187,93 @@ export function initUpdater(d: Deps): void {
       }, hours * 60 * 60 * 1000);
     };
     schedule();
+    // Stažená verze čeká na klidnou chvíli (po hře, po vysílání): zkouší se každou půlhodinu.
+    setInterval(() => void maybeAutoInstall(), 30 * 60 * 1000);
   } catch (e) {
     log(`aktualizace nejdou zapnout: ${(e as Error).message}`);
   }
 }
 
-/** Hra skončila - když mezitím vyšla nová verze, teď se stáhne. */
+/** Hra skončila - když mezitím vyšla nová verze, teď se stáhne (a stažená se případně nainstaluje). */
 export function onGameEnded(): void {
   if (pendingVersion && updater && !downloading) {
     log(`hra skončila - stahuje se odložená aktualizace ${pendingVersion}`);
     void startDownload();
+    return;
+  }
+  void maybeAutoInstall();
+}
+
+/**
+ * Kine tuhle verzi odmítla (426 - zastaralá appka): aktualizace se stáhne a
+ * nainstaluje hned, jak je klid, bez čekání na lhůtu. Volá main.ts.
+ */
+export function requireUpdateSoon(): void {
+  forceInstall = true;
+  if (progress.phase === 'ready') {
+    setProgress({});
+    void maybeAutoInstall();
+    return;
+  }
+  if (pendingVersion && !downloading && !deps?.gameRunning()) void startDownload();
+  else if (!pendingVersion && !downloading) void checkForUpdates();
+}
+
+// ---- kdy appka novou verzi poprvé viděla (lhůta pro samočinnou instalaci) ----
+
+function seenFile(): string {
+  return join(app.getPath('userData'), 'update-seen.json');
+}
+
+function seenAt(version: string): number | null {
+  try {
+    return parseSeen(readFileSync(seenFile(), 'utf8'), version);
+  } catch {
+    return null;
+  }
+}
+
+/** Zapíše první zahlédnutí verze (jiná verze přepíše - lhůta běží znovu). */
+function rememberSeen(version: string): void {
+  if (seenAt(version) !== null) return;
+  try {
+    writeFileSync(seenFile(), JSON.stringify({ version, at: Date.now() }));
+  } catch (e) {
+    log(`záznam o nové verzi se nezapsal: ${(e as Error).message}`);
+  }
+}
+
+/** Jen pro okno O appce: do kdy se nainstaluje sama (null = nic nečeká; <= teď = hned, jak bude klid). */
+export function autoInstallAfter(): number | null {
+  const version = progress.version;
+  if (!version || progress.phase === 'idle' || !(deps?.autoUpdate?.() ?? true)) return null;
+  if (forceInstall) return Date.now();
+  const seen = seenAt(version);
+  return seen === null ? null : seen + AUTO_INSTALL_GRACE_DAYS * 24 * 3600 * 1000;
+}
+
+/**
+ * Stažená verze se nainstaluje sama, když uplynula lhůta (nebo Kine verzi
+ * odmítla) a je klid - stejnou cestou jako tlačítko Aktualizovat.
+ */
+export async function maybeAutoInstall(): Promise<boolean> {
+  if (!updater || !deps || autoInstalling || installStartedAt || progress.phase !== 'ready') return false;
+  if (!(deps.autoUpdate?.() ?? true)) return false;
+  const version = progress.version;
+  if (!version) return false;
+  if (!autoInstallDue(seenAt(version), Date.now(), forceInstall)) return false;
+  if (!(deps.canAutoInstall?.() ?? false)) return false;
+  if (!deps.autoInstall) return false;
+  autoInstalling = true;
+  log(forceInstall ? `aktualizace ${version}: Kine tuhle verzi odmítá - instaluje se sama` : `aktualizace ${version}: tlačítko Aktualizovat čekalo ${AUTO_INSTALL_GRACE_DAYS} dní - instaluje se sama`);
+  try {
+    await deps.autoInstall();
+    return true;
+  } catch (e) {
+    log(`samočinná instalace: ${(e as Error).message}`);
+    return false;
+  } finally {
+    autoInstalling = false;
   }
 }
 
@@ -368,6 +465,7 @@ export async function checkForUpdates(): Promise<UpdateCheck> {
       const version = result?.updateInfo?.version;
       if (version && isNewerVersion(version, current)) {
         pendingVersion = version;
+        rememberSeen(version);
         if (deps.gameRunning()) {
           log(`aktualizace ${version} je venku - stáhne se po hře`);
           setProgress({ phase: 'waiting-game', version });

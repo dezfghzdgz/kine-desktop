@@ -277,3 +277,21 @@ test('kamera v klipech: výchozí vypnutá, nesmysly ze souboru se srovnají', (
     [true, 'abc', 'top-left', 'large', 'circle', false]
   );
 });
+
+test('kamera v klipech: vlastní velikost a poloha se ořežou, kamera zvlášť je vypínač', () => {
+  assert.equal(DEFAULT_SETTINGS.clipCameraScale, null);
+  assert.equal(DEFAULT_SETTINGS.clipCameraSeparate, false);
+  const s = sanitizeSettings({ clipCameraScale: 0.9, clipCameraX: 1.7, clipCameraY: -2, clipCameraSeparate: true });
+  assert.equal(s.clipCameraScale, 0.6);
+  assert.equal(s.clipCameraX, 1);
+  assert.equal(s.clipCameraY, 0);
+  assert.equal(s.clipCameraSeparate, true);
+  const ok = sanitizeSettings({ clipCameraScale: 0.25, clipCameraX: 0.1, clipCameraY: 0.2, clipCameraSeparate: false });
+  assert.equal(ok.clipCameraScale, 0.25);
+  assert.equal(ok.clipCameraX, 0.1);
+  assert.equal(ok.clipCameraY, 0.2);
+  assert.equal(ok.clipCameraSeparate, false);
+  const bad = sanitizeSettings({ clipCameraScale: 'x', clipCameraX: 'y' });
+  assert.equal(bad.clipCameraScale, null);
+  assert.equal(bad.clipCameraX, null);
+});

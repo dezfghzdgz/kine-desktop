@@ -48,6 +48,10 @@ let clipCameraReported = '';
 let micStream: MediaStream | null = null;
 let recorder: MediaRecorder | null = null;
 let micRecorder: MediaRecorder | null = null;
+/** Kamera zvlášť (clipCameraSeparate): vlastní proud kamery a třetí recorder (jen obraz). */
+let camRecorder: MediaRecorder | null = null;
+let camFeed: ClipCameraFeed | null = null;
+let camSendChain: Promise<void> = Promise.resolve();
 let generation = 0;
 let sendChain: Promise<void> = Promise.resolve();
 let micSendChain: Promise<void> = Promise.resolve();
@@ -506,7 +510,17 @@ async function getStreams(settings: Settings): Promise<void> {
   micLatencyMs = trackLatencyMs(micTrack);
 
   // Kamera v klipech: do zásobníku jde obraz s kamerou (bez ní obrazovka tak, jak je).
-  const recordVideo = settings.clipCamera && screenTrack ? startClipCamera(settings, screenTrack) ?? screenTrack : screenTrack;
+  // "Kamera zvlášť": obraz zůstává bez kamery a kamera se nahrává jako vlastní proud (startRecorders).
+  camFeed?.stop();
+  camFeed = null;
+  if (settings.clipCamera && settings.clipCameraSeparate && screenTrack) {
+    clipCompositor?.stop();
+    clipCompositor = null;
+    clipCameraReported = '';
+    camFeed = new ClipCameraFeed(settings.clipCameraDevice, (state, info) => reportClipCamera(state, info));
+    camFeed.start();
+  }
+  const recordVideo = settings.clipCamera && !settings.clipCameraSeparate && screenTrack ? startClipCamera(settings, screenTrack) ?? screenTrack : screenTrack;
   stream = new MediaStream([...(recordVideo ? [recordVideo] : []), ...(systemTrack ? [systemTrack] : [])]);
   micStream = micTrack ? new MediaStream([micTrack]) : null;
 
@@ -522,6 +536,9 @@ function clipCameraOf(settings: Settings): SceneCamera {
     size: settings.clipCameraSize,
     shape: settings.clipCameraShape,
     mirror: settings.clipCameraMirror,
+    width: settings.clipCameraScale,
+    x: settings.clipCameraX,
+    y: settings.clipCameraY,
   };
 }
 
@@ -566,6 +583,85 @@ function startClipCamera(settings: Settings, source: MediaStreamTrack): MediaStr
     reportClipCamera('error', { message: `camera-unsupported: ${String(e)}` });
     return null;
   }
+}
+
+/**
+ * Kamera zvlášť: jen otevřít kameru (a hlídat ji - když ji drží jiný program,
+ * zkusit za 15 s znovu), nic se nekreslí. Její stopa jde do třetího recorderu.
+ */
+class ClipCameraFeed {
+  private stream: MediaStream | null = null;
+  private running = false;
+  private request = 0;
+  private retry: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(
+    private deviceId: string,
+    private onState: (state: 'starting' | 'on' | 'error', info: { message?: string; width?: number; height?: number }) => void
+  ) {}
+
+  start(): void {
+    this.running = true;
+    void this.open(++this.request);
+  }
+
+  track(): MediaStreamTrack | null {
+    return this.stream?.getVideoTracks()[0] ?? null;
+  }
+
+  /** Až kamera naběhne (nebo to vzdá) - recorder kamery se pouští, až je co nahrávat. */
+  onTrack: ((track: MediaStreamTrack) => void) | null = null;
+
+  private async open(request: number): Promise<void> {
+    this.onState('starting', {});
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { ...(this.deviceId ? { deviceId: { exact: this.deviceId } } : {}), width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
+      });
+    } catch (e) {
+      if (this.request === request && this.running) {
+        this.onState('error', { message: cameraErrorMessage(e) });
+        this.retry = setTimeout(() => void this.open(++this.request), 15000);
+      }
+      return;
+    }
+    if (!this.running || this.request !== request) {
+      for (const t of stream.getTracks()) t.stop();
+      return;
+    }
+    for (const t of this.stream?.getTracks() ?? []) t.stop();
+    this.stream = stream;
+    const track = stream.getVideoTracks()[0];
+    const st = track?.getSettings();
+    this.onState('on', { width: st?.width, height: st?.height });
+    // Kamera se odpojila za běhu: zkusit znovu (klip se mezitím nahrává bez ní).
+    track.onended = () => {
+      if (!this.running || this.request !== request) return;
+      this.onState('error', { message: 'camera-ended' });
+      this.retry = setTimeout(() => void this.open(++this.request), 15000);
+    };
+    this.onTrack?.(track);
+  }
+
+  stop(): void {
+    this.running = false;
+    this.request += 1;
+    if (this.retry) clearTimeout(this.retry);
+    this.retry = null;
+    for (const t of this.stream?.getTracks() ?? []) t.stop();
+    this.stream = null;
+  }
+}
+
+/** Text chyby kamery (stejné klíče jako kompozitor: obsazená, není, zakázaná…). */
+function cameraErrorMessage(e: unknown): string {
+  const name = (e as { name?: string })?.name ?? '';
+  if (name === 'NotReadableError' || name === 'AbortError') return 'camera-busy';
+  if (name === 'NotFoundError' || name === 'OverconstrainedError') return 'camera-missing';
+  if (name === 'NotAllowedError' || name === 'SecurityError') return 'camera-denied';
+  return `camera-error: ${String((e as Error)?.message ?? e)}`;
 }
 
 // ---- měřáky a hlídání ticha ----------------------------------------------------------------
@@ -715,11 +811,39 @@ function startRecorders(settings: Settings, gen: number) {
     };
   }
 
-  // "stopped" až když dorazily poslední kousky OBOU proudů - jinak by hlavní proces zavřel roury dřív.
+  // Kamera zvlášť: třetí recorder, jen obraz (VP8/VP9 WebM), nižší datový tok - kamera je malá.
+  // Když kamera ještě nenaběhla (otevírá se, je obsazená), recorder se spustí, až přijde stopa;
+  // kousky mají časy, takže se v klipu srovnají s obrazem jako mikrofon.
+  let cam: MediaRecorder | null = null;
+  let camStopped: Promise<void> = Promise.resolve();
+  const startCam = (track: MediaStreamTrack) => {
+    // Jen pro běžící generaci (kamera, která naběhla až po dalším startu, patří tomu novému).
+    if (generation !== myGen || recorder !== rec) return;
+    if (camRecorder && camRecorder.state !== 'inactive') return;
+    const camMime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8' : 'video/webm';
+    const r = new MediaRecorder(new MediaStream([track]), { mimeType: camMime, videoBitsPerSecond: 2_500_000, videoKeyFrameIntervalDuration: 2000 } as MediaRecorderOptions);
+    r.ondataavailable = (e) => {
+      if (!e.data || e.data.size === 0) return;
+      const blob = e.data;
+      camSendChain = camSendChain.then(async () => {
+        const buffer = await blob.arrayBuffer();
+        bridge.chunk(myGen, buffer, 'cam');
+      });
+    };
+    r.onerror = (e) => report({ type: 'warning', generation: myGen, kind: 'camera', message: String((e as ErrorEvent).error ?? e) });
+    camStopped = new Promise<void>((resolve) => (r.onstop = () => resolve()));
+    r.start(1000);
+    cam = r;
+    camRecorder = r;
+    // Od kdy kamera jede (může být později než obraz) - podle toho se její kousky srovnají s obrazem.
+    report({ type: 'camera-started', generation: myGen, at: Date.now() });
+  };
+  // "stopped" až když dorazily poslední kousky VŠECH proudů - jinak by hlavní proces zavřel roury dřív.
   const stoppedMain = new Promise<void>((resolve) => (rec.onstop = () => resolve()));
   const stoppedMic = mic ? new Promise<void>((resolve) => (mic!.onstop = () => resolve())) : Promise.resolve();
   void Promise.all([stoppedMain, stoppedMic])
-    .then(() => Promise.all([sendChain, micSendChain]))
+    .then(() => (cam ? camStopped : Promise.resolve()))
+    .then(() => Promise.all([sendChain, micSendChain, camSendChain]))
     .then(() => report({ type: 'stopped', generation: myGen, at: Date.now() }));
 
   // Oba naráz, ať mají společný začátek (rozdíl se při stavbě klipu dorovná z časů kousků).
@@ -728,6 +852,12 @@ function startRecorders(settings: Settings, gen: number) {
   recorder = rec;
   micRecorder = mic;
   generation = myGen;
+  // Kamera zvlášť až teď (startCam kontroluje, že jde o běžící generaci): stopa už je, nebo přijde (onTrack).
+  if (camFeed) {
+    const track = camFeed.track();
+    if (track) startCam(track);
+    camFeed.onTrack = (t) => startCam(t);
+  }
   const size = videoSize();
   report({
     type: 'started',
@@ -736,6 +866,7 @@ function startRecorders(settings: Settings, gen: number) {
     mimeType: rec.mimeType || mimeType,
     audio: stream.getAudioTracks().length > 0,
     mic: !!mic,
+    camera: !!camFeed,
     micLatencyMs,
     systemLatencyMs: systemAudioNative ? NATIVE_LATENCY_MS : 0,
     hwEncoder,
@@ -785,8 +916,11 @@ function stopWatchSize() {
 function stopRecorders() {
   if (recorder && recorder.state !== 'inactive') recorder.stop();
   if (micRecorder && micRecorder.state !== 'inactive') micRecorder.stop();
+  if (camRecorder && camRecorder.state !== 'inactive') camRecorder.stop();
+  if (camFeed) camFeed.onTrack = null;
   recorder = null;
   micRecorder = null;
+  camRecorder = null;
 }
 
 // ---- živé vysílání ----------------------------------------------------------------------------
@@ -962,6 +1096,8 @@ function stopAll() {
   stopWatchSize();
   clipCompositor?.stop();
   clipCompositor = null;
+  camFeed?.stop();
+  camFeed = null;
   clipCameraReported = '';
   for (const track of stream?.getTracks() ?? []) track.stop();
   for (const track of micStream?.getTracks() ?? []) track.stop();

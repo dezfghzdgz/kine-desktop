@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cameraRect, CAMERA_WIDTH } from '../dist/esm/liveLayout.js';
+import { cameraRect, cameraWidthFraction, CAMERA_WIDTH, CAMERA_WIDTH_MIN, CAMERA_WIDTH_MAX } from '../dist/esm/liveLayout.js';
 
 test('kamera ve vysílání: roh, velikost a poměr kamery', () => {
   const r = cameraRect(1280, 720, 1280, 720, { position: 'bottom-right', size: 'medium', shape: 'rect' });
@@ -31,4 +31,23 @@ test('kamera ve vysílání: nikdy víc než polovina výšky (kamera na výšku
   const r = cameraRect(1280, 400, 720, 1280, { position: 'bottom-left', size: 'large', shape: 'rect' });
   assert.ok(r.h <= 200);
   assert.ok(r.y >= 0 && r.x >= 0 && r.x + r.w <= 1280 && r.y + r.h <= 400);
+});
+
+test('kamera: vlastní šířka (posuvník) a vlastní poloha (přetažení) místo rohu, drží se uvnitř obrazu', () => {
+  // Posuvník: šířka jako podíl obrazu, omezená na 8-60 %.
+  assert.equal(cameraWidthFraction({ size: 'small', width: 0.4 }), 0.4);
+  assert.equal(cameraWidthFraction({ size: 'large', width: null }), CAMERA_WIDTH.large);
+  assert.equal(cameraWidthFraction({ size: 'medium', width: 0.01 }), CAMERA_WIDTH_MIN);
+  assert.equal(cameraWidthFraction({ size: 'medium', width: 0.95 }), CAMERA_WIDTH_MAX);
+  const custom = cameraRect(1920, 1080, 1280, 720, { position: 'bottom-right', size: 'medium', shape: 'rect', width: 0.4, x: 0.1, y: 0.2 });
+  assert.equal(custom.w, Math.round(1920 * 0.4));
+  assert.equal(custom.x, Math.round(1920 * 0.1));
+  assert.equal(custom.y, Math.round(1080 * 0.2));
+  // Přetažená přes okraj: zůstane celá v obraze.
+  const edge = cameraRect(1920, 1080, 1280, 720, { position: 'top-left', size: 'medium', shape: 'rect', width: 0.3, x: 0.95, y: 0.99 });
+  assert.equal(edge.x, 1920 - edge.w);
+  assert.equal(edge.y, 1080 - edge.h);
+  // Jen x bez y = roh (obě souřadnice musí být vlastní).
+  const half = cameraRect(1920, 1080, 1280, 720, { position: 'top-left', size: 'medium', shape: 'rect', x: 0.5, y: null });
+  assert.equal(half.x, Math.round(1080 * 0.03));
 });

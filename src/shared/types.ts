@@ -208,6 +208,17 @@ export type Settings = {
   clipCameraShape: LiveCameraShape;
   /** Zrcadlit kameru v klipech (jak se hráč vidí sám). */
   clipCameraMirror: boolean;
+  /** Šířka kamery v klipu jako podíl šířky obrazu (0,08-0,6); null = podle clipCameraSize. */
+  clipCameraScale: number | null;
+  /** Vlastní poloha kamery (levý horní roh, podíl obrazu 0-1); null = roh podle clipCameraPosition. */
+  clipCameraX: number | null;
+  clipCameraY: number | null;
+  /**
+   * Kamera zvlášť: nekreslí se do záznamu, ale nahrává se jako samostatný soubor
+   * vedle klipu. V přehrávači jde kdykoli posunout a zvětšit (i po uložení);
+   * do videa se zapeče až při nahrání na Kine, exportu nebo úpravě klipu.
+   */
+  clipCameraSeparate: boolean;
   /** Prázdné = hlavní obrazovka. Jinak id obrazovky z Electronu. */
   displayId: string;
   detection: DetectionMode;
@@ -227,6 +238,8 @@ export type Settings = {
   desktopShortcut: boolean;
   /** Malé okénko v rohu po uložení klipu. Když nejde (fullscreen), aspoň systémové oznámení. */
   toast: boolean;
+  /** Stažená aktualizace se po lhůtě nainstaluje sama (a hned, když Kine starou verzi odmítne). */
+  autoUpdate: boolean;
   /** Složka s klipy; prázdné = Videa/Kine. */
   clipsDir: string;
   /** Adresa Kine (pro vývoj se dá přepnout na localhost). */
@@ -339,6 +352,29 @@ export type Clip = {
   audioTracks?: ('mix' | 'game' | 'mic')[];
   /** Klip zmenšený (Klipy -> úložiště): jakou úrovní, kdy a kolik měl předtím. */
   compressed?: { level: 'light' | 'medium' | 'strong'; at: string; originalBytes: number };
+  /**
+   * Kamera nahraná zvlášť (nastavení "kamera zvlášť"): soubor vedle klipu a kde
+   * v obraze leží. Přehrávač ji skládá přes video a dá ji kdykoli posunout;
+   * do videa se zapeče až při nahrání, exportu nebo úpravě (editPlan.cameraBake).
+   */
+  camera?: ClipCamera | null;
+};
+
+/** Kamera ke klipu nahraná zvlášť. Poloha a šířka jako podíl obrazu (0-1). */
+export type ClipCamera = {
+  file: string;
+  /** Kde v klipu začíná kamera (ms; záporné = kamera začala dřív než obraz). */
+  offsetMs: number;
+  /** Levý horní roh (podíl šířky / výšky obrazu). */
+  x: number;
+  y: number;
+  /** Šířka (podíl šířky obrazu); výška podle poměru stran kamery (kruh = čtverec). */
+  w: number;
+  shape: LiveCameraShape;
+  mirror: boolean;
+  /** Rozměry záznamu kamery (px), když jsou známé. */
+  width: number | null;
+  height: number | null;
 };
 
 /**
@@ -466,6 +502,8 @@ export type UpdateProgress = {
   transferred: number | null;
   total: number | null;
   error: string | null;
+  /** Kdy nejpozději se stažená verze nainstaluje sama (ms od epochy; <= teď = hned, jak bude klid); null = nečeká se. */
+  autoInstallAt?: number | null;
 };
 
 /**
@@ -533,6 +571,8 @@ export type CaptureEvent =
       audio: boolean;
       /** Běží vedle i proud mikrofonu (druhý MediaRecorder)? */
       mic?: boolean;
+      /** Běží vedle i proud kamery (kamera zvlášť - třetí MediaRecorder, jen obraz)? */
+      camera?: boolean;
       /** Zpoždění mikrofonu podle Chromia (ms; o tolik je záznam mikrofonu za skutečností). */
       micLatencyMs?: number;
       /** O kolik je zvuk hry v proudu obrazu pozadu (ms) - jen když jde přímo z Windows přes pomocníka. */
@@ -546,6 +586,8 @@ export type CaptureEvent =
       height?: number;
     }
   | { type: 'stopped'; generation: number; at: number }
+  /** Recorder kamery zvlášť se rozjel (kamera může naběhnout až po startu obrazu) - od tohohle času se počítají její kousky. */
+  | { type: 'camera-started'; generation: number; at: number }
   | { type: 'error'; generation: number; message: string }
   /** Něco nejde, ale nahrává se dál (třeba mikrofon není). */
   | {
@@ -555,7 +597,7 @@ export type CaptureEvent =
        * systemLoopback = zvuk hry nejde otevřít; systemAudioFallback = bere se ze Stereo Mix a spol.;
        * systemAudioRetry = povedlo se na druhý pokus; systemAudioNative = bere se přímo z Windows (WASAPI, jako OBS).
        */
-      kind: 'microphone' | 'systemAudio' | 'bluetoothMic' | 'systemLoopback' | 'systemAudioFallback' | 'systemAudioRetry' | 'systemAudioNative';
+      kind: 'microphone' | 'camera' | 'systemAudio' | 'bluetoothMic' | 'systemLoopback' | 'systemAudioFallback' | 'systemAudioRetry' | 'systemAudioNative';
       message: string;
     }
   /** Hladiny zvuku (0-1, RMS) zhruba každou sekundu - měřáky v nastavení a hlídání ticha. */
@@ -589,7 +631,18 @@ export type LivePreset = { width: number; height: number; fps: number; videoKbps
 export type LiveAudio = { game: boolean; mic: boolean };
 
 /** Kamera v obraze (vysílání i kamera v klipech): která ('' = výchozí), kde, jak velká, jaký tvar, zrcadlo. */
-export type SceneCamera = { deviceId: string; position: LiveCameraPosition; size: LiveCameraSize; shape: LiveCameraShape; mirror: boolean };
+export type SceneCamera = {
+  deviceId: string;
+  position: LiveCameraPosition;
+  size: LiveCameraSize;
+  shape: LiveCameraShape;
+  mirror: boolean;
+  /** Vlastní šířka (podíl šířky obrazu) - přebije `size`. */
+  width?: number | null;
+  /** Vlastní poloha levého horního rohu (podíl obrazu) - přebije `position`. */
+  x?: number | null;
+  y?: number | null;
+};
 
 /** Kamera v klipech za běhu snímání (stav pro nastavení); viz CaptureEvent 'clip-camera'. */
 export type ClipCameraStatus = { state: 'starting' | 'on' | 'error'; message: string | null; width: number | null; height: number | null };

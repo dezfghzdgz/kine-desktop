@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { cpus, homedir, release, totalmem } from 'node:os';
 import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, statfsSync, unlinkSync, writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
@@ -33,6 +34,7 @@ import {
   type AudioLevels,
   type CaptureEvent,
   type Clip,
+  type ClipCamera,
   type ClipCameraStatus,
   type DisplayInfo,
   type LiveAfterStream,
@@ -49,6 +51,7 @@ import {
   type Visibility,
 } from '../shared/types';
 import { GB, storageCleanupPlan } from '../shared/storage';
+import { CAMERA_WIDTH_MAX, CAMERA_WIDTH_MIN, cameraRect } from '../shared/liveLayout';
 import { chaptersText, markerChapters, parseHashtags } from '../shared/upload';
 import { hexToRgbTriplet } from '../shared/plan';
 import { makeT, type Key } from '../shared/i18n';
@@ -77,6 +80,7 @@ import {
   installUpdateNow,
   onGameEnded as updaterGameEnded,
   onUpdateProgress,
+  requireUpdateSoon,
   smartAppControlState,
   takeUpdateOutcome,
   updateProgress,
@@ -90,7 +94,7 @@ import { makeGif, makeThumbnail, mergeClips, trimClip } from './edit';
 import { probe, runFfmpeg, spawnFfmpeg } from './ffmpeg';
 import { LiveController } from './live';
 import { LIVE_QUALITIES, cleanLiveError, liveElapsed, liveErrorTextKey, looksLikeLiveThumbnail } from '../shared/live';
-import { GIF_MAX_SECONDS, normalizeSpeed, shiftMarkers, type TextPosition } from './editPlan';
+import { GIF_MAX_SECONDS, OVERLAY_MAX, normalizeOverlays, normalizeSpeed, shiftMarkers, type CameraBake, type OverlayItem, type TextPosition } from './editPlan';
 import { APP_USER_MODEL_IDS, PRODUCT_NAMES, detectVariant, modeForVariant, siblingExe } from './variant';
 import { brandIcon, trayIcon } from './icon';
 import { HotkeyManager, type HotkeyId, type HotkeyReason } from './hotkeys';
@@ -125,8 +129,14 @@ type TrimIpcRequest = {
   vertical?: 'left' | 'center' | 'right' | 'blur';
   audio?: 'mix' | 'game' | 'mic' | 'none';
   speed?: number;
-  /** Text přes video jako PNG (nakreslené oknem) a kde leží. */
+  /** Text přes video jako PNG (nakreslené oknem) a kde leží (starší okno). */
   text?: { png: Uint8Array | ArrayBuffer; position: TextPosition } | null;
+  /**
+   * Překryvy kdekoli v obraze: text jako PNG (okno ho nakreslí), obrázek nebo GIF
+   * jako soubor vybraný dialogem (clips:pickOverlayImage). Poloha a šířka jsou
+   * zlomky výsledného obrazu, časy v sekundách výsledku (editPlan.OverlayItem).
+   */
+  overlays?: { kind: 'text' | 'image' | 'gif'; png?: Uint8Array | ArrayBuffer; file?: string; cx: number; cy: number; w: number; from?: number | null; to?: number | null }[] | null;
 };
 const ICON_PNG = join(app.getAppPath(), 'build', VARIANT === 'clipper' ? 'icon-clipper.png' : 'icon.png');
 /** Volné místo na disku, kde leží složka; když to nejde zjistit, -1. */
@@ -202,6 +212,8 @@ class KineApp {
   private kineFetch: typeof fetch = fetch;
   /** Kdy naposledy Kine řekla "appka je moc stará" (hlášení a kontrola aktualizace jednou za hodinu). */
   private updateRequiredAt = 0;
+  /** Obrázky / GIFy vybrané dialogem pro překryvy v úpravách klipu (jen ty smí do ffmpeg). */
+  private overlayFiles = new Set<string>();
   /** Okno s chatem vlastního vysílání (Twitch "popout chat"). */
   private chatWindow: BrowserWindow | null = null;
   /** Zásobník rozjelo až vysílání (nebyla hra / ruční režim) - po konci vysílání se zase vypne. */
@@ -540,7 +552,18 @@ class KineApp {
     this.helper?.start();
     this.createTray();
     this.applyLoginItem();
-    initUpdater({ variant: VARIANT, siteUrl: () => this.settings.get().siteUrl, gameRunning: () => !!this.games.current(), checkHours: () => this.profile().updateCheckHours, fetchImpl: this.kineFetch });
+    initUpdater({
+      variant: VARIANT,
+      siteUrl: () => this.settings.get().siteUrl,
+      gameRunning: () => !!this.games.current(),
+      checkHours: () => this.profile().updateCheckHours,
+      fetchImpl: this.kineFetch,
+      // Stažená verze se nainstaluje sama (po lhůtě, nebo když Kine tuhle verzi odmítá) -
+      // jen v klidu a stejnou cestou jako tlačítko Aktualizovat (updater.ts).
+      autoUpdate: () => this.settings.get().autoUpdate !== false,
+      canAutoInstall: () => this.canAutoInstall(),
+      autoInstall: () => this.installUpdate(),
+    });
     // Průběh stahování aktualizace do okna (O appce, postranní panel) a "Aktualizovat" do lišty.
     onUpdateProgress(() => {
       // Stažená aktualizace: zjistit Smart App Control (O appce u tlačítka upozorní, že ji může zablokovat).
@@ -917,6 +940,7 @@ class KineApp {
           audioTracks: result.audioTracks,
           kind: 'recording',
           markers: markers.length > 0 ? markers : undefined,
+          camera: this.clipCameraFor(result.camera),
         };
         this.library.add(clip);
         clips.push(clip);
@@ -1067,17 +1091,47 @@ class KineApp {
    * restartu; po nahrání zmizí.
    */
   private async uploadFileFor(clip: Clip): Promise<{ file: string; fresh: boolean }> {
-    if ((clip.audioTracks?.length ?? 0) <= 1) return { file: clip.file, fresh: false };
+    return this.bakedFileFor(clip);
+  }
+
+  /**
+   * Soubor klipu tak, jak má jít ven (na Kine, na Discord, do sestřihu, do GIFu):
+   * klip se samostatnými stopami jen se smíchanou stopou a klip s kamerou zvlášť
+   * s kamerou zapečenou do obrazu (překódování - u dlouhé nahrávky chvíli trvá).
+   * Kopie leží v userData/upload-cache a platí, dokud se klip nebo poloha kamery
+   * nezmění (setClipCameraLayout ji zahodí - releaseUploadFile).
+   */
+  private async bakedFileFor(clip: Clip, progress?: (percent: number) => void): Promise<{ file: string; fresh: boolean }> {
+    const camera = this.cameraBakeFor(clip);
+    const mixOnly = (clip.audioTracks?.length ?? 0) > 1;
+    if (!camera && !mixOnly) return { file: clip.file, fresh: false };
     const webm = extname(clip.file).toLowerCase() === '.webm';
     const target = join(this.uploadCacheDir(), `${clip.id}${webm ? '.webm' : '.mp4'}`);
+    // Jak kamera v kopii leží (poloha, velikost, tvar…) - jiná poloha = kopie znovu, i když soubory nezměnily čas.
+    const signature = camera ? JSON.stringify({ f: basename(camera.file), o: camera.offsetMs, x: camera.x, y: camera.y, w: camera.w, s: camera.shape, m: camera.mirror }) : '';
+    const sidecar = `${target}.cam.json`;
     try {
       const cached = statSync(target);
-      if (cached.size > 0 && cached.mtimeMs >= statSync(clip.file).mtimeMs) return { file: target, fresh: false };
+      const sources = [statSync(clip.file).mtimeMs, camera ? statSync(camera.file).mtimeMs : 0];
+      const sameLayout = !camera || (existsSync(sidecar) && readFileSync(sidecar, 'utf8') === signature);
+      if (cached.size > 0 && cached.mtimeMs >= Math.max(...sources) && sameLayout) return { file: target, fresh: false };
     } catch {
       // Kopie ještě není.
     }
     mkdirSync(this.uploadCacheDir(), { recursive: true });
     const part = `${target}.part`;
+    if (camera) {
+      const total = clip.durationSeconds > 0 ? clip.durationSeconds : (await probe(clip.file).catch(() => null))?.durationSeconds ?? 0;
+      if (!(total > 0)) throw new Error('unknown length');
+      // Zapečení kamery = překódování celého klipu (edit.ts), zvuk jen smíchaná stopa.
+      const tmp = `${part}${webm ? '.webm' : '.mp4'}`;
+      await trimClip(clip.file, tmp, { start: 0, end: total, mute: false, videoMbps: this.settings.get().videoMbps, audio: 'mix', audioTracks: clip.audioTracks, firstAudioOnly: true, camera }, progress);
+      renameSync(tmp, target);
+      writeFileSync(sidecar, signature);
+      log(`${basename(clip.file)}: kamera zapečená do kopie k nahrání (${Math.round(camera.w * 100)} % šířky, ${camera.shape})`);
+      return { file: target, fresh: true };
+    }
+    rmSync(sidecar, { force: true });
     await runFfmpeg(
       ['-loglevel', 'error', '-y', '-i', clip.file, '-map', '0:v:0', '-map', '0:a:0', '-c', 'copy', ...(webm ? ['-f', 'webm'] : ['-movflags', '+faststart', '-f', 'mp4']), part],
       10 * 60 * 1000
@@ -1088,7 +1142,7 @@ class KineApp {
   }
 
   private releaseUploadFile(clipId: string): void {
-    for (const ext of ['.mp4', '.webm']) rmSync(join(this.uploadCacheDir(), `${clipId}${ext}`), { force: true });
+    for (const ext of ['.mp4', '.webm', '.mp4.cam.json', '.webm.cam.json']) rmSync(join(this.uploadCacheDir(), `${clipId}${ext}`), { force: true });
   }
 
   /** Po startu: kopie k nahrání, které už nic nenahrává (klip nahraný, smazaný, zrušený). */
@@ -1100,7 +1154,7 @@ class KineApp {
       return;
     }
     for (const name of names) {
-      const id = name.replace(/\.(mp4|webm)(\.part)?$/, '');
+      const id = name.replace(/\.cam\.json$/, '').replace(/\.(mp4|webm)(\.part)?$/, '');
       const clip = this.library.get(id);
       const pending = !!clip && !clip.deletedAt && !!clip.upload && ['queued', 'paused', 'uploading'].includes(clip.upload.state);
       if (!pending || name.endsWith('.part')) rmSync(join(this.uploadCacheDir(), name), { force: true });
@@ -1576,6 +1630,7 @@ class KineApp {
           sessionId: game ? this.sessionId : 'no-game-' + this.sessionId,
           upload: null,
           audioTracks: result.audioTracks,
+          camera: this.clipCameraFor(result.camera),
         };
         this.library.add(clip);
         const seconds = Math.round(result.durationSeconds);
@@ -1655,11 +1710,14 @@ class KineApp {
     }
     // Kamera v klipech: jiná kamera / poloha / velikost / tvar / zrcadlo se projeví hned (bez restartu
     // zásobníku); zapnutí a vypnutí znamená jiný obraz pro recorder = nový start (jako změna kvality).
-    const clipCameraKeys: (keyof Settings)[] = ['clipCameraDevice', 'clipCameraPosition', 'clipCameraSize', 'clipCameraShape', 'clipCameraMirror'];
-    if (s.clipCamera && prev.clipCamera && clipCameraKeys.some((k) => s[k] !== prev[k])) this.capture.setClipCamera(this.clipCameraScene(s));
+    const clipCameraKeys: (keyof Settings)[] = ['clipCameraDevice', 'clipCameraPosition', 'clipCameraSize', 'clipCameraShape', 'clipCameraMirror', 'clipCameraScale', 'clipCameraX', 'clipCameraY'];
+    if (s.clipCamera && prev.clipCamera && !s.clipCameraSeparate && clipCameraKeys.some((k) => s[k] !== prev[k])) this.capture.setClipCamera(this.clipCameraScene(s));
     if (!s.clipCamera && prev.clipCamera) this.dismissNotice('capture:camera');
-    const captureKeys: (keyof Settings)[] = ['maxHeight', 'fps', 'codec', 'videoMbps', 'systemAudio', 'systemAudioDevice', 'microphone', 'microphoneDevice', 'systemGain', 'micGain', 'displayId', 'clipCamera'];
-    if (captureKeys.some((k) => s[k] !== prev[k])) {
+    // Kamera zvlášť (vlastní stopa) místo kamery v obraze = jiné recordery - nový start zásobníku.
+    const captureKeys: (keyof Settings)[] = ['maxHeight', 'fps', 'codec', 'videoMbps', 'systemAudio', 'systemAudioDevice', 'microphone', 'microphoneDevice', 'systemGain', 'micGain', 'displayId', 'clipCamera', 'clipCameraSeparate'];
+    // Kamera zvlášť nemá povel za běhu - jiná kamera (zařízení) = taky nový start.
+    const separateDeviceChanged = s.clipCamera && s.clipCameraSeparate && s.clipCameraDevice !== prev.clipCameraDevice;
+    if (captureKeys.some((k) => s[k] !== prev[k]) || separateDeviceChanged) {
       // Změna kvality = nový start zásobníku; rozjetá nahrávka se nejdřív uloží.
       void (async () => {
         // Rozjetá nahrávka se uloží; ta, co se právě ukládá, se nejdřív doukládá (jinak by přišla o zvuk).
@@ -1756,6 +1814,8 @@ class KineApp {
     if (Date.now() - this.updateRequiredAt < 60 * 60 * 1000) return;
     this.updateRequiredAt = Date.now();
     this.addNotice({ id: 'update-required', text: this.t('updateRequiredNotice'), kind: 'error', tab: 'about' });
+    // Kine tuhle verzi odmítá: aktualizace se stáhne a nainstaluje sama, hned jak je klid (updater.ts).
+    requireUpdateSoon();
     // Za chvíli: při startu se tohle dozví dřív, než je kontrola aktualizací připravená.
     if (!process.env.KINE_TEST) setTimeout(() => void checkForUpdates().catch(() => undefined), 20_000);
   }
@@ -1990,7 +2050,7 @@ class KineApp {
 
   /** Kamera v klipech podle nastavení (pro snímací stránku). */
   private clipCameraScene(s: Settings): SceneCamera | null {
-    return s.clipCamera ? { deviceId: s.clipCameraDevice, position: s.clipCameraPosition, size: s.clipCameraSize, shape: s.clipCameraShape, mirror: s.clipCameraMirror } : null;
+    return s.clipCamera ? { deviceId: s.clipCameraDevice, position: s.clipCameraPosition, size: s.clipCameraSize, shape: s.clipCameraShape, mirror: s.clipCameraMirror, width: s.clipCameraScale, x: s.clipCameraX, y: s.clipCameraY } : null;
   }
 
   statusLine(): string {
@@ -2611,6 +2671,9 @@ class KineApp {
       audioTracks: clip.audioTracks,
       speed,
       overlay: null as { file: string; position: TextPosition } | null,
+      overlays: [] as OverlayItem[],
+      // Kamera zvlášť se do upraveného klipu zapeče (tak, jak leží v přehrávači).
+      camera: this.cameraBakeFor(clip),
     };
     if (!Number.isFinite(options.end)) throw new Error('unknown length');
     // Výřez na výšku je jiný formát - vždycky jako nový klip vedle původního.
@@ -2631,6 +2694,36 @@ class KineApp {
       writeFileSync(file, png);
       options.overlay = { file, position };
     }
+    // Překryvy (text / obrázek / GIF kdekoli v obraze): text jako PNG z okna do dočasného
+    // souboru, obrázky a GIFy jen ty, které okno vybralo dialogem (žádná cizí cesta).
+    const tempFiles: string[] = options.overlay ? [options.overlay.file] : [];
+    const rawOverlays = Array.isArray(opts.overlays) ? opts.overlays.slice(0, OVERLAY_MAX) : [];
+    const prepared: OverlayItem[] = [];
+    for (const item of rawOverlays) {
+      if (!item || typeof item !== 'object') continue;
+      if (item.kind === 'text') {
+        if (!item.png) continue;
+        const png = item.png instanceof Uint8Array ? item.png : new Uint8Array(item.png as ArrayBuffer);
+        const isPng = png.length > 8 && png[0] === 0x89 && png[1] === 0x50 && png[2] === 0x4e && png[3] === 0x47;
+        if (!isPng || png.length > 10 * 1024 * 1024) continue;
+        const file = join(app.getPath('temp'), `kine-text-${randomUUID()}.png`);
+        writeFileSync(file, png);
+        tempFiles.push(file);
+        prepared.push({ kind: 'image', file, cx: item.cx, cy: item.cy, w: item.w, from: item.from ?? null, to: item.to ?? null });
+      } else if (typeof item.file === 'string' && this.overlayFiles.has(item.file) && existsSync(item.file)) {
+        prepared.push({ kind: item.kind === 'gif' ? 'gif' : 'image', file: item.file, cx: item.cx, cy: item.cy, w: item.w, from: item.from ?? null, to: item.to ?? null });
+      }
+    }
+    options.overlays = normalizeOverlays(prepared);
+    const cleanupTemp = () => {
+      for (const f of tempFiles) {
+        try {
+          unlinkSync(f);
+        } catch {
+          // dočasný soubor už není
+        }
+      }
+    };
     try {
       if (opts.mode === 'replace') {
         const tmp = join(dir, `${stem}.upravuje-se${ext}`);
@@ -2666,6 +2759,8 @@ class KineApp {
             // starý náhled už není
           }
         }
+        // Kamera je teď v obraze - soubor kamery vedle klipu už není potřeba.
+        if (options.camera) this.dropCameraFile(clip);
         const updated = this.library.update(id, {
           thumb: thumbOk ? thumb : clip.thumb,
           durationSeconds: result.durationSeconds,
@@ -2674,9 +2769,11 @@ class KineApp {
           height: result.height,
           audioTracks: result.audioTracks ?? undefined,
           markers,
+          camera: options.camera ? null : clip.camera,
           // Obsah je jiný než ten na Kine - nahrání začíná znovu.
           upload: null,
         });
+        this.releaseUploadFile(id);
         log(`klip zkrácen (přepsán): ${clip.file} (${result.durationSeconds.toFixed(1)} s)`);
         return updated!;
       }
@@ -2702,6 +2799,8 @@ class KineApp {
         height: result.height,
         audioTracks: result.audioTracks ?? undefined,
         markers,
+        // Kamera zvlášť je v novém klipu zapečená (původní klip ji má dál zvlášť).
+        camera: undefined,
         upload: null,
         uploadOptions: undefined,
       };
@@ -2709,14 +2808,73 @@ class KineApp {
       log(`klip zkrácen (nový): ${out} (${result.durationSeconds.toFixed(1)} s)`);
       return newClip;
     } finally {
-      if (options.overlay) {
-        try {
-          unlinkSync(options.overlay.file);
-        } catch {
-          // dočasný soubor už není
-        }
-      }
+      cleanupTemp();
     }
+  }
+
+  /** Kamera zvlášť k zapečení (editPlan.CameraBake), když ji klip má a soubor existuje. */
+  private cameraBakeFor(clip: Clip): CameraBake | null {
+    const cam = clip.camera;
+    if (!cam || !existsSync(cam.file)) return null;
+    return { file: cam.file, offsetMs: cam.offsetMs, x: cam.x, y: cam.y, w: cam.w, shape: cam.shape, mirror: cam.mirror, width: cam.width, height: cam.height };
+  }
+
+  /** Soubor kamery vedle klipu smazat (kamera je už zapečená v obraze). */
+  private dropCameraFile(clip: Clip): void {
+    if (!clip.camera) return;
+    try {
+      unlinkSync(clip.camera.file);
+    } catch {
+      // soubor už není
+    }
+  }
+
+  /**
+   * Kamera nahraná zvlášť ke klipu: soubor od snímání + poloha / velikost / tvar
+   * podle nastavení v tu chvíli (dál si ji hráč posouvá v přehrávači).
+   */
+  private clipCameraFor(camera: { file: string; offsetMs: number; width: number | null; height: number | null } | null | undefined): ClipCamera | undefined {
+    if (!camera) return undefined;
+    const s = this.settings.get();
+    const r = cameraRect(1000, 1000 * 9 / 16, camera.width ?? 1280, camera.height ?? 720, { position: s.clipCameraPosition, size: s.clipCameraSize, shape: s.clipCameraShape, width: s.clipCameraScale, x: s.clipCameraX, y: s.clipCameraY });
+    return { file: camera.file, offsetMs: camera.offsetMs, x: r.x / 1000, y: r.y / (1000 * 9 / 16), w: r.w / 1000, shape: s.clipCameraShape, mirror: s.clipCameraMirror, width: camera.width, height: camera.height };
+  }
+
+  /** Přehrávač: kamera zvlášť posunutá / zvětšená (i po uložení klipu) - uloží se ke klipu. */
+  setClipCameraLayout(id: string, layout: { x: number; y: number; w: number }): Clip | null {
+    const clip = this.library.get(id);
+    if (!clip?.camera) return clip ?? null;
+    const f = (v: unknown, fallback: number, min = 0, max = 1) => (Number.isFinite(Number(v)) ? Math.max(min, Math.min(max, Number(v))) : fallback);
+    const camera: ClipCamera = { ...clip.camera, x: f(layout?.x, clip.camera.x), y: f(layout?.y, clip.camera.y), w: f(layout?.w, clip.camera.w, CAMERA_WIDTH_MIN, CAMERA_WIDTH_MAX) };
+    // Jiné složení = jiná kopie k nahrání (bakedFileFor ji podle polohy udělá znovu). Rozjeté nahrávání
+    // svůj soubor dojede s původní polohou - nemazat mu ho pod rukama.
+    const state = clip.upload?.state;
+    if (state !== 'uploading' && state !== 'queued' && state !== 'paused') this.releaseUploadFile(id);
+    return this.library.update(id, { camera }) ?? null;
+  }
+
+  /**
+   * Obrázek nebo GIF do klipu (překryv v úpravách): dialog, jen obrázky. Cesta se
+   * zapamatuje - trimClip pak pustí jen soubory vybrané tudy, ne libovolnou cestu z okna.
+   */
+  async pickOverlayImage(): Promise<{ file: string; kind: 'image' | 'gif'; name: string; url: string } | null> {
+    const result = await dialog.showOpenDialog(this.settingsWindow ?? undefined!, {
+      properties: ['openFile'],
+      filters: [{ name: this.t('overlayPickFilter'), extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    const file = result.filePaths[0];
+    let size = 0;
+    try {
+      size = statSync(file).size;
+    } catch {
+      return null;
+    }
+    // Překryv jde do ffmpeg jako další vstup - obří soubor by úpravu zbytečně protáhl.
+    if (size <= 0 || size > 60 * 1024 * 1024) throw new Error('too-large');
+    const kind = /\.gif$/i.test(file) ? 'gif' : 'image';
+    this.overlayFiles.add(file);
+    return { file, kind, name: basename(file), url: pathToFileURL(file).href };
   }
 
   /**
@@ -2744,16 +2902,19 @@ class KineApp {
       log(`klip poslán na Discord: ${clip.title}`);
       return;
     }
-    await this.shareFileToDiscord(clip.file, clip.title);
+    // Kamera zvlášť / víc stop: na Discord jde kopie tak, jak by šla na Kine (kamera v obraze, smíchaný zvuk).
+    const baked = await this.bakedFileFor(clip);
+    await this.shareFileToDiscord(baked.file, clip.title, baked.file !== clip.file);
   }
 
   /** Soubor (klip do limitu, GIF) přímo do kanálu na Discordu přes webhook. */
-  async shareFileToDiscord(file: string, title: string): Promise<void> {
+  async shareFileToDiscord(file: string, title: string, fromCache = false): Promise<void> {
     const webhook = this.settings.get().discordWebhook;
     if (!webhook) throw new Error('no webhook');
     const dir = this.settings.clipsDir();
-    // Jen soubory ze složky s klipy (okno nesmí poslat cokoli z disku).
-    if (!file.startsWith(dir) || !existsSync(file)) throw new Error('not found');
+    // Jen soubory ze složky s klipy (okno nesmí poslat cokoli z disku) - nebo kopie z upload-cache (bakedFileFor).
+    const allowed = file.startsWith(dir) || (fromCache && file.startsWith(this.uploadCacheDir()));
+    if (!allowed || !existsSync(file)) throw new Error('not found');
     const size = statSync(file).size;
     if (size > DISCORD_FILE_MAX_BYTES) throw new Error('too-large');
     const form = new FormData();
@@ -2788,11 +2949,10 @@ class KineApp {
     let out = join(dir, `${stem}.mp4`);
     for (let n = 2; existsSync(out); n++) out = join(dir, `${stem} ${n}.mp4`);
     const progress = (percent: number) => this.broadcast('clips:trimProgress', { id: 'merge', percent });
-    const result = await mergeClips(
-      clips.map((c) => ({ file: c.file, durationSeconds: c.durationSeconds })),
-      out,
-      progress
-    );
+    // Klipy s kamerou zvlášť jdou do sestřihu s kamerou v obraze.
+    const inputs: { file: string; durationSeconds: number }[] = [];
+    for (const c of clips) inputs.push({ file: (await this.bakedFileFor(c).catch(() => ({ file: c.file }))).file, durationSeconds: c.durationSeconds });
+    const result = await mergeClips(inputs, out, progress);
     const thumbsDir = join(app.getPath('userData'), 'thumbs');
     mkdirSync(thumbsDir, { recursive: true });
     const thumb = join(thumbsDir, `${basename(out, '.mp4')}.jpg`);
@@ -2834,7 +2994,8 @@ class KineApp {
     let out = join(dir, `${stem}.gif`);
     for (let n = 2; existsSync(out); n++) out = join(dir, `${stem} ${n}.gif`);
     const progress = (percent: number) => this.broadcast('clips:trimProgress', { id, percent });
-    const result = await makeGif(clip.file, out, { start, end }, progress);
+    const source = clip.camera ? (await this.bakedFileFor(clip).catch(() => ({ file: clip.file }))).file : clip.file;
+    const result = await makeGif(source, out, { start, end }, progress);
     log(`GIF z klipu: ${out} (${result.lengthSeconds.toFixed(1)} s, ${Math.round(result.sizeBytes / 1024)} kB)`);
     return result;
   }
@@ -2879,8 +3040,8 @@ class KineApp {
       const win = BrowserWindow.fromWebContents(e.sender);
       return !!win && win.webContents.getURL().endsWith('capture.html');
     };
-    ipcMain.on('capture:chunk', (e, generation: number, data: ArrayBuffer, kind: 'av' | 'mic' = 'av') => {
-      if (isCaptureSender(e)) this.capture.handleChunk(generation, data, kind === 'mic' ? 'mic' : 'av');
+    ipcMain.on('capture:chunk', (e, generation: number, data: ArrayBuffer, kind: 'av' | 'mic' | 'cam' = 'av') => {
+      if (isCaptureSender(e)) this.capture.handleChunk(generation, data, kind === 'mic' ? 'mic' : kind === 'cam' ? 'cam' : 'av');
     });
     ipcMain.on('capture:liveChunk', (e, generation: number, data: ArrayBuffer) => {
       if (isCaptureSender(e)) this.live.handleChunk(generation, data);
@@ -2987,6 +3148,8 @@ class KineApp {
     });
     ipcMain.handle('clips:clipNow', () => this.onClipHotkey());
     ipcMain.handle('clips:trim', (_e, id: string, opts: TrimIpcRequest) => this.trimClip(id, opts));
+    ipcMain.handle('clips:pickOverlayImage', () => this.pickOverlayImage());
+    ipcMain.handle('clips:setCamera', (_e, id: unknown, layout: unknown) => (typeof id === 'string' ? this.setClipCameraLayout(id, (layout ?? {}) as { x: number; y: number; w: number }) : null));
     ipcMain.handle('app:copy', (_e, text: string) => clipboard.writeText(String(text ?? '')));
     ipcMain.handle('clips:discord', (_e, id: string) => this.shareToDiscord(id));
     ipcMain.handle('clips:discordFile', (_e, file: string, title: string) => this.shareFileToDiscord(String(file ?? ''), String(title ?? '')));
@@ -3186,6 +3349,19 @@ class KineApp {
   }
 
   private quitting = false;
+
+  /**
+   * Je klid na samočinnou instalaci aktualizace? Ne během hry, vysílání,
+   * nahrávání zápasu ani ukládání, a ne když má hráč zrovna okno appky
+   * v ruce (instalace appku zavře a znovu spustí).
+   */
+  canAutoInstall(): boolean {
+    if (this.quitting || process.env.KINE_TEST) return false;
+    if (this.games.current() || this.live.active() || this.capture.recordingInfo() || this.finishingRecording) return false;
+    const win = this.settingsWindow;
+    if (win && !win.isDestroyed() && win.isVisible() && win.isFocused()) return false;
+    return true;
+  }
 
   /**
    * "Aktualizovat" (O appce, lišta): stažená verze se nainstaluje hned a

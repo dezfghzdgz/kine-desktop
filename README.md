@@ -878,6 +878,64 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   `playerFullscreenOk` přes tlačítko v liště, `settingsSectionsOk` (Záznam
   pět oddílů, Appka vzhled / obecné / o appce, staré cíle).
 
+## Novinky 0.12.0
+
+- **Překryvy v úpravách klipu**: text, vlastní obrázek (PNG / JPG / WebP / BMP)
+  nebo GIF kamkoli do obrazu - až 8 najednou; tažením se posouvají, rohem
+  zvětšují, každý může být vidět celou dobu nebo jen od - do. Text se kreslí
+  v okně (písmo Inter, styly) do PNG, obrázky a GIFy pokládá ffmpeg
+  (`main/editPlan.ts` - `overlayFilter`, GIF ve smyčce `-stream_loop -1`,
+  obrázek `-loop 1`, polohy jako podíly výsledného obrazu, takže sedí i u
+  výřezu na výšku). Obrázek jde jen z dialogu appky (ne libovolná cesta
+  z okna), nejvýš 60 MB. Panel úprav je přeskládaný do rámečků Výstup
+  (formát, výřez, rychlost) a Překryvy.
+- **Kamera v klipech podle sebe**: velikost posuvníkem 8-60 % šířky
+  (`clipCameraScale`), kamera se v náhledu nastavení dá přetáhnout kamkoli
+  (`clipCameraX` / `clipCameraY`; „Zpátky do rohu" vrátí roh). Stejná čísla
+  bere nahrávání (`shared/liveLayout.ts` - `cameraRect` s vlastní šířkou a
+  polohou), náhled, přehrávač i zapečení.
+- **Kamera zvlášť** (Záznam -> Kamera -> „Nahrávat kameru zvlášť"): místo
+  skládání do obrazu se kamera nahrává třetím recorderem (jen obraz, VP9/VP8)
+  do vlastních kousků (`c%05d.mkv`, `cam.csv`) a při uložení klipu se slepí
+  bez překódování do `<klip>.camera.webm` vedle klipu (`CaptureBuffer.muxCamera`
+  - stejné zarovnání podle hodin jako mikrofon, `planClip`; událost
+  `camera-started` říká, od kdy kamera jede, když naběhla později než obraz).
+  Klip má v knihovně `camera` (soubor, offset, poloha, šířka, tvar, zrcadlo).
+  V přehrávači je kamera druhé video přes obraz (`player-cam`), hraje v rytmu
+  s klipem (čas, rychlost, hraje / stojí), tažením se posouvá a rohem zvětšuje
+  KDYKOLI - i u klipů z minulého týdne; poloha se uloží ke klipu
+  (`clips:setCamera`). Do obrazu se kamera zapéká až tam, kde musí být jeden
+  soubor: kopie k nahrání na Kine, Discord, sestřih, GIF (`bakedFileFor` -
+  překódování, kopie v `upload-cache` platí do další změny) a úprava klipu
+  (nový i přepsaný klip má kameru v obraze a soubor kamery už ne). Filtr
+  `cameraChain`: čas (offset, začátek výběru, rychlost), zrcadlo, výřez pro
+  kruh, velikost, tvar maskou z jednoho snímku (`color` + `geq` + `loop` +
+  `alphamerge` - výraz se počítá jednou, ne pro každý snímek). Koš bere
+  soubor kamery s klipem (a zpátky). Vypnuto (výchozí) = kamera v obraze hned
+  jako dřív.
+- **Aktualizace samy** (Obecné -> „Aktualizace samy", výchozí zapnuto):
+  stažená novější verze se nainstaluje sama nejpozději 14 dní od chvíle, kdy
+  ji appka poprvé viděla (`update-seen.json`, `autoInstallDue`), a to jen v
+  klidné chvíli - bez hry, nahrávání, vysílání, ukládání a bez otevřeného
+  nastavení; kontrola každou půlhodinu a po konci hry. Když Kine verzi odmítne
+  (426, zastaralá), instaluje se hned, jakmile je stažená. Instalace je ta
+  samá viditelná jako dřív (okno instalátoru, appka se pak spustí znovu) -
+  žádná tichá při vypínání (ta jednou appku smazala). Vypnuto = jen upozornění
+  jako dřív.
+- **Vydání**: zabalená appka se staví zmenšená (esbuild `minify` +
+  `keepNames`, `KINE_RELEASE=1` v `release.yml`) - menší instalátor a kód
+  bez komentářů; starší vydání na GitHubu se po nahrání nového smažou (ke
+  stažení je jen poslední; značky zůstávají). Co kdo smí (Klipy Plus, reklamy,
+  limity) rozhoduje Kine na serveru a nejstarší povolenou verzi hlídá
+  `minDesktopVersion` - to je skutečná pojistka, zmenšení kódu jen ztěžuje
+  čtení.
+- Testy: `tests/editPlan.test.mjs` (překryvy a kamera - argumenty i opravdový
+  ffmpeg), `tests/liveLayout.test.mjs` (vlastní šířka a poloha),
+  `tests/clips.test.mjs` (koš se souborem kamery), `tests/settings.test.mjs`,
+  `tests/updater.test.mjs` (14 dní, soubor „viděno"); e2e `clipCameraSeparateOk`
+  (kamera v souboru vedle klipu, zapečení vpravo dole / po přesunu vlevo
+  nahoře, úprava, přehrávač s tažením, koš) a `overlayUiOk`.
+
 ## Novinky 0.11.1
 
 - **Zrušit / Znovu u nahrávání** (karta klipu, hlavička přehrávače): rozjeté,

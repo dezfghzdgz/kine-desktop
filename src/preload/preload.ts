@@ -56,10 +56,15 @@ const kine = {
       vertical?: 'left' | 'center' | 'right' | 'blur';
       audio?: 'mix' | 'game' | 'mic' | 'none';
       speed?: number;
+      overlays?: { kind: 'text' | 'image' | 'gif'; png?: Uint8Array; file?: string; cx: number; cy: number; w: number; from?: number | null; to?: number | null }[] | null;
       text?: { png: Uint8Array; position: 'top' | 'center' | 'bottom' } | null;
     }
   ): Promise<Clip> => ipcRenderer.invoke('clips:trim', id, opts),
   /** Text do schránky (odkaz na klip). */
+  /** Obrázek / GIF do klipu (překryv v úpravách) - dialog; null = zrušeno. */
+  pickOverlayImage: (): Promise<{ file: string; kind: 'image' | 'gif'; name: string; url: string } | null> => ipcRenderer.invoke('clips:pickOverlayImage'),
+  /** Kamera zvlášť (Clip.camera) posunutá / zvětšená v přehrávači: levý horní roh a šířka jako podíly obrazu. */
+  setClipCamera: (id: string, layout: { x: number; y: number; w: number }): Promise<Clip | null> => ipcRenderer.invoke('clips:setCamera', id, layout),
   copyText: (text: string): Promise<void> => ipcRenderer.invoke('app:copy', text),
   /** Klip na Discord (webhook z nastavení): nahraný jako odkaz, jinak jako soubor do 10 MB. */
   shareToDiscord: (id: string): Promise<void> => ipcRenderer.invoke('clips:discord', id),
@@ -188,7 +193,7 @@ const kineCapture = {
   platform: process.platform,
   onCommand: (cb: (c: CaptureCommand) => void) => on<CaptureCommand>('capture:command', cb),
   /** Kousek proudu: 'av' (obraz + zvuk hry, výchozí) nebo 'mic' (samostatný proud mikrofonu). */
-  chunk: (generation: number, data: ArrayBuffer, kind: 'av' | 'mic' = 'av') => ipcRenderer.send('capture:chunk', generation, data, kind),
+  chunk: (generation: number, data: ArrayBuffer, kind: 'av' | 'mic' | 'cam' = 'av') => ipcRenderer.send('capture:chunk', generation, data, kind),
   /** Kousek proudu živého vysílání (generace vysílání). */
   liveChunk: (generation: number, data: ArrayBuffer) => ipcRenderer.send('capture:liveChunk', generation, data),
   event: (event: CaptureEvent) => ipcRenderer.send('capture:event', event),

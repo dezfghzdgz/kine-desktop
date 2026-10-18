@@ -70,6 +70,10 @@ export const DEFAULT_SETTINGS: Settings = {
   clipCameraSize: 'small',
   clipCameraShape: 'rounded',
   clipCameraMirror: true,
+  clipCameraScale: null,
+  clipCameraX: null,
+  clipCameraY: null,
+  clipCameraSeparate: false,
   // Mikrofon od začátku - hráč nemá co nastavovat, klip má i jeho hlas.
   microphone: true,
   displayId: '',
@@ -82,6 +86,7 @@ export const DEFAULT_SETTINGS: Settings = {
   startWithSystem: true,
   desktopShortcut: true,
   toast: true,
+  autoUpdate: true,
   clipsDir: '',
   siteUrl: 'https://kine-lac.vercel.app',
   onboarded: false,
@@ -118,6 +123,14 @@ function gain(value: unknown, fallback: number): number {
   const n = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.round(Math.max(0, Math.min(2, n)) * 100) / 100;
+}
+
+/** Číslo v rozmezí, nebo null (= výchozí chování); nesmysl = null. */
+function fractionOrNull(value: unknown, min: number, max: number): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(min, Math.min(max, n));
 }
 
 function bool(value: unknown, fallback: boolean): boolean {
@@ -217,6 +230,10 @@ export function sanitizeSettings(input: unknown): Settings {
     clipCameraSize: oneOf(raw.clipCameraSize, LIVE_CAMERA_SIZES, d.clipCameraSize),
     clipCameraShape: oneOf(raw.clipCameraShape, LIVE_CAMERA_SHAPES, d.clipCameraShape),
     clipCameraMirror: bool(raw.clipCameraMirror, d.clipCameraMirror),
+    clipCameraScale: fractionOrNull(raw.clipCameraScale, 0.08, 0.6),
+    clipCameraX: fractionOrNull(raw.clipCameraX, 0, 1),
+    clipCameraY: fractionOrNull(raw.clipCameraY, 0, 1),
+    clipCameraSeparate: bool(raw.clipCameraSeparate, d.clipCameraSeparate),
     microphone: upgrade ? true : bool(raw.microphone, d.microphone),
     displayId: text(raw.displayId, d.displayId, 100),
     detection: oneOf(raw.detection, ['games', 'always', 'manual'] as const, d.detection),
@@ -228,6 +245,7 @@ export function sanitizeSettings(input: unknown): Settings {
     startWithSystem: bool(raw.startWithSystem, d.startWithSystem),
     desktopShortcut: bool(raw.desktopShortcut, d.desktopShortcut),
     toast: bool(raw.toast, d.toast),
+    autoUpdate: bool(raw.autoUpdate, d.autoUpdate),
     clipsDir: text(raw.clipsDir, d.clipsDir, 1000),
     siteUrl,
     onboarded: bool(raw.onboarded, d.onboarded),

@@ -70,3 +70,25 @@ test('koš: vrácení nepřepíše soubor se stejným názvem; druhé smazání 
   assert.equal(lib.trash().length, 0);
   assert.equal(lib.listAll().length, 0);
 });
+
+test('koš: soubor kamery zvlášť jde do koše s klipem, zpátky i nadobro', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kine-clips-'));
+  const lib = new ClipLibrary(dir);
+  lib.load();
+  const camFile = join(dir, 'c.camera.webm');
+  writeFileSync(camFile, 'cam');
+  lib.add(clip(dir, 'c.mp4', { camera: { file: camFile, offsetMs: 120, x: 0.7, y: 0.6, w: 0.25, shape: 'circle', mirror: true, width: 1280, height: 720 } }));
+  lib.remove('c.mp4');
+  const trashed = lib.get('c.mp4');
+  assert.equal(trashed.camera.file, join(dir, '.trash', 'c.camera.webm'));
+  assert.ok(existsSync(trashed.camera.file));
+  assert.ok(!existsSync(camFile));
+  assert.equal(trashed.camera.offsetMs, 120, 'ostatní údaje kamery zůstávají');
+  lib.restore('c.mp4');
+  assert.equal(lib.get('c.mp4').camera.file, camFile);
+  assert.ok(existsSync(camFile));
+  lib.remove('c.mp4');
+  lib.remove('c.mp4');
+  assert.equal(lib.get('c.mp4') ?? null, null);
+  assert.ok(!existsSync(join(dir, '.trash', 'c.camera.webm')), 'nadobro = i soubor kamery pryč');
+});

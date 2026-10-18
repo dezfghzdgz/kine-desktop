@@ -24,18 +24,29 @@ export type CameraRect = {
   radius: number;
 };
 
+/** Vlastní šířka kamery (podíl šířky obrazu) jde od 8 % do 60 %. */
+export const CAMERA_WIDTH_MIN = 0.08;
+export const CAMERA_WIDTH_MAX = 0.6;
+
+/** Šířka kamery jako podíl obrazu: vlastní (posuvník), jinak podle velikosti. */
+export function cameraWidthFraction(cam: { size: LiveCameraSize; width?: number | null }): number {
+  const custom = cam.width;
+  if (typeof custom === 'number' && Number.isFinite(custom)) return Math.max(CAMERA_WIDTH_MIN, Math.min(CAMERA_WIDTH_MAX, custom));
+  return CAMERA_WIDTH[cam.size] ?? CAMERA_WIDTH.medium;
+}
+
 export function cameraRect(
   frameW: number,
   frameH: number,
   camW: number,
   camH: number,
-  cam: { position: LiveCameraPosition; size: LiveCameraSize; shape: LiveCameraShape }
+  cam: { position: LiveCameraPosition; size: LiveCameraSize; shape: LiveCameraShape; width?: number | null; x?: number | null; y?: number | null }
 ): CameraRect {
   const W = Math.max(2, frameW);
   const H = Math.max(2, frameH);
   const cw = camW > 0 ? camW : 1280;
   const ch = camH > 0 ? camH : 720;
-  let w = Math.round(W * (CAMERA_WIDTH[cam.size] ?? CAMERA_WIDTH.medium));
+  let w = Math.round(W * cameraWidthFraction(cam));
   let sx = 0;
   let sy = 0;
   let sw = cw;
@@ -59,8 +70,10 @@ export function cameraRect(
     h = maxH;
   }
   const margin = Math.round(Math.min(W, H) * 0.03);
-  const x = cam.position.endsWith('left') ? margin : W - w - margin;
-  const y = cam.position.startsWith('top') ? margin : H - h - margin;
+  // Vlastní poloha (hráč kameru přetáhl): levý horní roh jako podíl obrazu, drží se uvnitř obrazu.
+  const custom = typeof cam.x === 'number' && Number.isFinite(cam.x) && typeof cam.y === 'number' && Number.isFinite(cam.y);
+  const x = custom ? Math.round(Math.max(0, Math.min(W - w, cam.x! * W))) : cam.position.endsWith('left') ? margin : W - w - margin;
+  const y = custom ? Math.round(Math.max(0, Math.min(H - h, cam.y! * H))) : cam.position.startsWith('top') ? margin : H - h - margin;
   const radius = cam.shape === 'circle' ? w / 2 : cam.shape === 'rounded' ? Math.round(Math.min(w, h) * 0.12) : 0;
   return { x, y, w, h, sx, sy, sw, sh, radius };
 }

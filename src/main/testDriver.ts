@@ -436,14 +436,23 @@ export async function runTestDriver(kine: {
           `(() => { const b = [...document.querySelectorAll('.trim-speed button.seg')].find((x) => x.textContent.trim() === '2×'); if (b) b.click(); return !!b && b.classList.contains('active'); })()`
         );
         const rate: number = await win.webContents.executeJavaScript(`document.querySelector('.overlay video').playbackRate`);
+        // Překryvy: "+ Text" přidá text (dole uprostřed), pak pole a styl.
+        await win.webContents.executeJavaScript(`(() => { const b = document.querySelector('.trim-add-text'); if (b) b.click(); return !!b; })()`);
+        await sleep(200);
         await win.webContents.executeJavaScript(
           `(() => { const i = document.querySelector('input.trim-text'); i.value = 'E2E TEXT'; i.dispatchEvent(new Event('input', { bubbles: true })); const s = document.querySelector('select.trim-text-style'); s.value = 'yellow'; s.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`
         );
         let preview = false;
         for (let i = 0; i < 20 && !preview; i++) {
           await sleep(200);
-          preview = await win.webContents.executeJavaScript(`(() => { const c = document.querySelector('.text-preview:not(.hidden) canvas'); return !!c && c.getBoundingClientRect().width > 20; })()`);
+          preview = await win.webContents.executeJavaScript(`(() => { const c = document.querySelector('.overlay-layer:not(.hidden) .ov-item canvas'); return !!c && c.getBoundingClientRect().width > 20; })()`);
         }
+        // Čip překryvu, posuvník velikosti a volba "celou dobu" jsou na místě; obrázek / GIF nabídka taky.
+        const overlayUi = await win.webContents.executeJavaScript(
+          `(() => ({ chips: document.querySelectorAll('.trim-ov-chips .ov-chip').length, size: !!document.querySelector('input.trim-ov-size'), whole: !!document.querySelector('.trim-ov-time input[type=checkbox]:checked'), image: !!document.querySelector('.trim-add-image'), gif: !!document.querySelector('.trim-add-gif'), selected: !!document.querySelector('.ov-item.selected .ov-handle') }))()`
+        );
+        result.overlayUi = overlayUi;
+        result.overlayUiOk = overlayUi.chips === 1 && overlayUi.size && overlayUi.whole && overlayUi.image && overlayUi.gif && overlayUi.selected;
         const lens: string = await win.webContents.executeJavaScript(`[...document.querySelectorAll('.trim-vals b')][2]?.textContent ?? ''`);
         await shot(win, 'settings-clips-text');
         await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.trim-actions button')][0]; if (b && !b.disabled) b.click(); return !!b && !b.disabled; })()`);
@@ -2126,6 +2135,134 @@ export async function runTestDriver(kine: {
           if (kine.capture.state === 'on' && camStatus() === null) break;
         }
       }
+
+      // Kamera zvlášť (0.12.0): kamera jde do vlastního souboru "<klip>.camera.webm" vedle klipu; samotný klip ji
+      // v obraze nemá. Kopie k nahrání (bakedFileFor) ji má vpravo dole (33 % šířky, obdélník); po přesunu
+      // v přehrávači (setClipCameraLayout -> vlevo nahoře) má nová kopie kameru vlevo nahoře. Úprava (nový klip)
+      // kameru zapeče a nový klip už ji zvlášť nemá. Přehrávač ukazuje kameru jako .player-cam a tažením
+      // se poloha uloží ke klipu. Koš: soubor kamery jde do koše s klipem a zpátky.
+      try {
+        kine.settings.update({ clipCamera: true, clipCameraSeparate: true, clipCameraPosition: 'bottom-right', clipCameraScale: 0.33, clipCameraShape: 'rect', clipCameraMirror: false, clipCameraX: null, clipCameraY: null });
+        let camOn = false;
+        for (let i = 0; i < 80 && !camOn; i++) {
+          await sleep(300);
+          camOn = kine.capture.state === 'on' && camStatus()?.state === 'on';
+        }
+        await sleep(waitMs);
+        const clipC = await kine.onClipHotkey();
+        const cam = clipC?.camera ?? null;
+        const camFile = !!cam && existsSync(cam.file) && cam.file.endsWith('.camera.webm');
+        const camInfo = cam ? await probe(cam.file).catch(() => null) : null;
+        // Rozdíl dvou videí v oblasti (průměr přes snímky i pixely): kamera v obraze = velký rozdíl.
+        const regionDiff = (a: Buffer[], b: Buffer[], x0: number, y0: number, x1: number, y1: number) => {
+          const n = Math.min(a.length, b.length);
+          if (n === 0) return 0;
+          let sum = 0;
+          let count = 0;
+          for (let k = 0; k < n; k++)
+            for (let y = y0; y < y1; y++)
+              for (let x = x0; x < x1; x++) {
+                const i = (y * 64 + x) * 3;
+                for (let c = 0; c < 3; c++) sum += Math.abs(a[k][i + c] - b[k][i + c]);
+                count += 3;
+              }
+          return Math.round((sum / count) * 10) / 10;
+        };
+        const BR2 = [44, 24, 62, 34] as const;
+        const TL2 = [3, 2, 20, 12] as const;
+        const raw = clipC ? await rawFrames(clipC.file, 64, 36, 2) : [];
+        const bakedBR = clipC ? await (kine as any).bakedFileFor(clipC) : null;
+        const framesBR = bakedBR ? await rawFrames(bakedBR.file, 64, 36, 2) : [];
+        const diffBR1 = regionDiff(raw, framesBR, ...BR2);
+        const diffTL1 = regionDiff(raw, framesBR, ...TL2);
+        // Přesun vlevo nahoru (jako tažením v přehrávači) - nová kopie k nahrání.
+        const movedClip = clipC ? (kine as any).setClipCameraLayout(clipC.id, { x: 0.02, y: 0.02, w: 0.33 }) : null;
+        const bakedTL = movedClip ? await (kine as any).bakedFileFor(movedClip) : null;
+        const framesTL = bakedTL ? await rawFrames(bakedTL.file, 64, 36, 2) : [];
+        const diffTL2 = regionDiff(raw, framesTL, ...TL2);
+        const diffBR2 = regionDiff(raw, framesTL, ...BR2);
+        if (framesTL[1]) {
+          const rgba = Buffer.alloc(64 * 36 * 4);
+          for (let i = 0; i < 64 * 36; i++) {
+            rgba[i * 4] = framesTL[1][i * 3 + 2];
+            rgba[i * 4 + 1] = framesTL[1][i * 3 + 1];
+            rgba[i * 4 + 2] = framesTL[1][i * 3];
+            rgba[i * 4 + 3] = 255;
+          }
+          writeFileSync(join(outDir, 'clip-camera-separate-baked.png'), nativeImage.createFromBitmap(rgba, { width: 64, height: 36 }).resize({ width: 640, height: 360, quality: 'good' }).toPNG());
+        }
+        // Úprava: nový klip z první části - kamera zapečená vlevo nahoře, nový klip bez kamery zvlášť.
+        const edited = clipC ? await (kine as any).trimClip(clipC.id, { start: 0, end: Math.min(2, clipC.durationSeconds), mute: false, mode: 'new' }) : null;
+        const framesE = edited ? await rawFrames(edited.file, 64, 36, 2) : [];
+        const diffTLE = regionDiff(raw, framesE, ...TL2);
+        // Přehrávač: kamera jako .player-cam na místě (vlevo nahoře), tažením o kus doprava se poloha uloží.
+        kine.openSettings('clips');
+        await sleep(900);
+        const sw2 = kine.settingsWindow;
+        let playerCam: unknown = null;
+        let dragged: unknown = null;
+        let opened = false;
+        if (sw2 && !sw2.isDestroyed() && clipC) {
+          // Filtr z dřívějšího kroku (jen bez hry) by kartu schoval - všechny hry.
+          await sw2.webContents.executeJavaScript(`(() => { for (const s of document.querySelectorAll('.filters select')) { if ([...s.options].some((o) => o.value === 'all') && s.value !== 'all') { s.value = 'all'; s.dispatchEvent(new Event('change')); } } return true; })()`);
+          await sleep(500);
+          opened = await sw2.webContents.executeJavaScript(`(() => { const t = document.querySelector('.clips .clip[data-id="${clipC.id}"] .thumb'); if (t) t.click(); return !!t; })()`);
+          let ready = false;
+          for (let i = 0; i < 40 && !ready; i++) {
+            await sleep(250);
+            ready = await sw2.webContents.executeJavaScript(`(() => { const c = document.querySelector('.player-cam'); const v = c && c.querySelector('video'); return !!c && !c.classList.contains('hidden') && !!v && v.readyState >= 1 && c.getBoundingClientRect().width > 10; })()`);
+          }
+          // Poloha vůči opravdovému obrazu (prvek videa může mít po stranách černé pruhy).
+          const frameJs = `const v = document.querySelector('.player-stage .player-video'); const b = v.getBoundingClientRect(); const sc = Math.min(b.width / v.videoWidth, b.height / v.videoHeight); const fw = v.videoWidth * sc, fh = v.videoHeight * sc; const fr = { left: b.left + (b.width - fw) / 2, top: b.top + (b.height - fh) / 2, width: fw, height: fh };`;
+          playerCam = await sw2.webContents.executeJavaScript(
+            `(() => { const st = document.querySelector('.player-stage'); const c = st && st.querySelector('.player-cam'); if (!c || !st.querySelector('.player-video')) return null; ${frameJs} const cr = c.getBoundingClientRect(); return { ready: ${ready}, w: Math.round(cr.width), h: Math.round(cr.height), relX: Math.round(((cr.left - fr.left) / fr.width) * 100) / 100, relY: Math.round(((cr.top - fr.top) / fr.height) * 100) / 100, relW: Math.round((cr.width / fr.width) * 100) / 100, handle: !!c.querySelector('.player-cam-handle'), camSrc: (c.querySelector('video').currentSrc || '').includes('.camera.webm') }; })()`
+          );
+          await shot(sw2, 'player-camera-separate');
+          // Tažení o 40 % šířky obrazu doprava (události ukazatele na rámečku kamery).
+          dragged = await sw2.webContents.executeJavaScript(
+            `(() => { const c = document.querySelector('.player-cam'); if (!c || !document.querySelector('.player-stage .player-video')) return null; ${frameJs} const cr = c.getBoundingClientRect(); const x0 = cr.left + cr.width / 2, y0 = cr.top + cr.height / 2; const dx = fr.width * 0.4; const ev = (type, x, y, target) => (target || window).dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 1 })); ev('pointerdown', x0, y0, c); ev('pointermove', x0 + dx / 2, y0); ev('pointermove', x0 + dx, y0); ev('pointerup', x0 + dx, y0); return { dx: Math.round(dx) }; })()`
+          );
+          await sleep(900);
+          await sw2.webContents.executeJavaScript(`(() => { const b = document.querySelector('.player-close'); if (b) b.click(); return !!b; })()`);
+          await sleep(300);
+        }
+        const afterDrag = clipC ? kine.library.get(clipC.id)?.camera ?? null : null;
+        // Koš a zpět: soubor kamery putuje s klipem.
+        let trashOk = false;
+        if (clipC) {
+          (kine as any).library.remove(clipC.id);
+          const inTrash = kine.library.get(clipC.id);
+          const camTrashed = !!inTrash?.camera && inTrash.camera.file.includes('.trash') && existsSync(inTrash.camera.file) && !existsSync(cam!.file);
+          const restored = (kine as any).library.restore(clipC.id);
+          trashOk = camTrashed && !!restored?.camera && !restored.camera.file.includes('.trash') && existsSync(restored.camera.file);
+        }
+        const before2 = camStatus();
+        const session2 = (kine as any).capture.captureSession();
+        kine.settings.update({ clipCamera: false, clipCameraSeparate: false });
+        let off2 = false;
+        for (let i = 0; i < 80 && !off2; i++) {
+          await sleep(300);
+          off2 = kine.capture.state === 'on' && camStatus() === null && (kine as any).capture.captureSession() !== session2;
+        }
+        result.clipCameraSeparate = {
+          camOn, status: before2, clip: !!clipC, camera: cam ? { ...cam, file: basename(cam.file) } : null, camFile, camInfo: camInfo ? { duration: camInfo.durationSeconds, size: `${camInfo.width}x${camInfo.height}`, audio: camInfo.hasAudio } : null,
+          raw: raw.length, diffBR1, diffTL1, diffTL2, diffBR2, moved: movedClip?.camera ? { x: movedClip.camera.x, y: movedClip.camera.y } : null,
+          edited: edited ? { camera: edited.camera ?? null, duration: edited.durationSeconds } : null, diffTLE, opened, playerCam, dragged, afterDrag: afterDrag ? { x: afterDrag.x, y: afterDrag.y, w: afterDrag.w } : null, trashOk, off2,
+        };
+        const pc = playerCam as { ready: boolean; relX: number; relY: number; relW: number; handle: boolean; camSrc: boolean } | null;
+        result.clipCameraSeparateOk =
+          camOn && !!clipC && !!cam && camFile && !!camInfo && (camInfo.durationSeconds ?? 0) > 1 && camInfo.hasAudio === false && raw.length >= 2 &&
+          diffBR1 > 12 && diffTL1 < 6 && diffTL2 > 12 && diffBR2 < 6 && !!edited && !edited.camera && diffTLE > 12 &&
+          !!pc && pc.ready && pc.camSrc && pc.handle && pc.relX < 0.08 && pc.relY < 0.08 && pc.relW > 0.28 && pc.relW < 0.38 &&
+          !!afterDrag && afterDrag.x > 0.36 && afterDrag.x < 0.48 && Math.abs(afterDrag.y - 0.02) < 0.03 && trashOk && off2;
+      } catch (e) {
+        result.clipCameraSeparate = { error: (e as Error).stack ?? String(e) };
+        kine.settings.update({ clipCamera: false, clipCameraSeparate: false });
+        for (let i = 0; i < 60; i++) {
+          await sleep(300);
+          if (kine.capture.state === 'on' && camStatus() === null) break;
+        }
+      }
     }
 
     // Průvodce: výběr jazyka a režimu.
@@ -2144,11 +2281,11 @@ export async function runTestDriver(kine: {
       'playerNav', 'playerControlsOk', 'playerHeadOk', 'playerTracksOk', 'playerSpeedOk', 'playerMuteOk', 'clipsSort', 'performance', 'recording', 'recordHotkeyField', 'trayDot',
       'autoClipContext', 'dota2Clip', 'minecraftClip', 'rocketLeagueClip', 'rocketLeagueConfig', 'verticalBlur', 'trash', 'trashUndoOk', 'trashDoubleOk', 'thumbFrame', 'storage', 'uploadDialog', 'uploadSettings', 'audioPanel', 'portraitCardOk', 'recovery', 'crashRecoveryOk', 'errorStopRecoveryOk', 'diagnostics', 'qualityPanel',
       'colorPicker', 'brandIcon', 'brandMarkSvg', 'textSpeedOk', 'recordingMarkersOk', 'clipToastInstant', 'recordingStopOnceOk', 'updateProgressOk', 'playerFullscreenOk', 'lookOk', 'lookSizesOk', 'lookFollowOk',
-      'updateIssueOk', 'settingsSectionsOk', 'compressOk', 'uploadCancelUiOk',
+      'updateIssueOk', 'settingsSectionsOk', 'compressOk', 'uploadCancelUiOk', 'overlayUiOk',
     ];
     if (process.env.KINE_TEST_LIVE_URL) common.push('liveOk', 'liveCompatOk');
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];
-    if (process.env.KINE_TEST_FAKE_AUDIO) checks.push('fakeAudioMeter', 'fakeAudioClip', 'clipCameraOk');
+    if (process.env.KINE_TEST_FAKE_AUDIO) checks.push('fakeAudioMeter', 'fakeAudioClip', 'clipCameraOk', 'clipCameraSeparateOk');
     if (process.env.KINE_TEST_FAKE_LOOPBACK) checks.push('nativeLoopbackMeter', 'nativeLoopbackClip');
     if (process.env.KINE_TEST_FAKE_AUDIO === 'full') checks.push('multiTrackOk', 'trimAudioSelect');
     result.failed = checks.filter((k) => result[k] !== true);

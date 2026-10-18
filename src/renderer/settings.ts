@@ -13,7 +13,7 @@ import { icon, type IconName } from './icons';
 import { COMPRESS_LEVELS, compressSummary, type CompressLevel } from '../shared/compress';
 import { VIDEO_LANGS, openUploadDialog } from './uploadDialog';
 import { LIVE_BITRATES_KBPS, LIVE_QUALITIES, LIVE_THUMBNAIL_HEIGHT, LIVE_THUMBNAIL_WIDTH, cleanLiveError, coverRect, liveElapsed, liveErrorTextKey, livePresetFor, livePresetLabel, liveUploadMbps } from '../shared/live';
-import { cameraRect } from '../shared/liveLayout';
+import { CAMERA_WIDTH_MAX, CAMERA_WIDTH_MIN, cameraRect, cameraWidthFraction } from '../shared/liveLayout';
 
 /**
  * Hlavní okno: v režimu "Kine + klipy" první záložka Kine - web Kine přes
@@ -1063,7 +1063,8 @@ function cornerPicker(disabled: boolean, kind: CameraKind = 'live') {
         title: t(c.label),
         'aria-label': t(c.label),
         disabled,
-        onclick: () => update({ [key]: c.value } as Partial<Settings>),
+        // Kamera v klipech: klik na roh zruší i vlastní polohu z přetažení v náhledu.
+        onclick: () => update({ [key]: c.value, ...(kind === 'clip' ? { clipCameraX: null, clipCameraY: null } : {}) } as Partial<Settings>),
       })
     )
   );
@@ -2440,22 +2441,20 @@ function cameraPanel() {
             h(
               'div',
               { class: 'row', style: 'gap:14px;align-items:flex-start' },
-              h('div', { class: 'field' }, h('label', {}, t('liveCameraPosition')), cornerPicker(false, 'clip')),
+              h(
+                'div',
+                { class: 'field' },
+                h('label', {}, t('liveCameraPosition')),
+                cornerPicker(false, 'clip'),
+                // Kamera přetažená v náhledu jinam než do rohu: zpátky do rohu jedním klikem.
+                settings.clipCameraX !== null || settings.clipCameraY !== null
+                  ? h('button', { class: 'small quiet clip-camera-corner-reset', onclick: () => update({ clipCameraX: null, clipCameraY: null }) }, icon('undo', 13), t('clipCameraToCorner'))
+                  : h('span', { class: 'hint faint', style: 'margin:0' }, t('clipCameraDragHint'))
+              ),
               h(
                 'div',
                 { class: 'stack grow', style: 'gap:8px' },
-                h(
-                  'label',
-                  {},
-                  t('liveCameraSize'),
-                  h(
-                    'select',
-                    { class: 'clip-camera-size', onchange: (e: Event) => update({ clipCameraSize: (e.target as HTMLSelectElement).value as Settings['clipCameraSize'] }) },
-                    h('option', { value: 'small', selected: settings.clipCameraSize === 'small' }, t('liveCameraSmall')),
-                    h('option', { value: 'medium', selected: settings.clipCameraSize === 'medium' }, t('liveCameraMedium')),
-                    h('option', { value: 'large', selected: settings.clipCameraSize === 'large' }, t('liveCameraLarge'))
-                  )
-                ),
+                clipCameraSizeSlider(),
                 h(
                   'label',
                   {},
@@ -2471,6 +2470,9 @@ function cameraPanel() {
               )
             ),
             checkbox('clipCameraMirror', t('liveCameraMirror'), { help: t('liveCameraMirrorHint') }),
+            // Kamera zvlášť: vlastní soubor vedle klipu, v přehrávači jde posouvat a zvětšovat i po uložení;
+            // do obrazu se zapeče až při nahrání na Kine / sdílení / úpravě.
+            checkbox('clipCameraSeparate', t('clipCameraSeparate'), { help: t('clipCameraSeparateHint'), icon: 'film' }),
             camPreview?.error && !(running && cam?.state === 'on') ? h('p', { class: 'hint warn', style: 'margin:0' }, icon('warning', 14), ' ', cameraErrorMessage(camPreview.error)) : null
           )
         )
@@ -2478,17 +2480,86 @@ function cameraPanel() {
   );
 }
 
-/** Náhled klipu s kamerou: plocha 16:9 (hra) a kamera přesně tam, kam ji nakreslí záznam (shared/liveLayout). */
-function clipCameraPreview() {
+/** Velikost kamery v klipu: posuvník 8-60 % šířky obrazu (náhled se hýbe hned, uloží se po puštění). */
+function clipCameraSizeSlider() {
+  const value = cameraWidthFraction({ size: settings.clipCameraSize, width: settings.clipCameraScale });
+  const label = h('span', { class: 'clip-camera-size-value faint' }, `${Math.round(value * 100)} %`);
+  const input = h('input', {
+    type: 'range',
+    class: 'clip-camera-size',
+    min: String(Math.round(CAMERA_WIDTH_MIN * 100)),
+    max: String(Math.round(CAMERA_WIDTH_MAX * 100)),
+    step: '1',
+    value: String(Math.round(value * 100)),
+    'aria-label': t('liveCameraSize'),
+    oninput: (e: Event) => {
+      const pct = Number((e.target as HTMLInputElement).value);
+      label.textContent = `${pct} %`;
+      settings = { ...settings, clipCameraScale: pct / 100 };
+      placeClipCameraPreview();
+    },
+    onchange: (e: Event) => update({ clipCameraScale: Number((e.target as HTMLInputElement).value) / 100 }),
+  }) as HTMLInputElement;
+  return h('label', { class: 'clip-camera-size-row' }, h('span', { class: 'row', style: 'justify-content:space-between' }, t('liveCameraSize'), label), input);
+}
+
+/** Kamera v náhledu podle nastavení (shared/liveLayout) - stejné číslo jako při nahrávání a v přehrávači. */
+function placeClipCameraPreview() {
+  const cam = document.querySelector<HTMLElement>('.clip-camera-preview .live-preview-cam');
+  if (!cam) return;
   const W = 1280;
   const H = 720;
-  const box = h('div', { class: 'live-preview clip-camera-preview' });
-  box.append(h('div', { class: 'live-preview-game' }, h('span', {}, status.game ?? t('clipCameraPreviewGame'))));
   const track = camPreview?.stream?.getVideoTracks()[0] ?? null;
   const cs = track?.getSettings();
-  const r = cameraRect(W, H, cs?.width ?? 1280, cs?.height ?? 720, { position: settings.clipCameraPosition, size: settings.clipCameraSize, shape: settings.clipCameraShape });
+  const r = cameraRect(W, H, cs?.width ?? 1280, cs?.height ?? 720, {
+    position: settings.clipCameraPosition,
+    size: settings.clipCameraSize,
+    shape: settings.clipCameraShape,
+    width: settings.clipCameraScale,
+    x: settings.clipCameraX,
+    y: settings.clipCameraY,
+  });
   const radius = settings.clipCameraShape === 'circle' ? '50%' : `${(r.radius / r.w) * 100}% / ${(r.radius / r.h) * 100}%`;
-  const cam = h('div', { class: 'live-preview-cam', style: `left:${(r.x / W) * 100}%;top:${(r.y / H) * 100}%;width:${(r.w / W) * 100}%;height:${(r.h / H) * 100}%;border-radius:${radius}` });
+  cam.style.left = `${(r.x / W) * 100}%`;
+  cam.style.top = `${(r.y / H) * 100}%`;
+  cam.style.width = `${(r.w / W) * 100}%`;
+  cam.style.height = `${(r.h / H) * 100}%`;
+  cam.style.borderRadius = radius;
+}
+
+/**
+ * Náhled klipu s kamerou: plocha 16:9 (hra) a kamera přesně tam, kam ji nakreslí
+ * záznam (shared/liveLayout). Kameru jde v náhledu přetáhnout kamkoli (poloha se
+ * uloží jako podíl obrazu - clipCameraX / clipCameraY).
+ */
+function clipCameraPreview() {
+  const box = h('div', { class: 'live-preview clip-camera-preview' });
+  box.append(h('div', { class: 'live-preview-game' }, h('span', {}, status.game ?? t('clipCameraPreviewGame'))));
+  const cam = h('div', { class: 'live-preview-cam draggable', title: t('clipCameraDragHint') });
+  let drag: { x: number; y: number; left: number; top: number; moved: boolean } | null = null;
+  const onMove = (e: PointerEvent) => {
+    if (!drag) return;
+    const bw = box.clientWidth || 1;
+    const bh = box.clientHeight || 1;
+    const nx = drag.left + (e.clientX - drag.x) / bw;
+    const ny = drag.top + (e.clientY - drag.y) / bh;
+    if (Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) > 2) drag.moved = true;
+    settings = { ...settings, clipCameraX: Math.max(0, Math.min(1, nx)), clipCameraY: Math.max(0, Math.min(1, ny)) };
+    placeClipCameraPreview();
+  };
+  const onUp = () => {
+    const d = drag;
+    drag = null;
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    if (d?.moved) update({ clipCameraX: settings.clipCameraX, clipCameraY: settings.clipCameraY });
+  };
+  cam.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    drag = { x: e.clientX, y: e.clientY, left: cam.offsetLeft / (box.clientWidth || 1), top: cam.offsetTop / (box.clientHeight || 1), moved: false };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  });
   if (camPreview?.stream) {
     const video = h('video', { autoplay: '', muted: '', playsinline: '', class: settings.clipCameraMirror ? 'mirror' : '' }) as HTMLVideoElement;
     video.muted = true;
@@ -2499,6 +2570,8 @@ function clipCameraPreview() {
     cam.append(h('span', { class: 'faint' }, camPreview?.error ? icon('warning', 16) : '…'));
   }
   box.append(cam);
+  // Poloha až po vložení do stránky (počítá se z nastavení, ne z rozměrů - jde to i hned).
+  queueMicrotask(placeClipCameraPreview);
   return box;
 }
 
@@ -2543,6 +2616,7 @@ function generalPanel(win: boolean) {
     checkbox('startWithSystem', t('startWithSystem'), { help: t('startWithSystemHint'), icon: 'power' }),
     win ? checkbox('desktopShortcut', t('desktopShortcutSetting'), { help: t('desktopShortcutHint'), icon: 'desktop' }) : null,
     checkbox('toast', t('toastSetting'), { help: t('toastSettingHint'), icon: 'bell' }),
+    checkbox('autoUpdate', t('autoUpdateSetting'), { help: t('autoUpdateSettingHint'), icon: 'refresh' }),
     checkbox('clipSound', t('clipSoundSetting'), { help: t('clipSoundHint'), icon: 'volume' }),
     // Po spuštění appky: nahrávat hned / počkat na hru / nic, dokud to hráč nezapne.
     field(
@@ -3652,6 +3726,8 @@ function showClip(clip: Clip, edit = false) {
     onFavorite: (c, favorite) => void kine.setFavorite(c.id, favorite),
     onUpload: (c) => startUpload([clips.find((x) => x.id === c.id) ?? c]),
     onCancelUpload: (c) => void kine.cancelUpload(c.id),
+    // Kamera zvlášť přetažená v obraze - poloha se uloží ke klipu (i mimo úpravy).
+    onCameraLayout: (c, layout) => kine.setClipCamera(c.id, layout),
     edit: {
       run: (c, request) => kine.trimClip(c.id, request),
       onProgress: (cb) => kine.onTrimProgress(cb),
@@ -3660,6 +3736,8 @@ function showClip(clip: Clip, edit = false) {
       // GIF rovnou na Discord (jen když je webhook v nastavení).
       discord: settings.discordWebhook ? (file, title) => kine.shareFileToDiscord(file, title) : undefined,
       thumbnail: (c, at) => kine.setThumbnailFrame(c.id, at),
+      // Obrázek / GIF do klipu (dialog hlavního procesu).
+      pickImage: () => kine.pickOverlayImage(),
     },
   });
 }
@@ -4492,6 +4570,10 @@ function updateProgressBox() {
       ),
       updateBusy ? h('p', { class: 'hint warn-text', style: 'margin:0' }, t('aboutUpdateBusy')) : h('p', { class: 'faint', style: 'margin:0' }, t('aboutUpdateRestartHint'))
     );
+    // Aktualizace samy: do kdy se stažená verze nainstaluje bez kliknutí (Obecné -> Aktualizace se nainstalují samy).
+    if (u.autoInstallAt) {
+      box.append(h('p', { class: 'faint update-auto-at', style: 'margin:0' }, u.autoInstallAt <= Date.now() ? t('aboutUpdateAutoSoon') : t('aboutUpdateAutoAt', { date: new Date(u.autoInstallAt).toLocaleDateString(document.documentElement.lang || undefined, { day: 'numeric', month: 'long' }) })));
+    }
     // Smart App Control (Windows 11) blokuje nepodepsané soubory - i kus instalátoru. Říct to dopředu.
     if (status.smartAppControl === 'on') box.append(h('p', { class: 'hint warn-text update-sac-hint', style: 'margin:0' }, icon('warning', 14), ' ', t('aboutUpdateSacHint')));
   } else if (u.phase === 'waiting-game') {

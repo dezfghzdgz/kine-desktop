@@ -32,3 +32,35 @@ export function isNewerVersion(candidate: string | null | undefined, current: st
   }
   return false;
 }
+
+/** Za kolik dní od chvíle, kdy appka novou verzi poprvé viděla, se nainstaluje sama (když to hráč mezitím neudělal). */
+export const AUTO_INSTALL_GRACE_DAYS = 14;
+
+/**
+ * Má se stažená aktualizace nainstalovat sama?
+ *
+ *  - `forced`: Kine řekla, že tahle verze už nesmí nahrávat ani vysílat
+ *    (zastaralá) - hned, lhůta se nečeká.
+ *  - jinak až po AUTO_INSTALL_GRACE_DAYS dnech od chvíle, kdy appka novou
+ *    verzi poprvé zahlédla (`seenAt`). Do té doby jen nabízí "Aktualizovat".
+ *
+ * Bez záznamu o prvním zahlédnutí (null) se nic nevynucuje - lhůta začne
+ * běžet až od teď.
+ */
+export function autoInstallDue(seenAt: number | null, now: number, forced: boolean, graceDays = AUTO_INSTALL_GRACE_DAYS): boolean {
+  if (forced) return true;
+  if (seenAt === null || !Number.isFinite(seenAt)) return false;
+  return now - seenAt >= graceDays * 24 * 3600 * 1000;
+}
+
+/** Záznam "kdy jsem tuhle verzi poprvé viděl" (update-seen.json); jiná verze = záznam neplatí. */
+export function parseSeen(text: string | null, version: string): number | null {
+  if (!text) return null;
+  try {
+    const data = JSON.parse(text) as { version?: unknown; at?: unknown };
+    if (data?.version !== version || typeof data.at !== 'number' || !Number.isFinite(data.at)) return null;
+    return data.at;
+  } catch {
+    return null;
+  }
+}

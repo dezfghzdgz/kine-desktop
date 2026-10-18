@@ -60,6 +60,16 @@ type Generation = {
   micSeen: Set<string>;
   /** Má tahle generace mikrofonní proud? (podle 'started') */
   hasMic: boolean;
+  /** Kamera zvlášť (třetí recorder, jen obraz): vlastní segmenter, CSV a kousky. */
+  camCsv: string;
+  camFfmpeg: ChildProcessWithoutNullStreams | null;
+  camFfmpegClosed: Promise<void> | null;
+  camPending: Buffer[];
+  camSegments: Segment[];
+  camSeen: Set<string>;
+  hasCam: boolean;
+  /** Kdy se rozjel recorder kamery (ms od epochy) - může to být později než obraz; null = jako obraz. */
+  camStartWall: number | null;
   /** Má proud obrazu i zvuk hry? (podle 'started') */
   hasAudio: boolean;
   /** Zpoždění mikrofonu podle Chromia (ms) - při stavbě klipu se o tolik posune dopředu. */
@@ -88,6 +98,8 @@ export type ClipResult = {
   createdAt: Date;
   /** Zvukové stopy v souboru, v pořadí (první hraje přehrávač). */
   audioTracks: AudioTrackKind[];
+  /** Kamera nahraná zvlášť (soubor vedle klipu a kde v klipu začíná), nebo null. */
+  camera: { file: string; offsetMs: number; width: number | null; height: number | null } | null;
 };
 
 export class CaptureManager {
@@ -230,7 +242,7 @@ export class CaptureManager {
   bufferBytes(): number {
     let total = 0;
     for (const g of this.generations) {
-      for (const seg of [...g.segments, ...g.micSegments]) {
+      for (const seg of [...g.segments, ...g.micSegments, ...g.camSegments]) {
         try {
           total += statSync(seg.file).size;
         } catch {
@@ -469,6 +481,14 @@ export class CaptureManager {
       seen: new Set(),
       ended: false,
       mimeType,
+      camCsv: join(dir, 'cam.csv'),
+      camFfmpeg: null,
+      camFfmpegClosed: null,
+      camPending: [],
+      camSegments: [],
+      camSeen: new Set(),
+      camStartWall: null,
+      hasCam: false,
       micCsv: join(dir, 'mic.csv'),
       micFfmpeg: null,
       micFfmpegClosed: null,
@@ -487,8 +507,11 @@ export class CaptureManager {
   }
 
   /** Segmenter: WebM proud z roury krájí bez překódování na 2 s kousky a píše CSV seznam. */
-  private spawnSegmenter(gen: Generation, kind: 'av' | 'mic' = 'av'): void {
+  private spawnSegmenter(gen: Generation, kind: 'av' | 'mic' | 'cam' = 'av'): void {
     const mic = kind === 'mic';
+    const cam = kind === 'cam';
+    const csv = mic ? gen.micCsv : cam ? gen.camCsv : gen.csv;
+    const pattern = mic ? 'm%05d.mka' : cam ? 'c%05d.mkv' : '%05d.mkv';
     // Jen kopíruje a krájí - nižší priorita: hra dostane procesor první (roura mezitím počká).
     const child = spawnFfmpeg([
       '-loglevel', 'error',
@@ -499,17 +522,17 @@ export class CaptureManager {
       '-segment_time', String(SEGMENT_SECONDS),
       '-segment_format', 'matroska',
       '-reset_timestamps', '1',
-      '-segment_list', mic ? gen.micCsv : gen.csv,
+      '-segment_list', csv,
       '-segment_list_type', 'csv',
       '-segment_list_flags', 'live',
-      join(gen.dir, mic ? 'm%05d.mka' : '%05d.mkv'),
+      join(gen.dir, pattern),
     ], { low: true });
     let stderr = '';
     child.stderr.on('data', (d) => {
       stderr += d.toString();
       if (stderr.length > 4000) stderr = stderr.slice(-2000);
     });
-    const name = mic ? `mikrofon gen ${gen.id}` : `gen ${gen.id}`;
+    const name = mic ? `mikrofon gen ${gen.id}` : cam ? `kamera gen ${gen.id}` : `gen ${gen.id}`;
     child.stdin.on('error', (e) => log(`ffmpeg stdin (${name}): ${e.message}`));
     const closed = new Promise<void>((resolve) => {
       child.on('close', (code) => {
@@ -526,6 +549,11 @@ export class CaptureManager {
       gen.micFfmpegClosed = closed;
       for (const chunk of gen.micPending) child.stdin.write(chunk);
       gen.micPending = [];
+    } else if (cam) {
+      gen.camFfmpeg = child;
+      gen.camFfmpegClosed = closed;
+      for (const chunk of gen.camPending) child.stdin.write(chunk);
+      gen.camPending = [];
     } else {
       gen.ffmpeg = child;
       gen.ffmpegClosed = closed;
@@ -534,14 +562,24 @@ export class CaptureManager {
     }
   }
 
-  /** Kousek proudu ze snímací stránky ('av' = obraz + zvuk hry, 'mic' = mikrofon). */
-  handleChunk(generationId: number, data: ArrayBuffer | Uint8Array, kind: 'av' | 'mic' = 'av'): void {
+  /** Kousek proudu ze snímací stránky ('av' = obraz + zvuk hry, 'mic' = mikrofon, 'cam' = kamera zvlášť). */
+  handleChunk(generationId: number, data: ArrayBuffer | Uint8Array, kind: 'av' | 'mic' | 'cam' = 'av'): void {
     const gen = this.generations.find((g) => g.id === generationId);
     if (!gen || gen.ended) return;
     const buffer = Buffer.from(data instanceof Uint8Array ? data : new Uint8Array(data));
     if (kind === 'mic') {
       if (gen.micFfmpeg && !gen.micFfmpeg.stdin.destroyed) gen.micFfmpeg.stdin.write(buffer);
       else gen.micPending.push(buffer);
+      return;
+    }
+    if (kind === 'cam') {
+      // Kamera může naběhnout až po startu generace (obsazená, otevírá se) - segmenter se pustí s prvním kouskem.
+      if (!gen.hasCam) {
+        gen.hasCam = true;
+        this.spawnSegmenter(gen, 'cam');
+      }
+      if (gen.camFfmpeg && !gen.camFfmpeg.stdin.destroyed) gen.camFfmpeg.stdin.write(buffer);
+      else gen.camPending.push(buffer);
       return;
     }
     if (gen.ffmpeg && !gen.ffmpeg.stdin.destroyed) gen.ffmpeg.stdin.write(buffer);
@@ -564,6 +602,15 @@ export class CaptureManager {
       }
       return;
     }
+    if (event.type === 'camera-started') {
+      if (!gen || gen.ended) return;
+      gen.camStartWall = event.at;
+      if (!gen.hasCam) {
+        gen.hasCam = true;
+        this.spawnSegmenter(gen, 'cam');
+      }
+      return;
+    }
     if (event.type === 'started') {
       if (!gen) return;
       gen.startWall = event.at;
@@ -582,6 +629,10 @@ export class CaptureManager {
       this.writeGenerationInfo(gen);
       this.spawnSegmenter(gen);
       if (gen.hasMic) this.spawnSegmenter(gen, 'mic');
+      if (event.camera && !gen.hasCam) {
+        gen.hasCam = true;
+        this.spawnSegmenter(gen, 'cam');
+      }
       this.waiters.get(`started:${gen.id}`)?.resolve();
       return;
     }
@@ -632,7 +683,7 @@ export class CaptureManager {
       await Promise.race([closed ?? Promise.resolve(), timeout]);
       if (child.exitCode === null) child.kill();
     };
-    await Promise.all([finish(gen.ffmpeg, gen.ffmpegClosed), finish(gen.micFfmpeg, gen.micFfmpegClosed)]);
+    await Promise.all([finish(gen.ffmpeg, gen.ffmpegClosed), finish(gen.micFfmpeg, gen.micFfmpegClosed), finish(gen.camFfmpeg, gen.camFfmpegClosed)]);
     this.readCsv(gen);
   }
 
@@ -692,14 +743,30 @@ export class CaptureManager {
         gen.segments.push(toSegment(row, gen.id, gen.startWall, gen.dir, join));
       }
     }
-    if (!gen.hasMic) return;
-    const micText = this.readNewCsvText(gen.micCsv);
-    if (!micText) return;
-    for (const row of parseSegmentCsv(micText)) {
-      if (gen.micSeen.has(row.file)) continue;
-      gen.micSeen.add(row.file);
-      gen.micSegments.push(toSegment(row, gen.id, gen.startWall, gen.dir, join));
+    if (gen.hasMic) {
+      const micText = this.readNewCsvText(gen.micCsv);
+      if (micText) {
+        for (const row of parseSegmentCsv(micText)) {
+          if (gen.micSeen.has(row.file)) continue;
+          gen.micSeen.add(row.file);
+          gen.micSegments.push(toSegment(row, gen.id, gen.startWall, gen.dir, join));
+        }
+      }
     }
+    if (gen.hasCam) {
+      const camText = this.readNewCsvText(gen.camCsv);
+      if (camText) {
+        for (const row of parseSegmentCsv(camText)) {
+          if (gen.camSeen.has(row.file)) continue;
+          gen.camSeen.add(row.file);
+          gen.camSegments.push(toSegment(row, gen.id, gen.camStartWall ?? gen.startWall, gen.dir, join));
+        }
+      }
+    }
+  }
+
+  private allCamSegments(): Segment[] {
+    return this.generations.flatMap((g) => g.camSegments);
   }
 
   private allSegments(): Segment[] {
@@ -714,7 +781,7 @@ export class CaptureManager {
   private prune(): void {
     const keep = this.deps.settings().clipSeconds + KEEP_MARGIN_SECONDS;
     const now = Date.now();
-    let old = [...expired(this.allSegments(), now, keep), ...expired(this.allMicSegments(), now, keep)];
+    let old = [...expired(this.allSegments(), now, keep), ...expired(this.allMicSegments(), now, keep), ...expired(this.allCamSegments(), now, keep)];
     const protectedSince = this.recording?.since ?? this.finishing?.since ?? null;
     if (protectedSince !== null) {
       // Co patří do nahrávaného (nebo právě ukládaného) zápasu, zůstává (s rezervou jednoho kousku před startem).
@@ -728,6 +795,7 @@ export class CaptureManager {
     for (const g of this.generations) {
       g.segments = g.segments.filter((s) => !dead.has(s.file));
       g.micSegments = g.micSegments.filter((s) => !dead.has(s.file));
+      g.camSegments = g.camSegments.filter((s) => !dead.has(s.file));
     }
     for (const s of old) {
       try {
@@ -739,10 +807,11 @@ export class CaptureManager {
     // Ukončené generace bez segmentů můžou pryč i se složkou.
     const live = this.live;
     this.generations = this.generations.filter((g) => {
-      if (g === live || g.segments.length > 0 || g.micSegments.length > 0 || !g.ended) return true;
+      if (g === live || g.segments.length > 0 || g.micSegments.length > 0 || g.camSegments.length > 0 || !g.ended) return true;
       rmSync(g.dir, { recursive: true, force: true });
       this.csvOffsets.delete(g.csv);
       this.csvOffsets.delete(g.micCsv);
+      this.csvOffsets.delete(g.camCsv);
       return false;
     });
   }
@@ -921,6 +990,7 @@ export class CaptureManager {
       // se slepily bez zvuku.
       const generations = [...this.generations];
       const micSegments = this.allMicSegments();
+      const camSegments = this.allCamSegments();
       const chosen = selectForClip(this.allSegments(), endWall, seconds);
       if (chosen.length === 0 || totalSeconds(chosen) < 1) throw new Error('too-early');
 
@@ -976,6 +1046,11 @@ export class CaptureManager {
             }
           );
           done += partSeconds;
+          // Kamera zvlášť: její kousky ze stejné doby do vlastního souboru vedle klipu (bez zvuku, jen kopie).
+          const camera = settings.clipCamera && settings.clipCameraSeparate ? await this.muxCamera(part, camSegments, file, live.dir).catch((e) => {
+            log(`kamera zvlášť se k ${recording ? 'nahrávce' : 'klipu'} neuložila: ${(e as Error).message}`);
+            return null;
+          }) : null;
           const thumb = await thumbJob;
           const [w, h] = (size ?? '').split('x').map(Number);
           out.push({
@@ -988,6 +1063,7 @@ export class CaptureManager {
             // Nahrávka (i každá její část): kdy začala; klip: chvíle stisku.
             createdAt: recording ? new Date(part[0].startWall) : createdAt,
             audioTracks: result.audioTracks,
+            camera,
           });
           log(`${recording ? 'nahrávka' : 'klip'}: ${file} (${result.videoSeconds.toFixed(1)} s, ${part.length} segmentů, ${size ?? '?'}, zvuk: ${result.audioTracks.join(' + ') || 'žádný'})`);
         }
@@ -1087,6 +1163,39 @@ export class CaptureManager {
       }
     }
     return { videoSeconds: plan.videoSeconds, audioTracks: clipAudioTracks(hasSystemAudio, !!micList, settings.separateMicTrack) };
+  }
+
+  /**
+   * Kamera zvlášť: kousky kamery ze stejných generací a stejné doby jako obraz
+   * se slepí (bez překódování) do souboru "<klip>.camera.webm" vedle klipu.
+   * Kde v klipu kamera začíná, říká offsetMs (jako u mikrofonu - planClip);
+   * zbytek (poloha, velikost) je v knihovně a skládá se až v přehrávači /
+   * při zapečení (editPlan.cameraBakeFilter).
+   */
+  private async muxCamera(video: Segment[], camAll: Segment[], clipFile: string, workDir: string): Promise<ClipResult['camera']> {
+    const gens = new Set(video.map((s) => s.generation));
+    const plan = planClip(video, camAll.filter((c) => gens.has(c.generation)), 0);
+    if (!plan.mic || plan.mic.length === 0) return null;
+    const list = join(workDir, `cam-${Date.now().toString(36)}.ffconcat`);
+    writeFileSync(list, concatScript(plan.mic));
+    const file = clipFile.replace(/\.(mp4|webm)$/i, '') + '.camera.webm';
+    try {
+      // Kamera je WebM (VP8/VP9) - jen kopie; délka nejvýš jako obraz (+ kousek rezervy před uříznutím offsetem).
+      await runFfmpeg(
+        ['-loglevel', 'error', '-fflags', '+genpts', '-f', 'concat', '-safe', '0', '-i', list, '-map', '0:v:0', '-c:v', 'copy', '-an', '-t', (plan.videoSeconds + Math.max(0, -plan.micOffsetMs) / 1000 + 0.5).toFixed(3), file],
+        60000,
+        { low: true }
+      );
+    } finally {
+      try {
+        unlinkSync(list);
+      } catch {
+        // nevadí
+      }
+    }
+    const size = await this.sizeOf(file).catch(() => null);
+    const [w, h] = (size ?? '').split('x').map(Number);
+    return { file, offsetMs: plan.micOffsetMs, width: w > 0 ? w : null, height: h > 0 ? h : null };
   }
 
   // ---- obnova nahrávky zápasu po pádu ---------------------------------------------
@@ -1284,6 +1393,7 @@ export class CaptureManager {
         thumb,
         createdAt: new Date(part[part.length - 1].endWall),
         audioTracks: result.audioTracks,
+        camera: null,
         since: parts.length === 1 ? since : part[0].startWall,
         game,
       };

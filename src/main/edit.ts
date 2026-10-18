@@ -1,6 +1,6 @@
 import { statSync } from 'node:fs';
 import { spawnFfmpeg, probe, runFfmpeg } from './ffmpeg';
-import { GIF_FPS, GIF_WIDTH, gifArgs, mergePlan, normalizeSpeed, progressPercent, trimArgs, type AudioChoice, type AudioTrackKind, type MergeInput, type TextPosition } from './editPlan';
+import { GIF_FPS, GIF_WIDTH, gifArgs, mergePlan, normalizeSpeed, progressPercent, trimArgs, type AudioChoice, type AudioTrackKind, type CameraBake, type MergeInput, type OverlayItem, type TextPosition } from './editPlan';
 import { log } from './log';
 
 /**
@@ -36,6 +36,12 @@ export type TrimOptions = {
   speed?: number;
   /** Text přes video (PNG s průhledností, nakreslený oknem) a kde leží. */
   overlay?: { file: string; position: TextPosition } | null;
+  /** Překryvy kdekoli v obraze (text jako PNG, obrázky, GIFy) - editPlan.OverlayItem. */
+  overlays?: OverlayItem[] | null;
+  /** Kamera nahraná zvlášť (Clip.camera) - zapeče se do výsledku. */
+  camera?: CameraBake | null;
+  /** Jen první (smíchaná) zvuková stopa (kopie k nahrání na Kine). */
+  firstAudioOnly?: boolean;
 };
 
 export type TrimResult = { file: string; durationSeconds: number; sizeBytes: number; width: number | null; height: number | null; audioTracks?: AudioTrackKind[] | null };
@@ -63,10 +69,12 @@ function runWithProgress(args: string[], totalSeconds: number, what: string, onP
         if (percent !== null && onProgress) onProgress(percent);
       }
     });
+    // Strop: 10 minut, u dlouhého výsledku (zapečení kamery do hodinové nahrávky) dvojnásobek jeho délky.
+    const limitMs = Math.max(10 * 60 * 1000, Math.min(6 * 3600 * 1000, (Number.isFinite(totalSeconds) ? totalSeconds : 0) * 2000 + 60000));
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error('ffmpeg se zasekl'));
-    }, 10 * 60 * 1000);
+    }, limitMs);
     child.on('error', (e) => {
       clearTimeout(timer);
       reject(e);
@@ -95,8 +103,11 @@ async function describe(output: string, fallbackSeconds: number): Promise<TrimRe
 
 export async function trimClip(input: string, output: string, options: TrimOptions, onProgress?: (percent: number) => void): Promise<TrimResult> {
   const speed = normalizeSpeed(options.speed ?? 1);
-  // Po změně rychlosti se výsledek srovná na snímkovou frekvenci zdroje (zrychlení by ze 60 fps udělalo 120).
-  const sourceFps = speed !== 1 ? (await probe(input).catch(() => null))?.fps ?? null : null;
+  const overlays = options.overlays ?? [];
+  // Po změně rychlosti se výsledek srovná na snímkovou frekvenci zdroje (zrychlení by ze 60 fps udělalo 120);
+  // s překryvy je potřeba znát rozměr obrazu (velikost překryvů).
+  const info = speed !== 1 || overlays.length > 0 || options.camera ? await probe(input).catch(() => null) : null;
+  const sourceFps = speed !== 1 ? info?.fps ?? null : null;
   const plan = trimArgs(input, output, {
     start: options.start,
     end: options.end,
@@ -108,6 +119,11 @@ export async function trimClip(input: string, output: string, options: TrimOptio
     speed,
     sourceFps,
     overlay: options.overlay ?? null,
+    overlays,
+    camera: options.camera ?? null,
+    firstAudioOnly: options.firstAudioOnly,
+    sourceWidth: info?.width ?? null,
+    sourceHeight: info?.height ?? null,
     webm: /\.webm$/i.test(output),
   });
   await runWithProgress(plan.args, plan.outputSeconds, 'zkrácení klipu', onProgress);

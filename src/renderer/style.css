@@ -691,8 +691,33 @@ button.side-audio-warn:hover { text-decoration: underline; background: none; }
 @media (prefers-reduced-motion: reduce) { .toast.pending .logo::after, .toast.pending .bar { animation: none; } }
 
 /* Úpravy: text přes video (náhled), rychlost, momenty nahrávky */
-.player-stage .text-preview { position: absolute; pointer-events: none; z-index: 2; }
-.player-stage .text-preview canvas { display: block; width: 100%; height: 100%; }
+/* Překryvy v úpravách (text, obrázek, GIF): rámečky přes video - tažením posun, rohem velikost. */
+.player-stage .overlay-layer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.player-stage .ov-item { position: absolute; pointer-events: auto; cursor: move; touch-action: none; border-radius: 4px; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35); transition: box-shadow 0.12s ease, opacity 0.12s ease; }
+.player-stage .ov-item:hover { box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.75); }
+.player-stage .ov-item.selected { box-shadow: 0 0 0 2px var(--brand), 0 2px 12px rgba(0, 0, 0, 0.45); }
+.player-stage .ov-item.off-time { opacity: 0.35; }
+.player-stage .ov-item .ov-body { width: 100%; height: 100%; overflow: hidden; pointer-events: none; }
+.player-stage .ov-item .ov-body canvas, .player-stage .ov-item .ov-body img { display: block; width: 100%; height: 100%; object-fit: fill; user-select: none; }
+.player-stage .ov-item .ov-handle {
+  position: absolute; right: -7px; bottom: -7px; width: 14px; height: 14px; border-radius: 50%; cursor: nwse-resize;
+  background: var(--brand); box-shadow: 0 0 0 2px var(--bg), 0 2px 6px rgba(0, 0, 0, 0.5); opacity: 0; transition: opacity 0.12s ease;
+}
+.player-stage .ov-item.selected .ov-handle, .player-stage .ov-item:hover .ov-handle { opacity: 1; }
+/* Panel překryvů pod osou: čipy (jeden na překryv), nastavení vybraného. */
+.trim-section { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: var(--radius); background: var(--panel-raised); box-shadow: inset 0 0 0 1px var(--border); }
+.trim-ov-chips:empty { display: none; }
+.ov-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 220px; }
+.ov-chip .ov-chip-x { display: inline-flex; align-items: center; margin-left: 2px; padding: 2px; border-radius: 50%; color: var(--text-dim); }
+.ov-chip .ov-chip-x:hover { color: var(--danger); background: rgba(255, 255, 255, 0.08); }
+.trim-ov-editor { display: flex; flex-direction: column; gap: 8px; padding-top: 2px; }
+.trim-ov-editor .trim-text { flex: 1; min-width: 180px; }
+.trim-ov-size-row input[type='range'] { flex: 1; max-width: 260px; margin: 0; }
+.trim-ov-size-val { min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
+.trim-ov-time .check { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); color: var(--text-dim); }
+.trim-ov-time .check input { margin: 0; }
+.trim-ov-time b { color: var(--text); font-variant-numeric: tabular-nums; }
+.trim-ov-hint { color: var(--text-faint); }
 .player-markers { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 16px; border-top: 1px solid var(--border); max-height: 92px; overflow-y: auto; }
 .player-markers .marker-chip b { font-variant-numeric: tabular-nums; color: var(--text); }
 .tl-ticks { position: absolute; left: 0; right: 0; top: 0; bottom: 0; pointer-events: none; }
@@ -1082,3 +1107,20 @@ button.icon-btn.danger:hover:not(:disabled) { background-color: rgba(255, 107, 1
 /* Živě: kompatibilní režim (ffmpeg kóduje obraz znovu) - štítek u řádku "Diváci tě vidí". */
 .live-compat-pill { margin-left: 8px; vertical-align: 1px; }
 .live-ended-discarding { display: inline-flex; align-items: center; gap: 6px; }
+
+/* Kamera zvlášť v přehrávači: druhé video přes obraz, tažením posun, rohem velikost (i mimo úpravy). */
+.player-cam { position: absolute; overflow: visible; background: #000; cursor: grab; touch-action: none; user-select: none; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35), 0 6px 18px rgba(0, 0, 0, 0.45); z-index: 2; transition: opacity 0.15s; }
+.player-cam.dragging { cursor: grabbing; box-shadow: 0 0 0 2px var(--brand), 0 6px 18px rgba(0, 0, 0, 0.45); }
+.player-cam.off-time { opacity: 0.35; }
+.player-cam .player-cam-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; border-radius: inherit; }
+.player-cam.mirror .player-cam-video { transform: scaleX(-1); }
+.player-cam .player-cam-handle { position: absolute; right: -7px; bottom: -7px; width: 15px; height: 15px; border-radius: 50%; background: var(--brand); border: 2px solid #fff; cursor: nwse-resize; opacity: 0; transition: opacity 0.15s; }
+.player-cam:hover .player-cam-handle, .player-cam.dragging .player-cam-handle { opacity: 1; }
+.player-stage.broken .player-cam { display: none; }
+.trim-camera .hint { line-height: 1.4; }
+/* Nastavení - kamera v klipech: posuvník velikosti a kamera v náhledu, kterou jde přetáhnout. */
+.clip-camera-size-row { display: flex; flex-direction: column; gap: 4px; }
+.clip-camera-size-row input[type='range'] { width: 100%; }
+.live-preview-cam.draggable { cursor: grab; touch-action: none; }
+.live-preview-cam.draggable:active { cursor: grabbing; }
+.clip-camera-corner-reset { margin-top: 6px; align-self: flex-start; }

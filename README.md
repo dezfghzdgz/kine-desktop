@@ -880,6 +880,28 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   `playerFullscreenOk` přes tlačítko v liště, `settingsSectionsOk` (Záznam
   pět oddílů, Appka vzhled / obecné / o appce, staré cíle).
 
+## Novinky 0.13.1
+
+- **Přehrávač a úpravy (podle hlášení z Kine Clipperu)**: hlavička přehrávače je
+  vždycky jeden řádek - tlačítka se nelámou do dvou řádků (`white-space: nowrap`,
+  zkracuje se název), v užším okně zůstanou u „Otevřít v přehrávači systému“ a
+  dalších jen ikony (`.lbl` + media queries). Scéna s videem se už nesmrskne
+  (`flex: none`): dřív se při dlouhém panelu úprav stlačila na 200 px, video z ní
+  přečuhovalo přes hlavičku i přes časovou osu a ovládání „plavalo“ uprostřed
+  obrazu. V úpravách je ovládání (přehrát, hlasitost, čas, zvuk hry / mikrofon,
+  celá obrazovka) **pod videem**, ne přes obraz, a bez vlastního posuvníku -
+  časová osa je jen jedna, ta s úchyty (klik / tažení po ní = posun přehrávání);
+  přes celou obrazovku zůstává běžné ovládání přes obraz. Video je v úpravách
+  nižší na malém okně (`clamp(220px, 100vh - 520px, 50vh)`).
+- **Kolečko myši v úpravách**: panel úprav (`.trim`) roluje sám (`overflow-y:
+  auto`), nahoru i dolů; okno přehrávače má `overflow: clip`, takže ho zaostření
+  pole (hledání GIFů, text překryvu) už neposune a člověk nezůstane „zamčený dole“
+  bez možnosti vyrolovat zpátky.
+- Testy: e2e `editLayoutOk` (hlavička do 60 px a vidět, video celé ve scéně,
+  ovládání pod videem, posuvník schovaný, osa pod ovládáním, okno neodrolované)
+  a `trimWheelOk` (skutečné kolečko myši nad panelem: dolů i zpátky nahoru, okno
+  samo stojí).
+
 ## Novinky 0.13.0
 
 - **Linux a macOS**: `release.yml` staví vedle Windows i Linux (AppImage +

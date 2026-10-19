@@ -432,6 +432,20 @@ export async function runTestDriver(kine: {
         }
         await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.player-head .player-edit')].find((x) => !x.disabled); if (b) b.click(); return !!b; })()`);
         await sleep(400);
+        // Rozložení úprav (0.13.1): hlavička jeden řádek a vidět, scéna se nesmrskla (video celé v ní),
+        // ovládání POD obrazem bez posuvníku (osa je jen jedna - ta s úchyty pod ovládáním), okno neodrolované.
+        const editLayout = await win.webContents.executeJavaScript(`(() => {
+          const box = document.querySelector('.player-box.editing'); const head = box && box.querySelector('.player-head'); const st = box && box.querySelector('.player-stage');
+          const v = st && st.querySelector('video'); const c = st && st.querySelector('.player-controls'); const seek = c && c.querySelector('.pc-seek'); const tl = box && box.querySelector('.trim .tl');
+          if (!box || !head || !st || !v || !c || !seek || !tl) return null;
+          const r = (el) => el.getBoundingClientRect();
+          return { headH: r(head).height, headTop: r(head).top - r(box).top, stageBottom: r(st).bottom, videoBottom: r(v).bottom, videoTop: r(v).top, stageTop: r(st).top, controlsTop: r(c).top, controlsBottom: r(c).bottom, tlTop: r(tl).top,
+            seekHidden: getComputedStyle(seek).display === 'none', controlsOpacity: getComputedStyle(c).opacity, controlsPos: getComputedStyle(c).position, boxScroll: box.scrollTop };
+        })()`);
+        result.editLayout = editLayout;
+        result.editLayoutOk =
+          !!editLayout && editLayout.headH < 60 && editLayout.headTop >= -1 && editLayout.videoTop >= editLayout.stageTop - 1 && editLayout.videoBottom <= editLayout.stageBottom + 1 &&
+          editLayout.controlsTop >= editLayout.videoBottom - 1 && editLayout.tlTop >= editLayout.controlsBottom - 1 && editLayout.seekHidden && editLayout.controlsOpacity === '1' && editLayout.controlsPos === 'static' && editLayout.boxScroll === 0;
         const speedSet: boolean = await win.webContents.executeJavaScript(
           `(() => { const b = [...document.querySelectorAll('.trim-speed button.seg')].find((x) => x.textContent.trim() === '2×'); if (b) b.click(); return !!b && b.classList.contains('active'); })()`
         );
@@ -463,6 +477,37 @@ export async function runTestDriver(kine: {
           `(() => { const p = document.querySelector('.gif-picker'); return { open: !!p && !p.classList.contains('hidden'), query: !!p?.querySelector('input.gif-query'), own: !!p?.querySelector('button[title]'), attribution: (p?.querySelector('.gif-attribution')?.textContent || '').includes('GIPHY') }; })()`
         );
         await shot(win, 'settings-clips-gifs');
+        // Panel úprav roluje kolečkem - dolů i ZPÁTKY nahoru (0.13.1; dřív se okno "zamklo" dole):
+        // skutečné kolečko myši nad osou, okno přehrávače samo se přitom nehýbe.
+        const scrollInfo: { canScroll: boolean; x: number; y: number; top: number; boxTop: number } | null = await win.webContents.executeJavaScript(
+          `(() => { const box = document.querySelector('.player-box.editing'); const tr = box && box.querySelector('.trim'); if (!tr) return null; const r = tr.getBoundingClientRect(); return { canScroll: tr.scrollHeight > tr.clientHeight + 4, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + 28), top: tr.scrollTop, boxTop: box.scrollTop }; })()`
+        );
+        const trimScroll = async () => win.webContents.executeJavaScript(`(() => { const box = document.querySelector('.player-box.editing'); const tr = box && box.querySelector('.trim'); return tr ? { top: tr.scrollTop, boxTop: box.scrollTop, max: tr.scrollHeight - tr.clientHeight } : null; })()`);
+        const wheel = async (dy: number) => {
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: scrollInfo!.x, y: scrollInfo!.y });
+          await sleep(60);
+          win.webContents.sendInputEvent({ type: 'mouseWheel', x: scrollInfo!.x, y: scrollInfo!.y, deltaX: 0, deltaY: dy, canScroll: true } as any);
+          await sleep(350);
+          return trimScroll();
+        };
+        let wheelOk = false;
+        let wheelInfo: any = null;
+        if (scrollInfo?.canScroll) {
+          // Směr kolečka v Chromiu: záporné deltaY = dolů; kdyby ne, zkusí se i opačně.
+          let down = await wheel(-600);
+          let dir = -600;
+          if (down && down.top <= scrollInfo.top) {
+            down = await wheel(600);
+            dir = 600;
+          }
+          const up = await wheel(-dir);
+          wheelInfo = { start: scrollInfo.top, down: down?.top, up: up?.top, max: down?.max, boxTop: up?.boxTop, dir };
+          wheelOk = !!down && !!up && down.top > scrollInfo.top && up.top < down.top && up.boxTop === 0 && down.boxTop === 0;
+        } else {
+          wheelInfo = { canScroll: false, info: scrollInfo };
+        }
+        result.trimWheel = wheelInfo;
+        result.trimWheelOk = wheelOk;
         await win.webContents.executeJavaScript(`(() => { const b = document.querySelector('.trim-add-gif'); if (b) b.click(); return !!b; })()`);
         await sleep(150);
         const gifClosed = await win.webContents.executeJavaScript(`!!document.querySelector('.gif-picker.hidden')`);

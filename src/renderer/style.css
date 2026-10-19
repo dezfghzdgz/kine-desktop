@@ -373,13 +373,30 @@ kbd {
 }
 .player-box {
   position: relative; width: min(1180px, 100%); max-height: 100%; min-width: 0;
-  display: flex; flex-direction: column; overflow: hidden;
+  display: flex; flex-direction: column;
+  /* clip, ne hidden: okno se nikdy "neodroluje" samo (hidden by při zaostření pole dole
+     posunulo obsah a kolečkem už se zpátky nedalo) - roluje jen panel úprav (.trim). */
+  overflow: clip;
   background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg), var(--hairline);
   animation: box-in var(--dur-2) var(--ease);
 }
-.player-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 10px 10px 16px; background: var(--panel-raised); border-bottom: 1px solid var(--border); }
+/* Hlavička je vždycky jeden řádek: tlačítka se nelámou do dvou řádků, zkracuje se název. */
+.player-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 10px 10px 16px; flex: none; background: var(--panel-raised); border-bottom: 1px solid var(--border); }
+.player-head > .row:first-child { flex: 1 1 auto; min-width: 0; }
+.player-head > .row:last-child { flex: none; }
+.player-head button { white-space: nowrap; }
 .player-head .title { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Užší okno nebo větší písmo: u tlačítek zůstane jen ikona (popis v titulku), ať se hlavička nenafoukne. */
+@media (max-width: 1040px) {
+  .player-head .player-open .lbl { display: none; }
+  .player-head .player-open { width: 32px; padding: 0 !important; justify-content: center; }
+}
+@media (max-width: 860px) {
+  .player-head .player-upload .lbl, .player-head .player-copy .lbl, .player-head .player-edit .lbl, .player-head .player-upload-cancel .lbl { display: none; }
+  .player-head .player-upload, .player-head .player-copy, .player-head .player-edit, .player-head .player-upload-cancel { width: 32px; padding: 0 !important; justify-content: center; }
+  .player-head .player-upload .spin { margin-right: 0; }
+}
 .player-head button.active { color: var(--brand); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.5); }
 .player-close { width: 32px; padding: 0 !important; font-size: 14px; }
 /* Hlavička přehrávače: hvězdička (oblíbené) jako na kartě klipu, Nahrát na Kine. */
@@ -392,9 +409,12 @@ kbd {
 .upload-paused-row .upload-cancel,
 .upload-paused-row .upload-restart { min-height: 24px; padding: 2px 8px; font-size: var(--fs-xs); }
 .upload-paused-row .upload-cancel:hover { color: var(--danger); }
-.player-stage { position: relative; background: #000; min-height: 200px; display: flex; align-items: center; justify-content: center; }
+/* Scéna se nikdy nesmrskne (flex: none): dřív se při dlouhém panelu úprav stlačila na 200 px,
+   video z ní přečuhovalo přes hlavičku i přes osu pod ním a ovládání plavalo uprostřed obrazu. */
+.player-stage { position: relative; flex: none; background: #000; min-height: 200px; display: flex; align-items: center; justify-content: center; }
 .player-video { display: block; width: 100%; max-height: 72vh; background: #000; outline: none; cursor: pointer; }
-.player-box.editing .player-video { max-height: 50vh; }
+/* V úpravách je video nižší, ať pod ním zbyde místo na osu a volby - na malém okně ještě víc. */
+.player-box.editing .player-video { max-height: clamp(220px, 100vh - 520px, 50vh); }
 .player-error { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 200px; padding: 20px; color: var(--text-dim); text-align: center; }
 .player-error p { margin: 0; max-width: 520px; }
 .player-note {
@@ -518,6 +538,26 @@ body.player-pseudo-full .overlay, body.player-pseudo-full .player-box { transfor
 .player-tools { display: flex; align-items: center; gap: 2px; }
 /* V úpravách má rychlost vlastní řádek (rychlost uloženého klipu) - náhled hraje jí. */
 .player-box.editing .tool-rate-wrap { display: none; }
+/* V úpravách je ovládání POD obrazem (ne přes něj) a bez vlastního posuvníku: časová osa je jen
+   jedna - ta s úchyty pod videem (klik / tažení po ní = posun přehrávání). Lišta se neschovává.
+   Přes celou obrazovku (i náhradní) zůstává běžné ovládání přes obraz. */
+.player-box.editing .player-stage:not(.fullscreen):not(.pseudo-full) { flex-direction: column; align-items: stretch; }
+.player-box.editing .player-stage:not(.fullscreen):not(.pseudo-full) .player-controls {
+  position: static; flex: none; padding: 2px 10px; color: var(--text);
+  background: var(--panel-raised); box-shadow: inset 0 1px 0 var(--border); opacity: 1; pointer-events: auto;
+}
+.player-box.editing .player-stage:not(.fullscreen):not(.pseudo-full) .pc-seek { display: none; }
+.player-box.editing .player-stage:not(.fullscreen):not(.pseudo-full) .player-controls .icon { filter: none; }
+.player-box.editing .player-stage:not(.fullscreen):not(.pseudo-full) .pc-btn,
+.player-box.editing .player-stage:not(.fullscreen):not(.pseudo-full) .pc-time,
+.player-box.editing .player-stage:not(.fullscreen):not(.pseudo-full) .tool-chip { color: var(--text); text-shadow: none; }
+.player-box.editing .player-stage:not(.fullscreen):not(.pseudo-full) .pc-time-all { color: var(--text-faint); }
+.player-box.editing .player-stage:not(.fullscreen):not(.pseudo-full) .tool-chip.off { color: var(--text-faint); }
+.player-box.editing .player-stage:not(.fullscreen):not(.pseudo-full) .tool-chip:hover:not(:disabled) { color: var(--text); background: var(--glass-fill-hover); }
+.player-box.editing .player-stage:not(.fullscreen):not(.pseudo-full) .pc-btn:hover:not(:disabled) { color: var(--text); background: var(--glass-fill-hover); }
+.player-box.editing .player-stage:not(.fullscreen):not(.pseudo-full) .pc-volume { background: linear-gradient(90deg, var(--text) var(--level, 100%), var(--border) var(--level, 100%)); }
+.player-box.editing .player-stage:not(.fullscreen):not(.pseudo-full) .pc-volume::-webkit-slider-thumb { background: var(--text); }
+.player-box.editing .player-stage:not(.fullscreen):not(.pseudo-full).controls-idle .player-video { cursor: pointer; }
 .tool-chip {
   display: inline-flex; align-items: center; gap: 6px; height: 34px; min-height: 0; padding: 0 10px; border-radius: 10px;
   font-size: 13px; font-weight: 600; line-height: 1; color: #fff; white-space: nowrap; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
@@ -542,7 +582,10 @@ body.player-pseudo-full .overlay, body.player-pseudo-full .player-box { transfor
 .tool-rate-item.active { color: var(--brand); font-weight: 700; }
 
 /* Úpravy: časová osa s úchyty (jako v Medalu), hodnoty, akce. */
-.trim { padding: 12px 16px 14px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
+/* Panel úprav roluje sám (min-height 0 = smí se zmenšit), když se pod video nevejde - kolečkem
+   i posuvníkem, nahoru i dolů; video a jeho ovládání zůstávají na místě. */
+.trim { padding: 12px 16px 14px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+.trim > * { flex: none; }
 .tl { position: relative; height: 44px; user-select: none; touch-action: none; cursor: pointer; }
 .tl-track { position: absolute; left: 0; right: 0; top: 16px; height: 12px; border-radius: 6px; background: var(--panel-raised); box-shadow: inset 0 0 0 1px var(--border); }
 .tl-range { position: absolute; top: 16px; height: 12px; background: var(--brand-soft); box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.6); pointer-events: none; }

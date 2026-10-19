@@ -433,8 +433,8 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   const titleEl = h('div', { class: 'title' });
   /** "3 / 24" - kde v seznamu klip je (jen se sousedy). */
   const positionEl = h('span', { class: 'player-pos faint hidden' });
-  const editBtn = h('button', { class: 'small quiet player-edit', onclick: () => toggleEdit() }, icon('scissors', 15), t('libraryEdit'));
-  const copyBtn = h('button', { class: 'small quiet player-copy hidden', onclick: () => { if (options.onCopyLink) { options.onCopyLink(clip); showNote(t('linkCopied'), 'ok'); } } }, icon('link', 15), t('libraryCopyLink'));
+  const editBtn = h('button', { class: 'small quiet player-edit', onclick: () => toggleEdit() }, icon('scissors', 15), h('span', { class: 'lbl' }, t('libraryEdit')));
+  const copyBtn = h('button', { class: 'small quiet player-copy hidden', onclick: () => { if (options.onCopyLink) { options.onCopyLink(clip); showNote(t('linkCopied'), 'ok'); } } }, icon('link', 15), h('span', { class: 'lbl' }, t('libraryCopyLink')));
   // Hlavička přímo u klipu: oblíbené (hvězdička) a nahrát na Kine - jako na kartě v knihovně.
   const favBtn = h('button', {
     class: 'small quiet player-fav',
@@ -451,7 +451,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     'button',
     { class: 'small quiet player-upload-cancel hidden', title: t('uploadCancelHint'), 'aria-label': t('uploadCancelHint'), onclick: () => options.onCancelUpload?.(clip) },
     icon('close', 14),
-    t('uploadCancelLong')
+    h('span', { class: 'lbl' }, t('uploadCancelLong'))
   ) as HTMLButtonElement;
   /** Hvězdička a Nahrát podle klipu (oblíbený? nahrává se / nahraný?). */
   function refreshHeadButtons() {
@@ -470,18 +470,18 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     clear(uploadBtn);
     if (u?.state === 'uploading') {
       uploadBtn.disabled = true;
-      uploadBtn.append(h('span', { class: 'spin' }), t('uploadUploading', { percent: u.percent }));
+      uploadBtn.append(h('span', { class: 'spin' }), h('span', { class: 'lbl' }, t('uploadUploading', { percent: u.percent })));
     } else if (u?.state === 'queued') {
       uploadBtn.disabled = true;
-      uploadBtn.append(icon('upload', 15), t('uploadQueued'));
+      uploadBtn.append(icon('upload', 15), h('span', { class: 'lbl' }, t('uploadQueued')));
     } else if (u?.state === 'paused') {
       // Čeká (hra / připojení): klik ho pošle hned, i během hraní.
       uploadBtn.disabled = false;
-      uploadBtn.append(icon('upload', 15), t('uploadNow'));
+      uploadBtn.append(icon('upload', 15), h('span', { class: 'lbl' }, t('uploadNow')));
       uploadBtn.title = t('uploadNowHint');
     } else {
       uploadBtn.disabled = false;
-      uploadBtn.append(icon('upload', 15), t('libraryUpload'));
+      uploadBtn.append(icon('upload', 15), h('span', { class: 'lbl' }, t('libraryUpload')));
       uploadBtn.title = '';
     }
   }
@@ -502,7 +502,7 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
         options.onCancelUpload ? cancelUploadBtn : null,
         options.onCopyLink ? copyBtn : null,
         edit ? editBtn : null,
-        h('button', { class: 'small quiet', title: t('playerOpenExternal'), onclick: () => options.onOpenExternal(clip) }, icon('external', 15), t('playerOpenExternal')),
+        h('button', { class: 'small quiet player-open', title: t('playerOpenExternal'), 'aria-label': t('playerOpenExternal'), onclick: () => options.onOpenExternal(clip) }, icon('external', 15), h('span', { class: 'lbl' }, t('playerOpenExternal'))),
         h('button', { class: 'small quiet player-close', title: t('playerClose'), 'aria-label': t('playerClose'), onclick: () => close() }, icon('close', 16))
       )
     ),

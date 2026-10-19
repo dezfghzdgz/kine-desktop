@@ -516,10 +516,11 @@ export async function checkForUpdates(): Promise<UpdateCheck> {
       directUrl?: string;
       clipperDirectUrl?: string;
       /** Odkazy podle systému (web od října 2026): downloads.full.mac, downloads.clipper.linux… */
-      downloads?: Partial<Record<'full' | 'clipper', Partial<Record<'windows' | 'mac' | 'linux', string>>>>;
+      downloads?: Partial<Record<'full' | 'clipper', Partial<Record<'windows' | 'mac' | 'mac-intel' | 'linux', string>>>>;
     };
     const info = deps.variant === 'clipper' ? data.clipper : data.release;
-    const os = process.platform === 'darwin' ? 'mac' : process.platform === 'linux' ? 'linux' : 'windows';
+    // macOS se staví zvlášť pro Apple Silicon (mac) a Intel (mac-intel) - od 0.13.2, univerzální sestavení padalo.
+    const os = process.platform === 'darwin' ? (process.arch === 'arm64' ? 'mac' : 'mac-intel') : process.platform === 'linux' ? 'linux' : 'windows';
     const url = data.downloads?.[deps.variant]?.[os] ?? (os === 'windows' ? (deps.variant === 'clipper' ? data.clipperDirectUrl : data.directUrl) : `${deps.siteUrl()}/download`);
     const version = info?.version ?? null;
     if (!version) throw new Error('web nezná verzi');

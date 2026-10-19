@@ -40,7 +40,7 @@ export const VARIANTS = {
     artifact: 'Kine-Setup.${ext}',
     // Linux (AppImage, deb) a macOS (dmg + zip): pevné názvy, ať na ně web může odkazovat.
     linuxArtifact: 'Kine-Linux.${ext}',
-    macArtifact: 'Kine-Mac.${ext}',
+    macArtifact: 'Kine-Mac-${arch}.${ext}',
     icon: 'build/icon.png',
     output: 'release/full',
     folder: 'full',
@@ -52,7 +52,7 @@ export const VARIANTS = {
     appId: 'cz.kine.clipper',
     artifact: 'Kine-Clipper-Setup.${ext}',
     linuxArtifact: 'Kine-Clipper-Linux.${ext}',
-    macArtifact: 'Kine-Clipper-Mac.${ext}',
+    macArtifact: 'Kine-Clipper-Mac-${arch}.${ext}',
     icon: 'build/icon-clipper.png',
     output: 'release/clipper',
     folder: 'clipper',
@@ -121,7 +121,10 @@ export function buildConfig(env = process.env) {
   }
   lines.push('nsis:', `  artifactName: ${JSON.stringify(v.artifact)}`, `  shortcutName: ${JSON.stringify(v.productName)}`);
   // Linux: AppImage (aktualizuje se sám přes electron-updater) + deb; macOS: dmg ke stažení a zip pro
-  // aktualizace, univerzální (Intel i Apple Silicon). Bez podpisu Apple (identity: null) - viz README.
+  // aktualizace, zvlášť pro Apple Silicon (arm64) a Intel (x64) - univerzální sestavení padalo, protože
+  // ffmpeg-static má v node_modules jen binárku pro procesor runneru a @electron/universal ji
+  // neumí spojit. ffmpeg se proto na macOS přibaluje podle architektury z build/ffmpeg/darwin-<arch>
+  // (stáhne workflow) a ten z node_modules se do appky nedává. Bez podpisu Apple (identity: null).
   lines.push(
     'linux:',
     `  icon: ${v.icon}`,
@@ -135,6 +138,20 @@ export function buildConfig(env = process.env) {
     'mac:',
     `  icon: ${v.icon}`,
     `  artifactName: ${JSON.stringify(v.macArtifact)}`,
+    '  target:',
+    '    - target: dmg',
+    '      arch: [x64, arm64]',
+    '    - target: zip',
+    '      arch: [x64, arm64]',
+    '  files:',
+    '    - "!node_modules/ffmpeg-static/ffmpeg"',
+    '    - "!node_modules/ffmpeg-static/ffmpeg.README"',
+    '    - "!node_modules/ffmpeg-static/ffmpeg.LICENSE"',
+    '  extraResources:',
+    '    - from: build/ffmpeg/darwin-${arch}',
+    '      to: ffmpeg',
+    '      filter:',
+    '        - ffmpeg',
     '  identity: null',
     '  hardenedRuntime: false',
     '  gatekeeperAssess: false',

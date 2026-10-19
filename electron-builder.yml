@@ -25,6 +25,20 @@ files:
   - "!**/*.map"
 asarUnpack:
   - node_modules/ffmpeg-static/**
+# Pojistky Electronu (fuses) - běžné zabezpečení zabalené appky: nejde ji spustit jako holý
+# Node (ELECTRON_RUN_AS_NODE), nejde do ní připojit ladicí program (--inspect), nečte
+# NODE_OPTIONS, kód se bere jen z app.asar a jeho neporušenost se při startu kontroluje
+# (Windows, macOS). Cookies vloženého webu Kine šifrované klíčem systému. Platí jen pro
+# zabalenou appku (ve vývoji a v testech jede holý Electron). Mac bez podpisu Apple: po
+# přepnutí pojistek se obnoví ad-hoc podpis (jinak by Apple Silicon appku nespustil).
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  resetAdHocDarwinSignature: true
 protocols:
   - name: Kine
     schemes: [kine]
@@ -58,8 +72,9 @@ nsis:
   multiLanguageInstaller: false
   language: 1033
 # Linux: AppImage (jeden soubor, aktualizuje se sám) a deb (Ubuntu / Mint / Debian).
-# macOS: dmg + zip (zip potřebuje electron-updater), univerzální pro Intel i Apple
-# Silicon. Názvy souborů a ikony doplňuje scripts/publish-config.mjs.
+# macOS: dmg + zip (zip potřebuje electron-updater), zvlášť pro Intel (x64) a Apple
+# Silicon (arm64) - univerzální sestavení padalo kvůli ffmpeg (viz publish-config.mjs).
+# Názvy souborů a ikony doplňuje scripts/publish-config.mjs.
 linux:
   target:
     - target: AppImage
@@ -72,9 +87,9 @@ linux:
 mac:
   target:
     - target: dmg
-      arch: [universal]
+      arch: [x64, arm64]
     - target: zip
-      arch: [universal]
+      arch: [x64, arm64]
   category: public.app-category.video
   icon: build/icon.png
   # Bez podpisu Apple (vyžaduje Apple Developer účet): macOS appku při prvním otevření

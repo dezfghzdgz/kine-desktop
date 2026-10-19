@@ -880,6 +880,29 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   `playerFullscreenOk` přes tlačítko v liště, `settingsSectionsOk` (Záznam
   pět oddílů, Appka vzhled / obecné / o appce, staré cíle).
 
+## Novinky 0.13.2
+
+- **macOS se zase staví**: univerzální (Intel + Apple Silicon v jednom) sestavení padalo -
+  `ffmpeg-static` má v `node_modules` jen binárku pro procesor runneru (Apple Silicon) a
+  `@electron/universal` ji neumí spojit; Intel Mac by navíc dostal špatnou. Teď se staví
+  **zvlášť x64 a arm64** (`Kine-Mac-x64.dmg`, `Kine-Mac-arm64.dmg`, zip pro aktualizace,
+  jeden `latest-mac.yml`), workflow stáhne ffmpeg pro obě architektury z vydání balíčku
+  `ffmpeg-static` do `build/ffmpeg/darwin-<arch>` a electron-builder ho přibalí podle
+  architektury (`extraResources`, `src/main/ffmpeg.ts` ho na macOS bere z `resources/ffmpeg`);
+  krok „Kontrola souborů“ ověří architekturu binárky v každé appce. Appka při kontrole
+  verze posílá `mac` / `mac-intel` (web `/api/desktop/latest` -> `downloads`).
+- **Pojistky Electronu (fuses)** v zabalené appce (`electron-builder.yml`): appku nejde
+  spustit jako holý Node (`ELECTRON_RUN_AS_NODE`), nejde do ní připojit ladicí program
+  (`--inspect`), nečte `NODE_OPTIONS`, kód se bere jen z `app.asar` a jeho neporušenost se
+  při startu kontroluje (Windows, macOS); cookies vloženého webu Kine šifrované klíčem
+  systému. Testy a vývoj (`electron .`) běží dál bez pojistek.
+- **Plynulejší okno**: průběh nahrávání (každý kus tus) a zpracování u Cloudflare se do
+  seznamu klipů zapisuje a oknu hlásí nejvýš jednou za 600 ms (`Library.setUpload`), a
+  okno při něm vymění jen dotčené karty (`patchClipCards`) místo překreslení všeho -
+  u stovky klipů to trhalo, hlavně s otevřeným přehrávačem. Průběh stahování aktualizace
+  překresluje nejvýš dvakrát za sekundu. Karty klipů mimo obrazovku se nekreslí
+  (`content-visibility: auto`).
+
 ## Novinky 0.13.1
 
 - **Přehrávač a úpravy (podle hlášení z Kine Clipperu)**: hlavička přehrávače je

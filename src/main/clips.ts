@@ -17,6 +17,8 @@ import { compressTempPath } from '../shared/compress';
 export class ClipLibrary {
   private clips: Clip[] = [];
   private listeners = new Set<(clips: Clip[]) => void>();
+  /** Odložený zápis průběhu nahrávání (viz setUpload). */
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private dir: string,
@@ -78,6 +80,10 @@ export class ClipLibrary {
   }
 
   private save(): void {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
     mkdirSync(this.dir, { recursive: true });
     const tmp = this.indexPath + '.tmp';
     writeFileSync(tmp, JSON.stringify(this.clips, null, 2));
@@ -147,8 +153,29 @@ export class ClipLibrary {
     return clip;
   }
 
+  /**
+   * Stav nahrávání. Samotná procenta nahrávání (každý kus tus, stav uploading / paused)
+   * se zapisují a hlásí oknu nejvýš jednou za 600 ms: dřív každý kus znamenal zápis celého
+   * seznamu na disk a překreslení celého okna (u stovky klipů to trhalo). Změna stavu
+   * (fronta -> nahrává -> hotovo / chyba) a průběh zpracování u Cloudflare (dotaz jednou
+   * za pár sekund) jdou hned.
+   */
   setUpload(id: string, upload: ClipUpload | null): void {
-    this.update(id, { upload });
+    const clip = this.get(id);
+    if (!clip) return;
+    const prev = clip.upload;
+    const progressOnly = !!prev && !!upload && prev.state === upload.state && (upload.state === 'uploading' || upload.state === 'paused');
+    clip.upload = upload;
+    if (!progressOnly) {
+      this.save();
+      return;
+    }
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      this.save();
+    }, 600);
+    this.saveTimer.unref?.();
   }
 
   /** Smazání = do koše (soubor do .trash, klip dostane deletedAt). Klip už v koši se smaže nadobro. */

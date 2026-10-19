@@ -137,13 +137,22 @@ async function init() {
     scheduleRender();
   });
   kine.onStatus((s) => {
+    // Jen průběh stahování aktualizace (procenta chodí mnohokrát za sekundu): překreslit
+    // nejvýš dvakrát za sekundu, ne při každém kousku - jinak okno při stahování trhalo.
+    const progressOnly = onlyUpdateProgressChanged(status, s);
     status = s;
+    if (progressOnly) {
+      renderThrottled();
+      return;
+    }
     void kine.currentGame().then((g) => {
       currentGame = g;
       scheduleRender();
     });
   });
   kine.onClips((c) => {
+    const clipsBefore = clips;
+    const trashBefore = trashClips;
     clips = c.filter((x) => !x.deletedAt);
     trashClips = c.filter((x) => !!x.deletedAt).sort((a, b) => (b.deletedAt ?? '').localeCompare(a.deletedAt ?? ''));
     // Přehrávač je mimo mřížku - jen mu říct, co se s klipem stalo (název, smazání).
@@ -151,7 +160,9 @@ async function init() {
     // Výběr jen z klipů, které ještě jsou.
     const ids = new Set(clips.map((x) => x.id));
     for (const id of [...selected]) if (!ids.has(id)) selected.delete(id);
-    scheduleRender();
+    // Jen průběh nahrávání: vyměnit dotčené karty, ne překreslovat celé okno (plynulost).
+    const sameOther = (filters.trash ? clipsBefore.length === clips.length : trashBefore.length === trashClips.length);
+    if (!(sameOther && patchClipCards(filters.trash ? trashBefore : clipsBefore, filters.trash ? trashClips : clips))) scheduleRender();
     void refreshGameNames();
   });
   kine.onAuthWaiting((w) => {
@@ -276,6 +287,24 @@ function brandMark() {
 /** Záložky podle appky: web Kine jen v Kine do PC (režim 'full'). */
 function visibleTabs(): Tab[] {
   return settings.appMode === 'full' ? TABS : TABS.filter((x) => x !== 'kine');
+}
+
+/** Liší se stav jen v průběhu stahování aktualizace (procenta, MB, rychlost)? */
+function onlyUpdateProgressChanged(before: Status | undefined, after: Status): boolean {
+  if (!before || !before.update || !after.update) return false;
+  if (before.update.phase !== 'downloading' || after.update.phase !== 'downloading') return false;
+  const strip = (st: Status) => ({ ...st, update: { ...st.update, percent: 0, transferred: 0, bytesPerSecond: 0 } });
+  return JSON.stringify(strip(before)) === JSON.stringify(strip(after));
+}
+
+let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+/** Překreslení nejvýš dvakrát za sekundu (průběh stahování). */
+function renderThrottled() {
+  if (throttleTimer) return;
+  throttleTimer = setTimeout(() => {
+    throttleTimer = null;
+    scheduleRender();
+  }, 500);
 }
 
 /**
@@ -4324,6 +4353,19 @@ function renderClipsView() {
 
   const grid = h('div', { class: `clips ${selected.size > 0 ? 'selecting' : ''} ${filters.trash ? 'in-trash' : ''}` });
   for (const clip of list) {
+    grid.append(clipCard(clip));
+    if (renaming === clip.id) setTimeout(() => (grid.querySelector(`.clip[data-id="${clip.id}"] .title-edit`) as HTMLInputElement | null)?.focus?.(), 0);
+  }
+  container.append(grid);
+  return container;
+}
+
+/**
+ * Jedna karta klipu (náhled, název, hra, stav nahrávání, tlačítka). Zvlášť, ať jde při
+ * průběhu nahrávání vyměnit jen ta jedna karta (patchClipCards) a ne překreslit celé okno.
+ */
+function clipCard(clip: Clip): HTMLElement {
+  {
     const canUpload = !clip.upload || clip.upload.state === 'error';
     const isSelected = selected.has(clip.id);
     const actions = h('div', { class: 'actions' });
@@ -4504,11 +4546,39 @@ function renderClipsView() {
       thumb,
       body
     );
-    grid.append(card);
-    if (renaming === clip.id) setTimeout(() => (titleEl as HTMLInputElement).focus?.(), 0);
+    return card;
   }
-  container.append(grid);
-  return container;
+}
+
+/**
+ * Jen průběh nahrávání se změnil (procenta ve stejném stavu): vymění se jen dotčené karty,
+ * ne celé okno. Vrací false, když je potřeba překreslit všechno (jiné pořadí, nový klip,
+ * změna stavu, jiná záložka).
+ */
+function patchClipCards(before: Clip[], after: Clip[]): boolean {
+  if (tab !== 'clips' || wizardStep !== null || before.length !== after.length) return false;
+  const grid = app.querySelector('.clips');
+  if (!grid) return false;
+  const changed: Clip[] = [];
+  for (let i = 0; i < before.length; i++) {
+    const a = before[i];
+    const b = after[i];
+    if (a.id !== b.id) return false;
+    if (a === b) continue;
+    const { upload: ua, ...ra } = a;
+    const { upload: ub, ...rb } = b;
+    if ((ua?.state ?? null) !== (ub?.state ?? null)) return false;
+    if (ua?.state === 'done' && ub?.state === 'done' && ua.ready !== ub.ready) return false;
+    if (JSON.stringify(ra) !== JSON.stringify(rb)) return false;
+    if (JSON.stringify(ua) !== JSON.stringify(ub)) changed.push(b);
+  }
+  for (const clip of changed) {
+    const old = grid.querySelector(`.clip[data-id="${clip.id}"]`);
+    if (!old) return false;
+    if (preview?.host && old.contains(preview.host)) stopPreview();
+    old.replaceWith(clipCard(clip));
+  }
+  return true;
 }
 
 // ---- o appce -------------------------------------------------------------------------------

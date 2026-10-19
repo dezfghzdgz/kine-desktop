@@ -343,6 +343,9 @@ kbd {
   background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden;
   display: flex; flex-direction: column; box-shadow: var(--hairline);
   transition: border-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
+  /* Karty mimo obrazovku prohlížeč nekreslí (stovky klipů = plynulé rolování); velikost odhadem,
+     dokud se karta neukáže. */
+  content-visibility: auto; contain-intrinsic-size: auto 320px;
 }
 .clip.selected { border-color: rgba(var(--brand-rgb), 0.7); box-shadow: 0 0 0 3px var(--brand-soft); }
 /* Náhled je vždycky 16:9: obrázek leží absolutně, takže vysoký (na výšku) rámeček neroztáhne - dřív

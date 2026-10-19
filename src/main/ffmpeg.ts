@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { constants as osConstants, setPriority } from 'node:os';
 import { parseProbe, progressPercent, type ProbeResult } from './editPlan';
 import { log } from './log';
@@ -13,6 +14,13 @@ export function ffmpegPath(): string {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   let p: string = require('ffmpeg-static');
   if (p.includes('app.asar')) p = p.replace('app.asar', 'app.asar.unpacked');
+  // macOS: ffmpeg-static stáhne při instalaci jen binárku pro procesor stroje, na kterém se staví
+  // (runner GitHubu = Apple Silicon), takže by Intel Mac dostal špatnou. Workflow proto přibalí
+  // ffmpeg pro každou architekturu zvlášť do resources/ffmpeg (electron-builder extraResources).
+  if (process.platform === 'darwin' && process.resourcesPath) {
+    const bundled = join(process.resourcesPath, 'ffmpeg', 'ffmpeg');
+    if (existsSync(bundled)) p = bundled;
+  }
   if (process.env.KINE_FFMPEG && existsSync(process.env.KINE_FFMPEG)) p = process.env.KINE_FFMPEG;
   return p;
 }

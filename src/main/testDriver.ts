@@ -1687,6 +1687,9 @@ export async function runTestDriver(kine: {
     if (gridWin && !gridWin.isDestroyed()) {
       result.portraitCard = await gridWin.webContents.executeJavaScript(`(() => {
         const cards = [...document.querySelectorAll('.clips .clip')];
+        // Karty mimo obrazovku se nekreslí (content-visibility: auto, 0.13.2) - pro měření rozložení
+        // všechny vykreslit, ať se porovnává skutečná velikost, ne odhad přeskočené karty.
+        for (const c of cards) c.style.contentVisibility = 'visible';
         const portrait = cards.find((c) => c.querySelector('.thumb.portrait'));
         const landscape = cards.find((c) => !c.querySelector('.thumb.portrait'));
         if (!portrait || !landscape) return { found: false };

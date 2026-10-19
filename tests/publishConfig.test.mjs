@@ -53,7 +53,8 @@ test('Certum: podpis z úložiště Windows (otisk), .dll a .node taky, bez ově
   assert.doesNotMatch(cfg.text, /azureSignOptions|publisherName/);
   // Bez pomocníka, dokud ho podpis.mjs nevyrobí.
   assert.equal(cfg.helperExe, false);
-  assert.doesNotMatch(cfg.text, /extraResources/);
+  // Pomocník (dist/helper) jen s podpisem; ffmpeg pro macOS (mac.extraResources) je tam vždycky.
+  assert.doesNotMatch(cfg.text, /from: dist\/helper/);
 });
 
 test('Certum má přednost před Azure; neplatný otisk = bez podpisu; pomocník jen s podpisem', () => {
@@ -67,7 +68,7 @@ test('Certum má přednost před Azure; neplatný otisk = bez podpisu; pomocník
   assert.match(azureOnly.text, /^extraResources:\n  - from: dist\/helper\n    to: helper\n    filter:\n      - kine-helper\.exe$/m);
   const broken = buildConfig({ KINE_SIGN: 'certum', KINE_SIGN_SHA1: 'abc', KINE_HELPER_EXE: '1' });
   assert.equal(broken.signing, false);
-  assert.doesNotMatch(broken.text, /signtoolOptions|signExts|extraResources|forceCodeSigning/);
+  assert.doesNotMatch(broken.text, /signtoolOptions|signExts|from: dist\/helper|forceCodeSigning/);
   const unsignedHelper = buildConfig({ KINE_HELPER_EXE: '1' });
   assert.equal(unsignedHelper.helperExe, false, 'nepodepsaný pomocník se nepřibaluje');
 });

@@ -910,4 +910,13 @@ export const sk: Record<Key, string> = {
   playerCameraSaved: 'Poloha kamery uložená.',
   aboutUpdateAutoAt: 'Nainštaluje sa sama najneskôr {date} - v pokojnej chvíli bez hry a nahrávania (Všeobecné -> Aktualizácie sa nainštalujú samy).',
   aboutUpdateAutoSoon: 'Kine túto verziu už neprijíma - nová sa nainštaluje sama, len čo bude pokoj (bez hry a nahrávania).',
+  audioNoLoopbackLinux: 'Zvuk hry: v systéme nie je vstup „Monitor of …“ (PipeWire / PulseAudio). Vyber ho vyššie ako zariadenie zvuku hry, alebo ho zapni v nastavení zvuku (pavucontrol → Recording → Monitor).',
+  audioNoLoopbackMac: 'Zvuk hry: macOS nevie nahrávať zvuk počítača sám. Nainštaluj zadarmo BlackHole (existential.audio/blackhole), vo Zvuku vytvor „viacvýstupové zariadenie“ (slúchadlá + BlackHole) a BlackHole vyber vyššie ako zariadenie zvuku hry.',
+  macScreenPermission: 'macOS: povoľ appke Záznam obrazovky (Nastavenia systému → Súkromie a bezpečnosť → Záznam obrazovky) a spusti ju znova - inak sú klipy len čierne.',
+  gifSearchPlaceholder: 'Hľadať GIF…',
+  gifOwnFile: 'Vlastný súbor',
+  gifMore: 'Ďalšie',
+  gifNone: 'Nič sa nenašlo.',
+  gifDownloading: 'Sťahujem GIF…',
+  gifNeedsLogin: 'GIFy z Kine sú len pre prihlásených - prihlás sa v záložke Účet, alebo vyber vlastný súbor.',
 };

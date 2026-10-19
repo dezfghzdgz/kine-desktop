@@ -138,9 +138,31 @@ function describeFeed(feed: FeedConfig | null): string {
   return feed.provider === 'generic' ? feed.url : `GitHub (${feed.owner}/${feed.repo})`;
 }
 
+/**
+ * Jen ruční aktualizace: macOS bez podpisu Apple (electron-updater by
+ * nepodepsanou appku nevyměnil) a Linux mimo AppImage (deb - instaluje
+ * se balíčkem). Kontroluje se verze na webu Kine a nabídne se stažení.
+ */
+function manualOnly(): boolean {
+  return process.platform === 'darwin' || (process.platform === 'linux' && !process.env.APPIMAGE);
+}
+
 export function initUpdater(d: Deps): void {
   deps = d;
   if (!app.isPackaged) return;
+  if (manualOnly()) {
+    log(`aktualizace: jen ručně (${process.platform}${process.platform === 'linux' ? ', ne AppImage' : ', bez podpisu Apple'}) - kontroluje se verze na webu Kine`);
+    setTimeout(() => void checkForUpdates(), 30000);
+    const scheduleManual = () => {
+      const hours = Math.max(1, deps?.checkHours?.() ?? 6);
+      setTimeout(() => {
+        void checkForUpdates();
+        scheduleManual();
+      }, hours * 60 * 60 * 1000);
+    };
+    scheduleManual();
+    return;
+  }
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { autoUpdater } = require('electron-updater') as typeof import('electron-updater');
@@ -448,17 +470,18 @@ export function lastUpdateCheck(): UpdateCheck | null {
 }
 
 export async function checkForUpdates(): Promise<UpdateCheck> {
-  if (!updater || !deps) return { status: 'disabled' };
+  if (!deps || (!updater && !(app.isPackaged && manualOnly()))) return { status: 'disabled' };
   // Už stažená verze: nic znovu nehledat, jen ji nabídnout.
   if (progress.phase === 'ready') return finish({ status: 'available', version: progress.version ?? undefined });
   if (progress.phase !== 'downloading') setProgress({ phase: 'checking', error: null });
   const current = app.getVersion();
   const primary = primaryFeed();
-  const feeds: { label: string; feed: FeedConfig | null }[] = [{ label: describeFeed(primary), feed: null }];
-  if (!primary || primary.provider !== 'github') feeds.push({ label: 'GitHub', feed: githubFeed(deps.variant) });
+  const feeds: { label: string; feed: FeedConfig | null }[] = updater ? [{ label: describeFeed(primary), feed: null }] : [];
+  if (updater && (!primary || primary.provider !== 'github')) feeds.push({ label: 'GitHub', feed: githubFeed(deps.variant) });
   const errors: string[] = [];
 
   for (const { label, feed } of feeds) {
+    if (!updater) break;
     try {
       if (feed) updater.setFeedURL(feed as any);
       const result = await updater.checkForUpdates();
@@ -492,9 +515,12 @@ export async function checkForUpdates(): Promise<UpdateCheck> {
       clipper?: { version?: string } | null;
       directUrl?: string;
       clipperDirectUrl?: string;
+      /** Odkazy podle systému (web od října 2026): downloads.full.mac, downloads.clipper.linux… */
+      downloads?: Partial<Record<'full' | 'clipper', Partial<Record<'windows' | 'mac' | 'linux', string>>>>;
     };
     const info = deps.variant === 'clipper' ? data.clipper : data.release;
-    const url = deps.variant === 'clipper' ? data.clipperDirectUrl : data.directUrl;
+    const os = process.platform === 'darwin' ? 'mac' : process.platform === 'linux' ? 'linux' : 'windows';
+    const url = data.downloads?.[deps.variant]?.[os] ?? (os === 'windows' ? (deps.variant === 'clipper' ? data.clipperDirectUrl : data.directUrl) : `${deps.siteUrl()}/download`);
     const version = info?.version ?? null;
     if (!version) throw new Error('web nezná verzi');
     if (isNewerVersion(version, current)) {

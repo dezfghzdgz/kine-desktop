@@ -42,6 +42,8 @@ export type TrimOptions = {
   camera?: CameraBake | null;
   /** Jen první (smíchaná) zvuková stopa (kopie k nahrání na Kine). */
   firstAudioOnly?: boolean;
+  /** Práce na pozadí (kopie k nahrání): nižší priorita procesu, ať hra nebo přehrávání neseká. */
+  low?: boolean;
 };
 
 export type TrimResult = { file: string; durationSeconds: number; sizeBytes: number; width: number | null; height: number | null; audioTracks?: AudioTrackKind[] | null };
@@ -50,9 +52,9 @@ export type TrimResult = { file: string; durationSeconds: number; sizeBytes: num
  * Spustí ffmpeg s `-progress pipe:1` a hlásí procenta podle out_time
  * vůči očekávané délce výstupu. Při chybě hodí poslední řádek stderr.
  */
-function runWithProgress(args: string[], totalSeconds: number, what: string, onProgress?: (percent: number) => void): Promise<void> {
+function runWithProgress(args: string[], totalSeconds: number, what: string, onProgress?: (percent: number) => void, low = false): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const child = spawnFfmpeg(args);
+    const child = spawnFfmpeg(args, { low });
     let stderr = '';
     let stdout = '';
     child.stderr.on('data', (d) => {
@@ -126,7 +128,7 @@ export async function trimClip(input: string, output: string, options: TrimOptio
     sourceHeight: info?.height ?? null,
     webm: /\.webm$/i.test(output),
   });
-  await runWithProgress(plan.args, plan.outputSeconds, 'zkrácení klipu', onProgress);
+  await runWithProgress(plan.args, plan.outputSeconds, 'zkrácení klipu', onProgress, options.low === true);
   const result = await describe(output, plan.outputSeconds);
   onProgress?.(100);
   return { ...result, audioTracks: plan.tracks };

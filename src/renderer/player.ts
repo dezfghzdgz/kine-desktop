@@ -148,7 +148,17 @@ export type PlayerOptions = {
     thumbnail?: (clip: Clip, atSeconds: number) => Promise<unknown>;
     /** Obrázek / GIF do klipu (dialog v hlavním procesu); bez tohohle jsou v překryvech jen texty. */
     pickImage?: () => Promise<{ file: string; kind: 'image' | 'gif'; name: string; url: string } | null>;
+    /** Hledání GIFů na Kine (Giphy přes server Kine) a výběr - stáhne GIF do appky; bez tohohle jen vlastní soubor. */
+    gifSearch?: (query: string, offset?: number) => Promise<GifHit[]>;
+    gifPick?: (gif: GifHit) => Promise<{ file: string; kind: 'gif'; name: string; url: string } | null>;
   };
+};
+
+export type GifHit = {
+  id: string;
+  title: string;
+  preview: { url: string; width: number; height: number };
+  full: { url: string; width: number; height: number; size: number };
 };
 
 export type PlayerHandle = {
@@ -1031,14 +1041,100 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
   // Překryvy: text, obrázek, GIF kdekoli v obraze. Seznam (čipy) + nastavení vybraného.
   const addTextBtn = h('button', { class: 'small quiet trim-add-text', onclick: () => addOverlay('text') }, icon('pencil', 13), t('trimAddText')) as HTMLButtonElement;
   const addImageBtn = h('button', { class: 'small quiet trim-add-image', onclick: () => void addImageOverlay('image') }, icon('image', 13), t('trimAddImage')) as HTMLButtonElement;
-  const addGifBtn = h('button', { class: 'small quiet trim-add-gif', onclick: () => void addImageOverlay('gif') }, icon('sparkle', 13), 'GIF') as HTMLButtonElement;
+  const addGifBtn = h('button', { class: 'small quiet trim-add-gif', onclick: () => (edit?.gifSearch ? toggleGifPicker() : void addImageOverlay('gif')) }, icon('sparkle', 13), 'GIF') as HTMLButtonElement;
   const overlayChips = h('div', { class: 'row trim-ov-chips', style: 'gap:6px' });
   const overlayEditor = h('div', { class: 'trim-ov-editor hidden' });
   const overlayHint = h('p', { class: 'hint trim-ov-hint' }, t('trimOverlayHint'));
+  // Hledání GIFů (stejný zdroj jako GIFy na Kine - Giphy přes server Kine): pole, mřížka náhledů, vlastní soubor.
+  const gifQuery = h('input', { type: 'search', class: 'gif-query', placeholder: t('gifSearchPlaceholder'), 'aria-label': t('gifSearchPlaceholder') }) as HTMLInputElement;
+  const gifGrid = h('div', { class: 'gif-grid' });
+  const gifStatus = h('p', { class: 'hint gif-status', style: 'margin:0' });
+  const gifMore = h('button', { class: 'small quiet gif-more hidden', onclick: () => void searchGifs(gifLastQuery, gifOffset) }, t('gifMore')) as HTMLButtonElement;
+  const gifPicker = h(
+    'div',
+    { class: 'gif-picker hidden' },
+    h(
+      'div',
+      { class: 'row', style: 'gap:6px' },
+      gifQuery,
+      edit?.pickImage ? h('button', { class: 'small quiet', title: t('gifOwnFile'), onclick: () => void addImageOverlay('gif') }, icon('folder', 13), t('gifOwnFile')) : null,
+      h('button', { class: 'small quiet', 'aria-label': t('playerClose'), onclick: () => toggleGifPicker(false) }, icon('close', 13))
+    ),
+    gifStatus,
+    gifGrid,
+    h('div', { class: 'row', style: 'gap:8px;align-items:center' }, gifMore, h('span', { class: 'faint gif-attribution' }, 'Powered by GIPHY'))
+  );
+  let gifLastQuery = '';
+  let gifOffset = 0;
+  let gifSearchSeq = 0;
+  let gifTimer: ReturnType<typeof setTimeout> | null = null;
+  gifQuery.addEventListener('input', () => {
+    if (gifTimer) clearTimeout(gifTimer);
+    gifTimer = setTimeout(() => void searchGifs(gifQuery.value.trim(), 0), 400);
+  });
+  gifQuery.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (gifTimer) clearTimeout(gifTimer);
+      void searchGifs(gifQuery.value.trim(), 0);
+    }
+    e.stopPropagation();
+  });
+  function toggleGifPicker(open = gifPicker.classList.contains('hidden')) {
+    gifPicker.classList.toggle('hidden', !open);
+    addGifBtn.classList.toggle('active', open);
+    if (open) {
+      gifQuery.focus();
+      if (gifGrid.childElementCount === 0) void searchGifs('', 0);
+    }
+  }
+  async function searchGifs(query: string, offset: number) {
+    if (!edit?.gifSearch) return;
+    const seq = ++gifSearchSeq;
+    gifStatus.textContent = t('loading');
+    gifMore.classList.add('hidden');
+    let hits: GifHit[] = [];
+    try {
+      hits = await edit.gifSearch(query, offset);
+    } catch (e) {
+      if (seq !== gifSearchSeq || closed) return;
+      const msg = errorText(e, t);
+      gifStatus.textContent = /401|přihlá|logged|sign in/i.test(msg) ? t('gifNeedsLogin') : msg;
+      if (offset === 0) clear(gifGrid);
+      return;
+    }
+    if (seq !== gifSearchSeq || closed) return;
+    if (offset === 0) clear(gifGrid);
+    gifLastQuery = query;
+    gifOffset = offset + hits.length;
+    for (const hit of hits) {
+      const img = h('img', { src: hit.preview.url, alt: hit.title, loading: 'lazy', draggable: 'false' });
+      gifGrid.append(h('button', { class: 'gif-hit', title: hit.title, onclick: () => void useGif(hit) }, img));
+    }
+    gifStatus.textContent = hits.length === 0 && offset === 0 ? t('gifNone') : '';
+    gifMore.classList.toggle('hidden', hits.length < 24);
+  }
+  async function useGif(hit: GifHit) {
+    if (!edit?.gifPick || overlays.length >= OVERLAY_MAX) return;
+    gifStatus.textContent = t('gifDownloading');
+    try {
+      const picked = await edit.gifPick(hit);
+      if (closed) return;
+      gifStatus.textContent = '';
+      if (picked) {
+        await addImageOverlay('gif', picked);
+        toggleGifPicker(false);
+      }
+    } catch (e) {
+      if (closed) return;
+      gifStatus.textContent = /too-large/.test(String((e as Error)?.message ?? e)) ? t('trimOverlayTooLarge') : errorText(e, t);
+    }
+  }
   const overlaysRow = h(
     'div',
     { class: 'trim-section trim-overlays' },
-    h('div', { class: 'row', style: 'gap:6px' }, h('span', { class: 'faint', style: 'margin-right:4px' }, t('trimOverlays')), addTextBtn, edit?.pickImage ? addImageBtn : null, edit?.pickImage ? addGifBtn : null, h('span', { class: 'faint trim-ov-count' })),
+    h('div', { class: 'row', style: 'gap:6px' }, h('span', { class: 'faint', style: 'margin-right:4px' }, t('trimOverlays')), addTextBtn, edit?.pickImage ? addImageBtn : null, edit?.pickImage || edit?.gifSearch ? addGifBtn : null, h('span', { class: 'faint trim-ov-count' })),
+    gifPicker,
     overlayChips,
     overlayEditor,
     overlayHint
@@ -1511,14 +1607,16 @@ export function openPlayer(options: PlayerOptions): PlayerHandle {
     input?.focus();
   }
   /** Obrázek / GIF ze souboru (dialog hlavního procesu); poměr stran se zjistí načtením. */
-  async function addImageOverlay(kind: 'image' | 'gif') {
-    if (!edit?.pickImage || overlays.length >= OVERLAY_MAX) return;
-    let picked: { file: string; kind: 'image' | 'gif'; name: string; url: string } | null = null;
-    try {
-      picked = await edit.pickImage();
-    } catch (e) {
-      showNote(/too-large/.test(String((e as Error)?.message ?? e)) ? t('trimOverlayTooLarge') : t('trimFailed', { message: errorText(e, t) }), 'error');
-      return;
+  async function addImageOverlay(kind: 'image' | 'gif', prepicked?: { file: string; kind: 'image' | 'gif'; name: string; url: string } | null) {
+    if ((!edit?.pickImage && !prepicked) || overlays.length >= OVERLAY_MAX) return;
+    let picked: { file: string; kind: 'image' | 'gif'; name: string; url: string } | null = prepicked ?? null;
+    if (!picked) {
+      try {
+        picked = await edit!.pickImage!();
+      } catch (e) {
+        showNote(/too-large/.test(String((e as Error)?.message ?? e)) ? t('trimOverlayTooLarge') : t('trimFailed', { message: errorText(e, t) }), 'error');
+        return;
+      }
     }
     if (!picked || closed) return;
     const ratio = await new Promise<number>((resolve) => {

@@ -451,8 +451,24 @@ export async function runTestDriver(kine: {
         const overlayUi = await win.webContents.executeJavaScript(
           `(() => ({ chips: document.querySelectorAll('.trim-ov-chips .ov-chip').length, size: !!document.querySelector('input.trim-ov-size'), whole: !!document.querySelector('.trim-ov-time input[type=checkbox]:checked'), image: !!document.querySelector('.trim-add-image'), gif: !!document.querySelector('.trim-add-gif'), selected: !!document.querySelector('.ov-item.selected .ov-handle') }))()`
         );
+        // Hledání GIFů (Giphy přes Kine, 0.13.0): tlačítko GIF otevře pole hledání, vlastní soubor a "Powered by GIPHY";
+        // bez přihlášení (e2e) napíše stav - nic nespadne; zavření zase schová.
+        await win.webContents.executeJavaScript(`(() => { const b = document.querySelector('.trim-add-gif'); if (b) b.click(); return !!b; })()`);
+        let gifStatus = '';
+        for (let i = 0; i < 25 && !gifStatus; i++) {
+          await sleep(200);
+          gifStatus = await win.webContents.executeJavaScript(`(() => { const s = document.querySelector('.gif-picker:not(.hidden) .gif-status'); const grid = document.querySelector('.gif-picker:not(.hidden) .gif-grid'); return (grid && grid.childElementCount > 0) ? 'results' : (s ? s.textContent : ''); })()`);
+        }
+        const gifUi = await win.webContents.executeJavaScript(
+          `(() => { const p = document.querySelector('.gif-picker'); return { open: !!p && !p.classList.contains('hidden'), query: !!p?.querySelector('input.gif-query'), own: !!p?.querySelector('button[title]'), attribution: (p?.querySelector('.gif-attribution')?.textContent || '').includes('GIPHY') }; })()`
+        );
+        await shot(win, 'settings-clips-gifs');
+        await win.webContents.executeJavaScript(`(() => { const b = document.querySelector('.trim-add-gif'); if (b) b.click(); return !!b; })()`);
+        await sleep(150);
+        const gifClosed = await win.webContents.executeJavaScript(`!!document.querySelector('.gif-picker.hidden')`);
+        overlayUi.gifPicker = { ...gifUi, status: gifStatus, closed: gifClosed };
         result.overlayUi = overlayUi;
-        result.overlayUiOk = overlayUi.chips === 1 && overlayUi.size && overlayUi.whole && overlayUi.image && overlayUi.gif && overlayUi.selected;
+        result.overlayUiOk = overlayUi.chips === 1 && overlayUi.size && overlayUi.whole && overlayUi.image && overlayUi.gif && overlayUi.selected && gifUi.open && gifUi.query && gifUi.own && gifUi.attribution && !!gifStatus && gifClosed;
         const lens: string = await win.webContents.executeJavaScript(`[...document.querySelectorAll('.trim-vals b')][2]?.textContent ?? ''`);
         await shot(win, 'settings-clips-text');
         await win.webContents.executeJavaScript(`(() => { const b = [...document.querySelectorAll('.trim-actions button')][0]; if (b && !b.disabled) b.click(); return !!b && !b.disabled; })()`);

@@ -57,14 +57,31 @@ nsis:
   # anglicky s výběrem jazyka v průvodci, tak ať je i instalátor.
   multiLanguageInstaller: false
   language: 1033
+# Linux: AppImage (jeden soubor, aktualizuje se sám) a deb (Ubuntu / Mint / Debian).
+# macOS: dmg + zip (zip potřebuje electron-updater), univerzální pro Intel i Apple
+# Silicon. Názvy souborů a ikony doplňuje scripts/publish-config.mjs.
 linux:
-  target: [dir]
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
   category: AudioVideo
   icon: build/icon.png
+  maintainer: kinesupport@gmail.com
 mac:
-  target: [dmg]
+  target:
+    - target: dmg
+      arch: [universal]
+    - target: zip
+      arch: [universal]
   category: public.app-category.video
   icon: build/icon.png
+  # Bez podpisu Apple (vyžaduje Apple Developer účet): macOS appku při prvním otevření
+  # odmítne - Nastavení systému -> Soukromí a zabezpečení -> Přesto otevřít (README).
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
 publish:
   provider: github
   owner: dezfghzdgz

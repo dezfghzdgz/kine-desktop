@@ -910,4 +910,13 @@ export const uk: Record<Key, string> = {
   playerCameraSaved: 'Положення камери збережено.',
   aboutUpdateAutoAt: 'Встановиться сама щонайпізніше {date} - у спокійну мить без гри та запису (Загальне -> Встановлювати оновлення автоматично).',
   aboutUpdateAutoSoon: 'Kine більше не приймає цю версію - нова встановиться сама, щойно буде спокійно (без гри та запису).',
+  audioNoLoopbackLinux: 'Звук гри: у системі немає входу «Monitor of …» (PipeWire / PulseAudio). Вибери його вище як пристрій звуку гри або ввімкни в налаштуваннях звуку (pavucontrol → Recording → Monitor).',
+  audioNoLoopbackMac: 'Звук гри: macOS сам не записує звук системи. Встанови безкоштовний BlackHole (existential.audio/blackhole), у Audio MIDI Setup створи «пристрій з кількома виходами» (навушники + BlackHole) і вибери BlackHole вище як пристрій звуку гри.',
+  macScreenPermission: 'macOS: дозволь застосунку запис екрана (Системні параметри → Конфіденційність і безпека → Запис екрана) і запусти його знову - інакше кліпи будуть чорними.',
+  gifSearchPlaceholder: 'Шукати GIF…',
+  gifOwnFile: 'Власний файл',
+  gifMore: 'Ще',
+  gifNone: 'Нічого не знайдено.',
+  gifDownloading: 'Завантажую GIF…',
+  gifNeedsLogin: 'GIF із Kine лише для авторизованих - увійди у вкладці Обліковий запис або вибери власний файл.',
 };

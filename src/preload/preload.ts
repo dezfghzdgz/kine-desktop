@@ -63,6 +63,10 @@ const kine = {
   /** Text do schránky (odkaz na klip). */
   /** Obrázek / GIF do klipu (překryv v úpravách) - dialog; null = zrušeno. */
   pickOverlayImage: (): Promise<{ file: string; kind: 'image' | 'gif'; name: string; url: string } | null> => ipcRenderer.invoke('clips:pickOverlayImage'),
+  /** GIFy z Kine (Giphy přes server Kine) do překryvů: hledání a výběr (stáhne se do appky). */
+  searchGifs: (query: string, offset = 0): Promise<{ id: string; title: string; preview: { url: string; width: number; height: number }; full: { url: string; width: number; height: number; size: number } }[]> =>
+    ipcRenderer.invoke('gifs:search', query, offset),
+  pickGif: (gif: { id: string; title: string; full: { url: string } }): Promise<{ file: string; kind: 'gif'; name: string; url: string } | null> => ipcRenderer.invoke('gifs:pick', gif),
   /** Kamera zvlášť (Clip.camera) posunutá / zvětšená v přehrávači: levý horní roh a šířka jako podíly obrazu. */
   setClipCamera: (id: string, layout: { x: number; y: number; w: number }): Promise<Clip | null> => ipcRenderer.invoke('clips:setCamera', id, layout),
   copyText: (text: string): Promise<void> => ipcRenderer.invoke('app:copy', text),

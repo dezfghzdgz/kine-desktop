@@ -174,6 +174,39 @@ export function parsePsList(text: string): Set<string> {
 }
 
 /**
+ * Linux: `ps -eo pid=,comm=` zkracuje název na 15 znaků ("RocketLeague.ex"),
+ * `ps -eo pid=,args=` má celou příkazovou řádku, ale cesta s mezerami v ní
+ * nemá uvozovky. Proto se kombinují: krátký název (do 14 znaků) je přesný a
+ * bere se z comm; u 15 znaků (možná zkrácený) se dohledá v args - hry přes
+ * Wine / Proton jako "Z:\\hry\\Rocket League\\RocketLeague.exe -flag" podle
+ * ".exe", jinak první slovo, které na comm navazuje. Vlákna jádra ([kworker]) pryč.
+ */
+export function parsePsLinux(commText: string, argsText: string): Set<string> {
+  const args = new Map<string, string>();
+  for (const raw of argsText.split(/\r?\n/)) {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(raw);
+    if (m) args.set(m[1], m[2].trim());
+  }
+  const names = new Set<string>();
+  for (const raw of commText.split(/\r?\n/)) {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(raw);
+    if (!m) continue;
+    const comm = m[2].trim();
+    const line = args.get(m[1]) ?? '';
+    // Vlákna jádra mají v args jen "[kworker/0:1]" - žádný program.
+    if (!comm || comm.startsWith('[') || line.startsWith('[')) continue;
+    let name = comm.toLowerCase();
+    if (comm.length >= 15) {
+      const exe = /^(.*?\.exe)(?=\s|$)/i.exec(line);
+      const candidate = (exe ? exe[1] : line.split(/\s+/)[0] ?? '').split(/[\\/]/).pop()?.toLowerCase() ?? '';
+      if (candidate.startsWith(name.slice(0, 14))) name = candidate;
+    }
+    names.add(name);
+  }
+  return names;
+}
+
+/**
  * Výstup `reg query HKCU\Software\Valve\Steam /v RunningAppID`:
  *     RunningAppID    REG_DWORD    0x2f0
  * Nula = nic neběží. Vrací id hry nebo 0.

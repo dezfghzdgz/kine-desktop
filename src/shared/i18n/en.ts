@@ -925,6 +925,15 @@ export const en = {
   playerCameraSaved: 'Camera position saved.',
   aboutUpdateAutoAt: 'It will install itself by {date} at the latest - in a quiet moment with no game or recording (General -> Install updates automatically).',
   aboutUpdateAutoSoon: 'Kine no longer accepts this version - the new one will install itself as soon as things are quiet (no game or recording).',
+  audioNoLoopbackLinux: 'Game audio: no “Monitor of …” input (PipeWire / PulseAudio) is available. Pick it above as the game audio device, or enable it in your sound settings (pavucontrol → Recording → Monitor).',
+  audioNoLoopbackMac: 'Game audio: macOS cannot record system audio by itself. Install the free BlackHole (existential.audio/blackhole), create a “Multi-Output Device” (headphones + BlackHole) in Audio MIDI Setup and pick BlackHole above as the game audio device.',
+  macScreenPermission: 'macOS: allow Screen Recording for the app (System Settings → Privacy & Security → Screen Recording) and start it again - otherwise clips are just black.',
+  gifSearchPlaceholder: 'Search GIFs…',
+  gifOwnFile: 'Own file',
+  gifMore: 'More',
+  gifNone: 'Nothing found.',
+  gifDownloading: 'Downloading the GIF…',
+  gifNeedsLogin: 'GIFs from Kine are for signed-in players only - sign in under Account, or pick your own file.',
 } as const;
 
 export type Key = keyof typeof en;

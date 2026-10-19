@@ -10,6 +10,7 @@ import {
   needsConfirmation,
   parseAcfName,
   parseLibraryFolders,
+  parsePsLinux,
   parsePsList,
   parseSteamPath,
   parseSteamRunningAppId,
@@ -160,6 +161,11 @@ export class GameWatcher {
       const fromHelper = this.deps.helper?.processes();
       if (fromHelper) return fromHelper;
       return parseTasklistCsv(await run('tasklist', ['/FO', 'CSV', '/NH']));
+    }
+    // Linux: comm je zkrácený na 15 znaků - dlouhé názvy se dohledají v příkazové řádce (i hry přes Wine / Proton).
+    if (process.platform === 'linux') {
+      const [comm, args] = await Promise.all([run('ps', ['-eo', 'pid=,comm=']), run('ps', ['-eo', 'pid=,args='])]);
+      return parsePsLinux(comm, args);
     }
     return parsePsList(await run('ps', ['-eo', 'comm=']));
   }

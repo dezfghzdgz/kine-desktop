@@ -25,6 +25,7 @@ import {
   screen,
   session,
   shell,
+  systemPreferences,
 } from 'electron';
 import {
   CATEGORY_KEYS,
@@ -70,7 +71,7 @@ import { GameEvents } from './gameEvents';
 import { KNOWN_GAMES } from './gamesParse';
 import { Auth } from './auth';
 import { checkSiteMove } from './siteMove';
-import { createKineApi, type KineApi } from './kineApi';
+import { createKineApi, type KineApi, type GifHit } from './kineApi';
 import { UPLOAD_ERROR_LOGIN, Uploader } from './uploader';
 import { Toast, type ToastHandle, type ToastOptions } from './toast';
 import {
@@ -119,6 +120,15 @@ const RENDERER_DIR = join(__dirname, '..', 'renderer');
 /** Která ze dvou appek běží (Kine do PC / Kine Clipper) - viz variant.ts. */
 const VARIANT = detectVariant();
 const PRODUCT = PRODUCT_NAMES[VARIANT];
+
+/**
+ * Cesta do pole Exec v souboru .desktop (Linux): v uvozovkách, se zpětným
+ * lomítkem před ", `, $ a \ - a protože se napřed uplatní obecné escapování
+ * řetězce, je literální zpětné lomítko čtyřnásobné (Desktop Entry Specification).
+ */
+function desktopExecQuote(path: string): string {
+  return '"' + path.replace(/\\/g, '\\\\\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`') + '"';
+}
 
 /** Úprava klipu z okna (přehrávač): výběr, zvuk, formát, rychlost, text. */
 type TrimIpcRequest = {
@@ -589,6 +599,8 @@ class KineApp {
     // zůstaly v dočasné složce - odložit je (dřív, než je start zásobníku smaže) a slepit.
     if (this.capture.salvageLeftovers().waiting > 0) setTimeout(() => void this.recoverRecordings(), 4000);
 
+    // macOS: bez povolení „Záznam obrazovky“ by snímání dávalo černý obraz - říct to hned a otevřít nastavení systému.
+    this.checkMacPermissions();
     // Po spuštění: nahrávat hned (podle režimu), počkat na první hru, nebo nic, dokud to hráč nezapne.
     const launch = this.settings.get().launchCapture;
     if (launch === 'paused' && this.settings.get().detection !== 'manual') {
@@ -1125,7 +1137,7 @@ class KineApp {
       if (!(total > 0)) throw new Error('unknown length');
       // Zapečení kamery = překódování celého klipu (edit.ts), zvuk jen smíchaná stopa.
       const tmp = `${part}${webm ? '.webm' : '.mp4'}`;
-      await trimClip(clip.file, tmp, { start: 0, end: total, mute: false, videoMbps: this.settings.get().videoMbps, audio: 'mix', audioTracks: clip.audioTracks, firstAudioOnly: true, camera }, progress);
+      await trimClip(clip.file, tmp, { start: 0, end: total, mute: false, videoMbps: this.settings.get().videoMbps, audio: 'mix', audioTracks: clip.audioTracks, firstAudioOnly: true, camera, low: true }, progress);
       renameSync(tmp, target);
       writeFileSync(sidecar, signature);
       log(`${basename(clip.file)}: kamera zapečená do kopie k nahrání (${Math.round(camera.w * 100)} % šířky, ${camera.shape})`);
@@ -1842,6 +1854,28 @@ class KineApp {
    * jen když appka neběží teprve chvilku (po startu se nic "jen tak"
    * neukazuje). Systémové oznámení nikdy.
    */
+  /**
+   * macOS: záznam obrazovky povoluje systém po aplikacích (Nastavení systému ->
+   * Soukromí a zabezpečení -> Záznam obrazovky) a bere se až po novém spuštění
+   * appky. Bez něj Chromium vrátí černý obraz bez chyby - proto upozornění
+   * s odkazem rovnou do nastavení systému. Kamera a mikrofon se ptají samy.
+   */
+  private checkMacPermissions(): void {
+    if (process.platform !== 'darwin' || process.env.KINE_TEST) return;
+    try {
+      const status = systemPreferences.getMediaAccessStatus('screen');
+      if (status === 'granted') {
+        this.dismissNotice('mac-screen');
+        return;
+      }
+      log(`macOS: záznam obrazovky ${status}`);
+      this.addNotice({ id: 'mac-screen', text: this.t('macScreenPermission'), kind: 'warn', tab: 'settings:capture' });
+      if (status === 'not-determined' || status === 'denied') void shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+    } catch (e) {
+      log(`macOS oprávnění: ${(e as Error).message}`);
+    }
+  }
+
   private quietNotice(id: string, text: string, kind: 'warn' | 'info', tab?: string): void {
     log(`upozornění: ${text}`);
     this.addNotice({ id, text, kind, tab });
@@ -1952,8 +1986,25 @@ class KineApp {
 
   private applyLoginItem(): void {
     if (!app.isPackaged) return;
+    const on = this.settings.get().startWithSystem;
+    // Linux: Electron spouštění po přihlášení neumí - soubor .desktop v ~/.config/autostart
+    // (AppImage spouští sám sebe přes $APPIMAGE, deb přes nainstalovaný program).
+    if (process.platform === 'linux') {
+      const dir = join(homedir(), '.config', 'autostart');
+      const file = join(dir, `kine-${VARIANT}.desktop`);
+      try {
+        if (on) {
+          const exec = process.env.APPIMAGE ?? process.execPath;
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(file, `[Desktop Entry]\nType=Application\nName=${PRODUCT}\nExec=${desktopExecQuote(exec)} --hidden\nX-GNOME-Autostart-enabled=true\nTerminal=false\n`);
+        } else rmSync(file, { force: true });
+      } catch (e) {
+        log(`spouštění se systémem: ${(e as Error).message}`);
+      }
+      return;
+    }
     try {
-      app.setLoginItemSettings({ openAtLogin: this.settings.get().startWithSystem, args: ['--hidden'] });
+      app.setLoginItemSettings({ openAtLogin: on, args: ['--hidden'] });
     } catch (e) {
       log(`spouštění se systémem: ${(e as Error).message}`);
     }
@@ -2877,6 +2928,67 @@ class KineApp {
     return { file, kind, name: basename(file), url: pathToFileURL(file).href };
   }
 
+  /** GIFy z Kine (Giphy přes server Kine) pro překryvy; prázdný dotaz = trendy. */
+  searchGifs(query: unknown, offset: unknown): Promise<GifHit[]> {
+    return this.kineApi.searchGifs(typeof query === 'string' ? query : '', Number(offset) || 0);
+  }
+
+  /**
+   * Vybraný GIF z hledání: stáhne se do userData/overlays (jen z giphy.com,
+   * do 15 MB) a pustí se do překryvů stejně jako soubor z dialogu (overlayFiles).
+   * Soubory se nepamatují navždy - při startu zůstane posledních 40.
+   */
+  async pickGif(gif: unknown): Promise<{ file: string; kind: 'gif'; name: string; url: string } | null> {
+    const g = gif as Partial<GifHit> | null;
+    const src = typeof g?.full?.url === 'string' ? g.full.url : '';
+    const id = typeof g?.id === 'string' ? g.id.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) : '';
+    if (!id || !/^https:\/\/([a-z0-9-]+\.)*giphy\.com\//i.test(src)) throw new Error('bad gif');
+    const dir = join(app.getPath('userData'), 'overlays');
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `giphy-${id}.gif`);
+    if (!existsSync(file)) {
+      const res = await net.fetch(src, { signal: AbortSignal.timeout(60_000) });
+      if (!res.ok || !res.body) throw new Error(`gif ${res.status}`);
+      const length = Number(res.headers.get('content-length') || 0);
+      if (length > 15 * 1024 * 1024) throw new Error('too-large');
+      // Čte se po kusech se stropem - server bez Content-Length by jinak mohl poslat cokoli.
+      const parts: Buffer[] = [];
+      let total = 0;
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > 15 * 1024 * 1024) {
+          await reader.cancel().catch(() => undefined);
+          throw new Error('too-large');
+        }
+        parts.push(Buffer.from(value));
+      }
+      const buffer = Buffer.concat(parts);
+      // GIF začíná "GIF8" - cokoli jiného (HTML s chybou) do klipu nepatří.
+      if (buffer.length < 6 || buffer.toString('latin1', 0, 4) !== 'GIF8') throw new Error('bad gif');
+      writeFileSync(file, buffer);
+      this.pruneOverlayDir(dir, 40);
+    }
+    this.overlayFiles.add(file);
+    const title = typeof g?.title === 'string' && g.title.trim() ? g.title.trim().slice(0, 60) : `GIF ${id}`;
+    return { file, kind: 'gif', name: title, url: pathToFileURL(file).href };
+  }
+
+  /** Stažené GIFy: nechat jen posledních `keep` (podle času změny). */
+  private pruneOverlayDir(dir: string, keep: number): void {
+    try {
+      const files = readdirSync(dir)
+        .filter((n) => n.endsWith('.gif'))
+        .map((n) => ({ n, t: statSync(join(dir, n)).mtimeMs }))
+        .sort((a, b) => b.t - a.t);
+      for (const f of files.slice(keep)) rmSync(join(dir, f.n), { force: true });
+    } catch {
+      // úklid není důležitý
+    }
+  }
+
   /**
    * Nahraný klip na Discord přes webhook z nastavení: jedna zpráva s názvem
    * a odkazem (Discord si z odkazu na Kine udělá náhled sám).
@@ -3149,6 +3261,8 @@ class KineApp {
     ipcMain.handle('clips:clipNow', () => this.onClipHotkey());
     ipcMain.handle('clips:trim', (_e, id: string, opts: TrimIpcRequest) => this.trimClip(id, opts));
     ipcMain.handle('clips:pickOverlayImage', () => this.pickOverlayImage());
+    ipcMain.handle('gifs:search', (_e, query: unknown, offset: unknown) => this.searchGifs(query, offset));
+    ipcMain.handle('gifs:pick', (_e, gif: unknown) => this.pickGif(gif));
     ipcMain.handle('clips:setCamera', (_e, id: unknown, layout: unknown) => (typeof id === 'string' ? this.setClipCameraLayout(id, (layout ?? {}) as { x: number; y: number; w: number }) : null));
     ipcMain.handle('app:copy', (_e, text: string) => clipboard.writeText(String(text ?? '')));
     ipcMain.handle('clips:discord', (_e, id: string) => this.shareToDiscord(id));
@@ -3449,6 +3563,8 @@ app.on('will-quit', () => {
 // Zkouška bez zvukové karty (Xvfb): Chromium podstrčí falešný mikrofon s tónem,
 // ať se dá ověřit míchání zvuku, měřáky a že klip zvuk opravdu má.
 if (process.env.KINE_TEST_FAKE_AUDIO) app.commandLine.appendSwitch('use-fake-device-for-media-stream');
+// Linux s Waylandem: snímání obrazovky jde přes PipeWire (portál) - bez téhle volby by Chromium nenašlo žádnou obrazovku.
+if (process.platform === 'linux') app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer');
 
 void app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock?.hide();

@@ -38,6 +38,9 @@ export const VARIANTS = {
     name: 'kine-desktop',
     appId: 'cz.kine.desktop',
     artifact: 'Kine-Setup.${ext}',
+    // Linux (AppImage, deb) a macOS (dmg + zip): pevné názvy, ať na ně web může odkazovat.
+    linuxArtifact: 'Kine-Linux.${ext}',
+    macArtifact: 'Kine-Mac.${ext}',
     icon: 'build/icon.png',
     output: 'release/full',
     folder: 'full',
@@ -48,6 +51,8 @@ export const VARIANTS = {
     name: 'kine-clipper',
     appId: 'cz.kine.clipper',
     artifact: 'Kine-Clipper-Setup.${ext}',
+    linuxArtifact: 'Kine-Clipper-Linux.${ext}',
+    macArtifact: 'Kine-Clipper-Mac.${ext}',
     icon: 'build/icon-clipper.png',
     output: 'release/clipper',
     folder: 'clipper',
@@ -115,6 +120,31 @@ export function buildConfig(env = process.env) {
     lines.push('extraResources:', '  - from: dist/helper', '    to: helper', '    filter:', '      - kine-helper.exe');
   }
   lines.push('nsis:', `  artifactName: ${JSON.stringify(v.artifact)}`, `  shortcutName: ${JSON.stringify(v.productName)}`);
+  // Linux: AppImage (aktualizuje se sám přes electron-updater) + deb; macOS: dmg ke stažení a zip pro
+  // aktualizace, univerzální (Intel i Apple Silicon). Bez podpisu Apple (identity: null) - viz README.
+  lines.push(
+    'linux:',
+    `  icon: ${v.icon}`,
+    `  artifactName: ${JSON.stringify(v.linuxArtifact)}`,
+    `  executableName: ${JSON.stringify(v.name)}`,
+    `  synopsis: ${JSON.stringify(variantKey === 'clipper' ? 'Clips from your games, uploaded to Kine' : 'Kine and clips from your games')}`,
+    '  desktop:',
+    '    entry:',
+    `      Name: ${JSON.stringify(v.productName)}`,
+    '      StartupWMClass: ' + JSON.stringify(v.name),
+    'mac:',
+    `  icon: ${v.icon}`,
+    `  artifactName: ${JSON.stringify(v.macArtifact)}`,
+    '  identity: null',
+    '  hardenedRuntime: false',
+    '  gatekeeperAssess: false',
+    '  extendInfo:',
+    '    NSCameraUsageDescription: "Camera in your clips and streams (only when you turn it on)."',
+    '    NSMicrophoneUsageDescription: "Your voice in clips and streams (only when you turn it on)."',
+    'dmg:',
+    `  artifactName: ${JSON.stringify(v.macArtifact)}`,
+    `  title: ${JSON.stringify(v.productName)}`
+  );
   lines.push('publish:');
   if (base) {
     // První poskytovatel = odkud si appka bere aktualizace (app-update.yml).

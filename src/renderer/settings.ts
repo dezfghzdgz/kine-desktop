@@ -2904,6 +2904,8 @@ function audioLiveNote(): string {
   if (status.capture !== 'on' || !l) return t('audioMetersIdle');
   if (l.system === null) {
     if (!settings.systemAudio) return t('audioSystemOff');
+    // Linux / macOS: není vstup, který by zvuk počítače nahrával - poradit, jak ho zapnout.
+    if (l.systemError === 'no-loopback-input') return kine.platform === 'darwin' ? t('audioNoLoopbackMac') : t('audioNoLoopbackLinux');
     // Proč: zařízení a důvod od Windows (bez něj se nedá poradit).
     return l.systemError
       ? t('audioLoopbackFailedNote', { device: l.defaultOutput || t('audioDefaultDevice'), reason: l.systemError })
@@ -3738,6 +3740,9 @@ function showClip(clip: Clip, edit = false) {
       thumbnail: (c, at) => kine.setThumbnailFrame(c.id, at),
       // Obrázek / GIF do klipu (dialog hlavního procesu).
       pickImage: () => kine.pickOverlayImage(),
+      // GIFy z Kine (Giphy přes server Kine) - jen pro přihlášené; bez přihlášení řekne okno, co s tím.
+      gifSearch: (q, offset) => kine.searchGifs(q, offset),
+      gifPick: (gif) => kine.pickGif(gif),
     },
   });
 }

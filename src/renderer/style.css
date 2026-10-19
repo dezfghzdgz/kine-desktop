@@ -1124,3 +1124,12 @@ button.icon-btn.danger:hover:not(:disabled) { background-color: rgba(255, 107, 1
 .live-preview-cam.draggable { cursor: grab; touch-action: none; }
 .live-preview-cam.draggable:active { cursor: grabbing; }
 .clip-camera-corner-reset { margin-top: 6px; align-self: flex-start; }
+
+/* Hledání GIFů v úpravách (Giphy přes Kine): pole, mřížka náhledů, vlastní soubor. */
+.gif-picker { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: var(--radius-md); background: var(--panel-raised, rgba(255, 255, 255, 0.04)); border: 1px solid var(--border); }
+.gif-picker .gif-query { flex: 1; min-width: 0; }
+.gif-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; max-height: 240px; overflow-y: auto; }
+.gif-hit { appearance: none; border: 0; padding: 0; margin: 0; background: #000; border-radius: 8px; overflow: hidden; cursor: pointer; aspect-ratio: 1; box-shadow: 0 0 0 1px var(--border); }
+.gif-hit:hover, .gif-hit:focus-visible { box-shadow: 0 0 0 2px var(--brand); outline: none; }
+.gif-hit img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gif-attribution { font-size: 11px; letter-spacing: 0.04em; margin-left: auto; }

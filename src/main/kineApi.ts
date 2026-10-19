@@ -75,8 +75,18 @@ export type LiveSetup = {
 /** Záznam vysílání zveřejněný jako video na Kine. */
 export type PublishedRecording = { videoId: string; status: 'ready' | 'processing'; alreadyPublished: boolean };
 
+/** GIF z hledání na Kine (Giphy přes server Kine) - náhled do okna a celý soubor do klipu. */
+export type GifHit = {
+  id: string;
+  title: string;
+  preview: { url: string; width: number; height: number };
+  full: { url: string; width: number; height: number; size: number };
+};
+
 export type KineApi = {
   siteUrl(): string;
+  /** Hledání GIFů (stejný zdroj jako GIFy na Kine); prázdný dotaz = trendy. */
+  searchGifs(query: string, offset?: number): Promise<GifHit[]>;
   /**
    * `durationSeconds`: délka klipu (Kine podle ní hlídá limity a rezervuje místo); null = neznámá.
    * `signal`: hráč nahrávání zrušil / rozjela se hra - čekání na Kine skončí hned.
@@ -225,6 +235,20 @@ export function createKineApi(deps: {
 
   return {
     siteUrl: deps.siteUrl,
+    async searchGifs(query, offset = 0) {
+      const params = new URLSearchParams({ q: query.trim().slice(0, 100), offset: String(Math.max(0, Math.min(200, Math.round(offset)))) });
+      const data = await get(`/api/gifs/search?${params}`);
+      const list = Array.isArray(data?.gifs) ? data.gifs : [];
+      const okUrl = (u: unknown) => typeof u === 'string' && /^https:\/\/([a-z0-9-]+\.)*giphy\.com\//i.test(u);
+      return list
+        .filter((g: any) => g && typeof g.id === 'string' && okUrl(g.preview?.url) && okUrl(g.full?.url))
+        .map((g: any) => ({
+          id: g.id,
+          title: typeof g.title === 'string' ? g.title : '',
+          preview: { url: g.preview.url, width: Number(g.preview.width) || 0, height: Number(g.preview.height) || 0 },
+          full: { url: g.full.url, width: Number(g.full.width) || 0, height: Number(g.full.height) || 0, size: Number(g.full.size) || 0 },
+        }));
+    },
     async createUploadUrl(fileSize, durationSeconds, signal) {
       const data = await post(
         '/api/videos/create-upload-url',

@@ -164,7 +164,40 @@ function isBluetoothLabel(label: string): boolean {
 
 /** Záznamová zařízení, která ve skutečnosti nahrávají zvuk počítače (ne hlas) - jako mikrofon je nebrat. */
 function isLoopbackInput(label: string): boolean {
-  return /stereo ?mix|mix st[ée]r[ée]o|what u hear|cable output|voicemeeter out|wave ?out/i.test(label);
+  // Windows: Stereo Mix, VB-Cable, Voicemeeter…; Linux: "Monitor of …" (PipeWire / PulseAudio);
+  // macOS: BlackHole, Soundflower, Loopback (virtuální zařízení, které si hráč nainstaluje).
+  return /stereo ?mix|mix st[ée]r[ée]o|what u hear|cable output|voicemeeter out|wave ?out|monitor of|\.monitor\b|blackhole|soundflower|loopback audio/i.test(label);
+}
+
+/**
+ * Linux a macOS nemají loopback výstupu jako Windows: zvuk hry se bere ze
+ * vstupu, který ho nahrává - na Linuxu "Monitor of …" (PipeWire / PulseAudio
+ * ho nabízí sám), na macOS virtuální zařízení (BlackHole a spol.). Bez něj se
+ * nahrává bez zvuku hry a nastavení řekne, co s tím (kind 'systemLoopback').
+ */
+async function loopbackInputTrack(): Promise<MediaStreamTrack | null> {
+  try {
+    const inputs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput' && d.deviceId !== 'default' && d.deviceId !== 'communications' && isLoopbackInput(d.label));
+    for (const input of inputs) {
+      try {
+        const source = await navigator.mediaDevices.getUserMedia({
+          audio: { deviceId: { exact: input.deviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        });
+        const track = source.getAudioTracks()[0] ?? null;
+        if (!track) continue;
+        sourceTracks.push(...source.getTracks());
+        systemAudioFallback = input.label;
+        systemDeviceLabel = input.label;
+        report({ type: 'warning', generation, kind: 'systemAudioFallback', message: input.label });
+        return track;
+      } catch {
+        // další
+      }
+    }
+  } catch {
+    // seznam zařízení nejde - nic
+  }
+  return null;
 }
 
 /**
@@ -367,27 +400,8 @@ async function recoverSystemAudio(firstError: unknown): Promise<MediaStreamTrack
     return native;
   }
   // 3) vstup, který nahrává zvuk počítače
-  try {
-    const inputs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput' && d.deviceId !== 'default' && d.deviceId !== 'communications' && isLoopbackInput(d.label));
-    for (const input of inputs) {
-      try {
-        const source = await navigator.mediaDevices.getUserMedia({
-          audio: { deviceId: { exact: input.deviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-        });
-        const track = source.getAudioTracks()[0] ?? null;
-        if (!track) continue;
-        sourceTracks.push(...source.getTracks());
-        systemAudioFallback = input.label;
-        systemDeviceLabel = input.label;
-        report({ type: 'warning', generation, kind: 'systemAudioFallback', message: input.label });
-        return track;
-      } catch {
-        // další
-      }
-    }
-  } catch {
-    // seznam zařízení nejde - nic
-  }
+  const viaInput = await loopbackInputTrack();
+  if (viaInput) return viaInput;
   // 4) bez zvuku hry
   systemAudioError = errorText(firstError) || nativeLoopbackError || 'unknown';
   report({ type: 'warning', generation, kind: 'systemLoopback', message: `${systemAudioError} | ${defaultOutputAtStart}` });
@@ -478,6 +492,13 @@ async function getStreams(settings: Settings): Promise<void> {
     defaultOutputAtStart = await defaultOutputLabel();
     if (!systemTrack) systemTrack = await recoverSystemAudio(lastError ?? legacyAudioError);
     if (systemTrack && !systemAudioFallback) systemDeviceLabel = defaultOutputAtStart;
+  } else if (settings.systemAudio && bridge.platform !== 'win32') {
+    // Linux / macOS: zvuk hry jen ze vstupu, který ho nahrává (monitor výstupu / virtuální zařízení).
+    systemTrack = await loopbackInputTrack();
+    if (!systemTrack) {
+      systemAudioError = 'no-loopback-input';
+      report({ type: 'warning', generation, kind: 'systemLoopback', message: 'no-loopback-input' });
+    }
   }
 
   // Mikrofon (zvolený nebo výchozí, ne sluchátka Bluetooth) - bez něj se nahrává dál, hráč jen dostane upozornění.

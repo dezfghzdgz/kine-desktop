@@ -910,4 +910,13 @@ export const de: Record<Key, string> = {
   playerCameraSaved: 'Kameraposition gespeichert.',
   aboutUpdateAutoAt: 'Sie installiert sich spätestens am {date} von selbst - in einem ruhigen Moment ohne Spiel und Aufnahme (Allgemein -> Updates automatisch installieren).',
   aboutUpdateAutoSoon: 'Kine akzeptiert diese Version nicht mehr - die neue installiert sich von selbst, sobald Ruhe ist (kein Spiel, keine Aufnahme).',
+  audioNoLoopbackLinux: 'Spielton: kein „Monitor of …“-Eingang (PipeWire / PulseAudio) vorhanden. Wähle ihn oben als Spielton-Gerät oder aktiviere ihn in den Toneinstellungen (pavucontrol → Recording → Monitor).',
+  audioNoLoopbackMac: 'Spielton: macOS kann den Systemton nicht selbst aufnehmen. Installiere das kostenlose BlackHole (existential.audio/blackhole), erstelle im Audio-MIDI-Setup ein „Multi-Output-Gerät“ (Kopfhörer + BlackHole) und wähle BlackHole oben als Spielton-Gerät.',
+  macScreenPermission: 'macOS: erlaube der App die Bildschirmaufnahme (Systemeinstellungen → Datenschutz & Sicherheit → Bildschirmaufnahme) und starte sie neu - sonst sind die Clips nur schwarz.',
+  gifSearchPlaceholder: 'GIFs suchen…',
+  gifOwnFile: 'Eigene Datei',
+  gifMore: 'Mehr',
+  gifNone: 'Nichts gefunden.',
+  gifDownloading: 'GIF wird geladen…',
+  gifNeedsLogin: 'GIFs von Kine gibt es nur angemeldet - melde dich unter Konto an oder wähle eine eigene Datei.',
 };

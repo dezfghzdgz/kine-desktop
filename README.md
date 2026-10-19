@@ -514,9 +514,11 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
 
 ## Co ještě není
 
-- macOS/Linux: appka se spustí a klipy dělá, ale bez zvuku systému
-  (Chromium ho umí jen na Windows), bez pomocníka (hry jen podle seznamu
-  a Steamu, jen jednoduché zkratky).
+- macOS/Linux (od 0.13.0 se stavějí instalátory): zvuk hry jen ze vstupu,
+  který ho nahrává (Linux „Monitor of …“ sám, macOS po instalaci BlackHole),
+  bez pomocníka (hry podle seznamu procesů a Steamu, jen jednoduché
+  zkratky, bez gamepadu), macOS bez podpisu Apple (ruční „Přesto otevřít“,
+  aktualizace ručně).
 - Klip je dlouhý N až N+2 s (kousky po 2 s, řez jen na klíčovém snímku).
   Když hra mezitím přepnula rozlišení, klip začíná až od místa, kde má
   obraz stejné rozměry (jinak by ho prohlížeč nepřehrál).
@@ -877,6 +879,38 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   a jednou řadou tlačítek, přehrát / pozastavit, posun kliknutím, ztlumení),
   `playerFullscreenOk` přes tlačítko v liště, `settingsSectionsOk` (Záznam
   pět oddílů, Appka vzhled / obecné / o appce, staré cíle).
+
+## Novinky 0.13.0
+
+- **Linux a macOS**: `release.yml` staví vedle Windows i Linux (AppImage +
+  deb, `Kine-Linux.*`, `Kine-Clipper-Linux.*`) a macOS (dmg + zip,
+  univerzální pro Intel i Apple Silicon, `Kine-Mac.*`) pro obě appky a nahrává
+  je do stejného vydání na GitHubu i do R2 (`full/`, `clipper/`). Web nabízí
+  stažení podle systému (`/download` s přepínačem, `/download/mac`,
+  `/download/linux[?format=deb]`, `/api/desktop/latest` -> `downloads`).
+  macOS je bez podpisu Apple (Developer účet zatím není): první otevření přes
+  Nastavení systému -> Soukromí a zabezpečení -> Přesto otevřít; appka po
+  startu hlídá povolení Záznam obrazovky (`checkMacPermissions`) a odkáže do
+  nastavení systému. Aktualizace: Linux AppImage přes electron-updater
+  (`latest-linux.yml`), deb a macOS jen ručně - appka hledá novou verzi na
+  webu Kine a nabídne stažení (`manualOnly` v `updater.ts`).
+- **Zvuk hry mimo Windows**: Linux ze vstupu „Monitor of …“ (PipeWire /
+  PulseAudio), macOS z virtuálního zařízení (BlackHole, Soundflower, Loopback) -
+  `loopbackInputTrack` v `renderer/capture.ts`; bez něj nastavení řekne, co
+  zapnout (`audioNoLoopbackLinux` / `audioNoLoopbackMac`). Linux s Waylandem
+  snímá přes PipeWire (`WebRTCPipeWireCapturer`), spouštění se systémem přes
+  `~/.config/autostart/kine-<varianta>.desktop`, poznání hry z celé příkazové
+  řádky (`parsePsLinux` - `comm` zkracuje na 15 znaků, hry přes Proton / Wine
+  jako `*.exe`).
+- **GIFy z Kine v překryvech**: tlačítko GIF v úpravách hledá GIFy přes Kine
+  (`/api/gifs/search` - Giphy přes server, jen pro přihlášené, „Powered by
+  GIPHY“), vybraný se stáhne do `userData/overlays` (jen z giphy.com, do
+  15 MB, nechává se posledních 40) a položí do klipu jako překryv; vlastní
+  soubor zůstává. Od kdy do kdy je překryv vidět (od - do) je v editoru od
+  0.12.0.
+- Kopie k nahrání s kamerou zvlášť se překódovává s nižší prioritou (`low`).
+- Mobil: Kine Clipper pro Android je vlastní repo `kine-mobile` (web zná
+  hlavičku `X-Kine-App: android/<verze>` a `/connect?app=mobile`).
 
 ## Novinky 0.12.0
 

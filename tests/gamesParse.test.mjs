@@ -108,3 +108,23 @@ test('název hry z programu', () => {
   assert.equal(prettyNameFromExe('game.exe', 'Minecraft* 1.21.4 - Singleplayer'), 'Game');
   assert.ok(IGNORED_FOREGROUND.has('chrome.exe') && IGNORED_FOREGROUND.has('explorer.exe'));
 });
+
+test('Linux: názvy programů - krátké z comm, dlouhé (15 znaků, zkrácené) z příkazové řádky, i hry přes Wine / Proton', async () => {
+  const { parsePsLinux } = await import('../dist/esm/gamesParse.js');
+  const comm = ['   1 systemd', '  40 kworker/0:1', ' 900 RocketLeague.ex', ' 901 cs2.exe', ' 902 dota2', ' 903 kine-desktop', ' 904 Web Content', ''].join('\n');
+  const args = [
+    '   1 /usr/lib/systemd/systemd --user',
+    '  40 [kworker/0:1]',
+    ' 900 Z:\\hry\\Rocket League\\Binaries\\Win64\\RocketLeague.exe -nomovie',
+    ' 901 C:\\Program Files (x86)\\Steam\\steamapps\\common\\Counter-Strike Global Offensive\\game\\bin\\win64\\cs2.exe -steam',
+    ' 902 /home/d/.steam/steam/steamapps/common/dota 2 beta/game/bin/linuxsteamrt64/dota2 -vulkan',
+    ' 903 /opt/Kine/kine-desktop --type=renderer',
+    ' 904 /usr/lib/firefox/firefox -contentproc',
+  ].join('\n');
+  const names = parsePsLinux(comm, args);
+  assert.ok(names.has('rocketleague.exe'), 'zkrácený comm "RocketLeague.ex" -> celý název z Wine cesty s mezerami');
+  assert.ok(names.has('cs2.exe'));
+  assert.ok(names.has('dota2'), 'krátký název přímo z comm (cesta s mezerami v args nevadí)');
+  assert.ok(names.has('systemd') && names.has('kine-desktop') && names.has('web content'));
+  assert.ok(![...names].some((n) => n.startsWith('[') || n.startsWith('kworker')), 'vlákna jádra pryč');
+});

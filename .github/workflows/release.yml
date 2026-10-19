@@ -294,13 +294,33 @@ jobs:
         run: node scripts/build.mjs
         env:
           KINE_RELEASE: '1'
+      # ffmpeg pro obě architektury Maců: ffmpeg-static stáhne při npm ci jen binárku pro procesor
+      # runneru (Apple Silicon), takže univerzální sestavení padalo (@electron/universal neumí
+      # spojit dvě stejné binárky) a Intel Mac by dostal špatnou. Stáhnou se obě ze stejného
+      # vydání, jaké používá balíček ffmpeg-static, a electron-builder je přibalí podle
+      # architektury (scripts/publish-config.mjs: extraResources build/ffmpeg/darwin-${arch}).
+      - name: ffmpeg pro Intel i Apple Silicon
+        shell: bash
+        run: |
+          set -e
+          tag=$(node -p "require('ffmpeg-static/package.json')['ffmpeg-static']['binary-release-tag']")
+          for a in x64 arm64; do
+            mkdir -p "build/ffmpeg/darwin-$a"
+            for i in 1 2 3; do
+              if curl -fsSL "https://github.com/eugeneware/ffmpeg-static/releases/download/$tag/ffmpeg-darwin-$a.gz" | gunzip > "build/ffmpeg/darwin-$a/ffmpeg"; then break; fi
+              echo "stažení ffmpeg darwin-$a se nepovedlo (pokus $i)"; sleep 10; [ "$i" = 3 ] && exit 1
+            done
+            chmod +x "build/ffmpeg/darwin-$a/ffmpeg"
+            file "build/ffmpeg/darwin-$a/ffmpeg"
+          done
       # Bez podpisu Apple: CSC_IDENTITY_AUTO_DISCOVERY=false, ať electron-builder nehledá certifikát.
+      # Zvlášť pro x64 (Intel) a arm64 (Apple Silicon) - jedno spuštění postaví obě a jeden latest-mac.yml.
       - name: macOS - Kine (Kine do PC)
-        run: npx electron-builder --mac --universal --publish never --config electron-builder.generated.yml
+        run: npx electron-builder --mac --x64 --arm64 --publish never --config electron-builder.generated.yml
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       - name: macOS - Kine Clipper
-        run: npx electron-builder --mac --universal --publish never --config electron-builder.clipper.yml
+        run: npx electron-builder --mac --x64 --arm64 --publish never --config electron-builder.clipper.yml
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       - name: Kontrola souborů
@@ -308,8 +328,18 @@ jobs:
         run: |
           set -e
           ls -la release/full release/clipper
-          for f in release/full/Kine-Mac.dmg release/full/Kine-Mac.zip release/full/latest-mac.yml release/clipper/Kine-Clipper-Mac.dmg release/clipper/Kine-Clipper-Mac.zip; do
+          for f in release/full/Kine-Mac-x64.dmg release/full/Kine-Mac-arm64.dmg release/full/Kine-Mac-x64.zip release/full/Kine-Mac-arm64.zip release/full/latest-mac.yml \
+                   release/clipper/Kine-Clipper-Mac-x64.dmg release/clipper/Kine-Clipper-Mac-arm64.dmg release/clipper/Kine-Clipper-Mac-x64.zip release/clipper/Kine-Clipper-Mac-arm64.zip; do
             [ -s "$f" ] || { echo "chybí $f"; exit 1; }
+          done
+          # ffmpeg v appce musí odpovídat architektuře: složka mac/ = x64 (x86_64), mac-arm64/ = arm64.
+          for dir in release/full release/clipper; do
+            x=$(find "$dir/mac" -path "*Resources/ffmpeg/ffmpeg" | head -1); a=$(find "$dir/mac-arm64" -path "*Resources/ffmpeg/ffmpeg" | head -1)
+            [ -n "$x" ] && [ -n "$a" ] || { echo "chybí přibalený ffmpeg v $dir"; exit 1; }
+            file "$x" | grep -q x86_64 || { echo "ffmpeg v $x není x86_64"; file "$x"; exit 1; }
+            file "$a" | grep -q arm64 || { echo "ffmpeg v $a není arm64"; file "$a"; exit 1; }
+            # Binárka z node_modules (jen pro procesor runneru) v appce být nesmí.
+            if find "$dir/mac" "$dir/mac-arm64" -path "*ffmpeg-static/ffmpeg" | grep -q .; then echo "v appce zůstal ffmpeg z node_modules"; exit 1; fi
           done
           [ -s release/clipper/clipper-mac.yml ] || cp release/clipper/latest-mac.yml release/clipper/clipper-mac.yml
       - name: Vydání na GitHubu (macOS)
@@ -324,9 +354,9 @@ jobs:
             done
             return 1
           }
-          upload release/full/Kine-Mac.dmg release/full/Kine-Mac.zip release/full/latest-mac.yml
-          upload release/clipper/Kine-Clipper-Mac.dmg release/clipper/Kine-Clipper-Mac.zip release/clipper/clipper-mac.yml
-          echo "### macOS: dmg + zip nahrané do $v (bez podpisu Apple)" >> "$GITHUB_STEP_SUMMARY"
+          upload release/full/Kine-Mac-x64.dmg release/full/Kine-Mac-arm64.dmg release/full/Kine-Mac-x64.zip release/full/Kine-Mac-arm64.zip release/full/latest-mac.yml
+          upload release/clipper/Kine-Clipper-Mac-x64.dmg release/clipper/Kine-Clipper-Mac-arm64.dmg release/clipper/Kine-Clipper-Mac-x64.zip release/clipper/Kine-Clipper-Mac-arm64.zip release/clipper/clipper-mac.yml
+          echo "### macOS: dmg + zip pro Intel (x64) i Apple Silicon (arm64) nahrané do $v (bez podpisu Apple)" >> "$GITHUB_STEP_SUMMARY"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Nahrát do Cloudflare R2 (macOS)
@@ -346,11 +376,13 @@ jobs:
             return 1
           }
           bin="application/octet-stream"; short="public, max-age=300"
-          put release/full/Kine-Mac.dmg full/Kine-Mac.dmg "$bin" "$short"
-          put release/full/Kine-Mac.zip full/Kine-Mac.zip application/zip "$short"
+          for a in x64 arm64; do
+            put "release/full/Kine-Mac-$a.dmg" "full/Kine-Mac-$a.dmg" "$bin" "$short"
+            put "release/full/Kine-Mac-$a.zip" "full/Kine-Mac-$a.zip" application/zip "$short"
+            put "release/clipper/Kine-Clipper-Mac-$a.dmg" "clipper/Kine-Clipper-Mac-$a.dmg" "$bin" "$short"
+            put "release/clipper/Kine-Clipper-Mac-$a.zip" "clipper/Kine-Clipper-Mac-$a.zip" application/zip "$short"
+          done
           put release/full/latest-mac.yml full/latest-mac.yml text/yaml "no-cache"
-          put release/clipper/Kine-Clipper-Mac.dmg clipper/Kine-Clipper-Mac.dmg "$bin" "$short"
-          put release/clipper/Kine-Clipper-Mac.zip clipper/Kine-Clipper-Mac.zip application/zip "$short"
           put release/clipper/latest-mac.yml clipper/latest-mac.yml text/yaml "no-cache"
           echo "### R2: macOS nahrán do full/ a clipper/" >> "$GITHUB_STEP_SUMMARY"
         env:

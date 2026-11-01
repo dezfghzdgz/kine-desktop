@@ -1,3 +1,53 @@
+KINE web: klip z živého přenosu, raid, plánované vysílání s „Připomenout“, ankety
+v chatu, hry jen v Explore → Hry, nový vzhled Přihlášení a Vašich videí, bezpečnost
+(dodávka kine-0137-2026-11-01)
+==========================================================================================
+
+POZOR: 0136 na GitHubu ještě není (poslední nahrání je 0135 ve složce kine-web-0135).
+Nevadí - tahle dodávka obsahuje všechno z 0135, 0136 i 0137.
+
+POSTUP
+1. Rozbal kine-web-0137.zip. Otevři vzniklou složku a do GitHubu přetáhni její OBSAH
+   (složky app, components, lib, tests a soubory) - ne složku samotnou.
+2. Na GitHubu smaž složku kine-web-0135: otevři ji -> vpravo nahoře ⋯ -> Delete directory
+   -> Commit changes. Stejně smaž soubor CTI-ME.txt (starý omyl). Sestavení projde
+   i bez toho, ale ať v repu nezůstává nepořádek.
+3. Supabase -> SQL Editor -> spusť supabase-migration-zive-raid-plan-ankety.sql (celý,
+   jde pouštět opakovaně). Na konci čtyři sloupce chat / raid / plan / ankety - všechno
+   true = hotovo. Žádná nová proměnná ve Vercelu.
+
+CO JE NOVÉ
+- Klip z přenosu: u živého přenosu tlačítko „Klip“ - uloží posledních ~30 s jako klip
+  (Cloudflare ho vystřihne ze záznamu vysílání, Kine ho zkopíruje jako video). Klip
+  patří streamerovi, u klipu je vidět, kdo ho udělal („Klip z živého vysílání“).
+  Limit 30 klipů denně (společný s klipy z videí), odběratelům se nehlásí.
+- Raid: ve studiu během vysílání panel Raid se seznamem kanálů, které právě vysílají.
+  Klik -> divákům se u přenosu ukáže odpočet 10 s a přesunou se (kdo chce, zůstane),
+  v chatu cíle se objeví „⚡ Raid!“ a jeho majitel dostane oznámení. Pár vteřin jde
+  raid zrušit (zmizí i zpráva a oznámení). Limity: 1 raid za 5 minut, ke stejnému
+  kanálu nejvýš 3× za den.
+- Plánované vysílání: ve studiu „Plánované vysílání“ - kdy a o čem. Na kanálu a u
+  offline přenosu odpočet s „Připomenout“; kdo klikne, dostane oznámení (i push), až
+  začneš vysílat. Na stránce Živě nová sekce „Brzy živě“.
+- Ankety v chatu: streamer nebo moderátor chatu klikne v hlavičce chatu na ikonku
+  ankety -> otázka, 2-4 možnosti, 30 s až 5 minut. Jeden hlas na účet, výsledky živě,
+  po konci vítěz. Anketa je vidět i v překryvu chatu pro OBS.
+- Záložka Hry v menu je pryč: hry jsou jen v Explore -> Hry - řada her s hledáním
+  (nejdřív sledované, pak co se teď hraje, pak celý katalog). Adresa /games přesměruje
+  tam, stránky jednotlivých her zůstávají.
+- Nový vzhled: Přihlášení (stejně jako registrace), Zapomenuté heslo / nové heslo /
+  kód 2FA, Vaše videa (přehled jako ve studiu: záložky Videa / Sparks / Klipy od
+  diváků, stav zpracovává se / soukromé / naplánované, zhlédnutí, akce), Aktivita
+  (ikony místo emoji), prázdné stránky.
+- Bezpečnost: raid hlídá limity i při souběžném kliknutí, nejde ze shadow-banovaného
+  kanálu ani na kanál, který sám raiduje; klip nejde udělat s banem v chatu kanálu;
+  anketu nezaloží zablokovaný účet; plán zablokovaného kanálu není vidět; starší
+  migrace podpor (supabase-migration-podpory-kontrola.sql) při opakovaném spuštění
+  už nezúží druhy zpráv v chatu.
+- Ochrana údajů: doplněné hlasy v anketách, připomenutí a klipy z vysílání (změna
+  1. 11. 2026); export dat je obsahuje taky.
+
+
 KINE web: oprava sestavení po 0135 (soubory skončily ve složce kine-web-0135)
 (dodávka kine-0136-2026-11-01)
 ==========================================================================================

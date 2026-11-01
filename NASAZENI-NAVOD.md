@@ -199,5 +199,15 @@ to prober s účetní.
    (My Profile → API Tokens → token Kine → Edit). Kontrola běží jednou denně s úklidem
    videí (cron) a při potížích pošle správcům oznámení. Hranice a limity jdou změnit
    proměnnými `COST_ALERT_*`, `SUPABASE_*_LIMIT_*`, `CF_STREAM_*` (viz `.env.example`).
-5. **Hry** fungují po migraci samy (stránka Hry v menu). Bez migrace jde všechno kromě
-   tlačítka Sledovat hru a výběru hry ve studiu vysílání.
+5. **Hry** fungují po migraci samy (Explore → Hry, stránky jednotlivých her). Bez migrace
+   jde všechno kromě tlačítka Sledovat hru a výběru hry ve studiu vysílání.
+
+## 11. Klip z přenosu, raid, plánované vysílání a ankety v chatu (migrace)
+
+1. **Supabase → SQL Editor** → spusť `supabase-migration-zive-raid-plan-ankety.sql` (celý;
+   jde pouštět opakovaně). Na konci čtyři sloupce `chat`, `raid`, `plan`, `ankety` -
+   `true` = hotovo.
+2. Nic dalšího se nenastavuje. **Klip z přenosu** potřebuje jen to, co už vysílání má
+   (Cloudflare Stream, záznam vysílání zapnutý automaticky) - klip se zkopíruje jako
+   obyčejné video a počítá se do úložiště Cloudflare (30 s = půl minuty).
+3. Bez migrace: klip z přenosu funguje, raid / plánování / ankety ukážou „chybí migrace“.

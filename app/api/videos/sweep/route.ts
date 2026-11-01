@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { sweepProcessing } from '@/lib/markVideoReady';
 import { sweepNudity } from '@/lib/nudityScan';
 import { costAlertCheck } from '@/lib/costs';
+import { sweepLiveExtras } from '@/lib/liveScheduleServer';
 
 export const dynamic = 'force-dynamic';
 // Kontrola obsahu starších videí potřebuje pár desítek sekund (model běží na procesoru).
@@ -14,7 +15,7 @@ let lastOpenForce = 0;
 /**
  * Úklid na zavolání (viz lib/markVideoReady.ts, sweepProcessing): zaseklá
  * videa, nedokončená nahrávání, fronta mazání u Cloudflare, limity vysílání,
- * staré nezveřejněné záznamy a kontrola nákladů (lib/costs.ts). Pouští ho denně cron z vercel.json a jde
+ * staré nezveřejněné záznamy, kontrola nákladů (lib/costs.ts) a staré plány / ankety vysílání. Pouští ho denně cron z vercel.json a jde
  * ho zavolat i ručně: otevřít /api/videos/sweep v prohlížeči.
  *
  * Když je na Vercelu nastavená proměnná CRON_SECRET, Vercel ji posílá
@@ -37,6 +38,8 @@ export async function GET(req: NextRequest) {
   // Hlídač nákladů (lib/costs.ts): když něco hoří, správce dostane oznámení - jen při důkladném úklidu.
   // Před kontrolou obsahu, ať na něj vždycky dojde čas.
   const costAlerts = force ? await costAlertCheck().catch(() => 0) : 0;
+  // Propadlé plány vysílání, staré ankety, raidy a připomenutí (lib/liveScheduleServer.ts).
+  if (force) await sweepLiveExtras().catch(() => undefined);
   // Nezkontrolovaná videa (nahraná před zapnutím kontroly nahoty) - po pár kouscích, jen do zbytku
   // času funkce (60 s). Bez ověřeného cronu nejvýš jednou za 5 minut, ať se tudy nedá pálit výkon serveru.
   const left = Math.max(5_000, Math.min(40_000, 50_000 - (Date.now() - started)));

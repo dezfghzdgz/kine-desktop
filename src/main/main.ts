@@ -3322,7 +3322,6 @@ class KineApp {
       }
     });
     ipcMain.handle('auth:cancelBrowser', () => this.auth.cancelBrowserLogin());
-    ipcMain.handle('auth:loginPassword', (_e, email: string, password: string) => this.auth.loginWithPassword(email, password));
     ipcMain.handle('auth:logout', async () => {
       await this.auth.logout();
       await this.clearWebLogin();

@@ -16,14 +16,16 @@ import { log } from './log';
  * který má každý návštěvník webu v prohlížeči). Díky tomu jde appka
  * přepnout na jinou instalaci Kine (vývoj na localhostu) bez nové verze.
  *
- * Dvě cesty k přihlášení:
- *  1. Přes prohlížeč: appka otevře kine.../connect?port=…&state=…, hráč
- *     tam (už přihlášený) klikne "Připojit počítač". Stránka si od Kine
- *     vyžádá jednorázový přihlašovací token PRO TENHLE počítač a pošle ho
- *     na http://127.0.0.1:<port>/link (nebo přes odkaz kine://link…).
- *     Appka z něj udělá vlastní relaci - s vlastním obnovovacím tokenem,
- *     takže se prohlížeč a appka navzájem neodhlašují.
- *  2. E-mail + heslo přímo v appce (Kine používá jen e-mail a heslo).
+ * Přihlášení jen přes prohlížeč: appka otevře kine.../connect?port=…&state=…,
+ * hráč se tam přihlásí (nebo už přihlášený je) a klikne "Připojit počítač".
+ * Stránka si od Kine vyžádá jednorázový přihlašovací token PRO TENHLE počítač
+ * a pošle ho na http://127.0.0.1:<port>/link (nebo přes odkaz kine://link…).
+ * Appka z něj udělá vlastní relaci - s vlastním obnovovacím tokenem, takže se
+ * prohlížeč a appka navzájem neodhlašují.
+ *
+ * E-mail a heslo přímo v appce od 0.13.3 nejsou: web má ochranu proti botům
+ * (Cloudflare Turnstile, ověřuje ji Supabase) a appka by ji obcházet neměla.
+ * Heslo se tak zadává jen na webu Kine - appka ho nikdy nevidí.
  *
  * Relace se ukládá zašifrovaná systémem (safeStorage: na Windows DPAPI),
  * takže si ji nepřečte jiný uživatel počítače.
@@ -350,13 +352,6 @@ export class Auth {
   }
 
   // ---- přihlášení ----------------------------------------------------------
-
-  async loginWithPassword(email: string, password: string): Promise<void> {
-    const client = await this.getClient();
-    const { error } = await client.auth.signInWithPassword({ email: email.trim(), password });
-    if (error) throw new Error(translateAuthError(error.message));
-    await this.loadAccount();
-  }
 
   async logout(): Promise<void> {
     try {

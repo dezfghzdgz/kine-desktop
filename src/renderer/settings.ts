@@ -1973,30 +1973,7 @@ function renderAccount(inWizard = false) {
       )
     );
   } else {
-    const email = h('input', { type: 'email', autocomplete: 'username' }) as HTMLInputElement;
-    const password = h('input', { type: 'password', autocomplete: 'current-password' }) as HTMLInputElement;
-    const loginBtn = h('button', { class: 'primary' }, t('accountLogin')) as HTMLButtonElement;
-    const form = h(
-      'form',
-      {
-        class: 'stack',
-        onsubmit: (e: Event) => {
-          e.preventDefault();
-          loginBtn.disabled = true;
-          loginBtn.textContent = t('accountLoggingIn');
-          authError = null;
-          void kine
-            .loginPassword(email.value, password.value)
-            .catch((err: Error) => {
-              authError = t('accountLoginFailed', { message: errorText(err, t) });
-            })
-            .finally(() => render());
-        },
-      },
-      h('label', {}, t('accountEmail'), email),
-      h('label', {}, t('accountPassword'), password),
-      h('div', { class: 'row' }, loginBtn)
-    );
+    // Přihlášení jen přes web Kine (heslo + ochrana proti botům tam, appka heslo nevidí - main/auth.ts).
     container.append(
       h('p', { class: 'dim' }, t('accountNotLoggedIn')),
       h(
@@ -2028,8 +2005,6 @@ function renderAccount(inWizard = false) {
               ),
               h('span', { class: 'faint' }, t('accountConnectBrowserHint'))
             ),
-        h('h2', {}, t('accountOrPassword')),
-        form,
         authError ? h('p', { class: 'error' }, authError) : null
       )
     );

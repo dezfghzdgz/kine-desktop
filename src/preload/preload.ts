@@ -122,7 +122,6 @@ const kine = {
 
   loginBrowser: (): Promise<void> => ipcRenderer.invoke('auth:loginBrowser'),
   cancelBrowserLogin: (): Promise<void> => ipcRenderer.invoke('auth:cancelBrowser'),
-  loginPassword: (email: string, password: string): Promise<void> => ipcRenderer.invoke('auth:loginPassword', email, password),
   logout: (): Promise<void> => ipcRenderer.invoke('auth:logout'),
   refreshAccount: (): Promise<void> => ipcRenderer.invoke('auth:refresh'),
   onAuthWaiting: (cb: (waiting: boolean) => void) => on<boolean>('auth:waiting', cb),

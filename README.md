@@ -74,9 +74,10 @@ hra běží  ──►  GameWatcher (procesy z pomocníka / tasklist + okno v po
   pseudo-klávesy `0x100000 + maska`, takže platí stejná pravidla jako
   pro kombinace kláves (držet všechno najednou, delší kombinace vyhrává).
   Odpojené sloty ovladače se zkouší jen každé 2 s, ať to nežere výkon.
-- **Přihlášení:** přes prohlížeč (Kine `/connect` → jednorázový token →
-  `http://127.0.0.1:<port>/link` nebo `kine://link?…`), nebo e-mail +
-  heslo. Relace se ukládá zašifrovaná (`safeStorage`, na Windows DPAPI).
+- **Přihlášení:** jen přes prohlížeč (Kine `/connect` → jednorázový token →
+  `http://127.0.0.1:<port>/link` nebo `kine://link?…`); heslo se zadává jen
+  na webu (ochrana proti botům), appka ho nevidí. Relace se ukládá zašifrovaná
+  (`safeStorage`, na Windows DPAPI).
   Klíče k Supabase si appka bere z `/api/desktop/config` – nic není
   zadrátované. V režimu „Kine + klipy“ je přihlášení **společné s webem
   v okně**: přihlásíš se v appce → web v okně dostane vlastní relaci
@@ -879,6 +880,15 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   a jednou řadou tlačítek, přehrát / pozastavit, posun kliknutím, ztlumení),
   `playerFullscreenOk` přes tlačítko v liště, `settingsSectionsOk` (Záznam
   pět oddílů, Appka vzhled / obecné / o appce, staré cíle).
+
+## Novinky 0.13.3
+
+- **Přihlášení jen přes prohlížeč**: e-mail a heslo přímo v appce jsou pryč. Web Kine
+  má ochranu proti botům (Cloudflare Turnstile, hlídá ji Supabase) - po jejím zapnutí by
+  přihlášení heslem v appce stejně nešlo. „Připojit přes prohlížeč“ otevře Kine
+  (`/connect`), hráč se tam přihlásí (heslo + ověření) a appka dostane vlastní relaci.
+  Appka tak heslo vůbec nevidí; v hlavním procesu už není ani obsluha `auth:loginPassword`.
+  Mobilní appka se přihlašuje stejně (beze změny).
 
 ## Novinky 0.13.2
 

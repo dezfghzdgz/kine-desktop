@@ -34,9 +34,35 @@ jobs:
             git tag "$v"
             git push origin "$v"
           fi
+      # Do instalátoru jde zmenšený kód bez zdrojových map (scripts/build.mjs, KINE_RELEASE=1) -
+      # testy výš běžely nad čitelným sestavením, tohle je to, co se zabalí. Musí být PŘED
+      # podpisem: build.mjs maže složku dist/ a s ní by zmizel podepsaný pomocník (dist/helper).
+      - name: Sestavení pro vydání (minify)
+        run: node scripts/build.mjs
+        env:
+          KINE_RELEASE: '1'
+      # Podpis (JAK-VYDAT.md, část C): Azure Artifact Signing (proměnné AZURE_SIGN_* + tajemství
+      # AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET), nebo Certum (tajemství
+      # CERTUM_USERNAME + CERTUM_TOTP). Podepíše pluginy instalátoru (NSIS - rozbalují se do
+      # %TEMP% a Smart App Control kontroluje i je) a připraví pomocníka kine-helper.exe; zbytek
+      # (Kine.exe, .dll, ffmpeg, instalátor, odinstalátor) podepíše electron-builder níž.
+      # Bez tajemství nedělá nic a vydá se nepodepsaně jako dřív.
+      - name: Podpis - příprava
+        run: node scripts/podpis.mjs priprav
+        env:
+          CERTUM_USERNAME: ${{ secrets.CERTUM_USERNAME }}
+          CERTUM_TOTP: ${{ secrets.CERTUM_TOTP }}
+          CERTUM_CERT_SHA1: ${{ vars.CERTUM_CERT_SHA1 }}
+          AZURE_SIGN_ENDPOINT: ${{ vars.AZURE_SIGN_ENDPOINT }}
+          AZURE_SIGN_ACCOUNT: ${{ vars.AZURE_SIGN_ACCOUNT }}
+          AZURE_SIGN_PROFILE: ${{ vars.AZURE_SIGN_PROFILE }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
       # Adresa pro aktualizace (Cloudflare R2) a podpis - jen když jsou nastavené
       # (Settings -> Secrets and variables -> Actions). Bez nich se vydává jen na GitHub.
       # Dvě appky ze stejného kódu: "Kine" (Kine do PC) a "Kine Clipper".
+      # KINE_SIGN, KINE_SIGN_SHA1 a KINE_HELPER_EXE sem dává krok "Podpis - příprava".
       - name: Konfigurace vydání (obě appky)
         shell: bash
         run: |
@@ -54,12 +80,6 @@ jobs:
       # Kine-Setup.exe a latest.yml, appka pak hlásila, že aktualizace nejde
       # zkontrolovat). app-update.yml v appce (odkud se aktualizuje) i
       # latest.yml / clipper.yml vznikají i bez --publish.
-      # Do instalátoru jde zmenšený kód bez zdrojových map (scripts/build.mjs, KINE_RELEASE=1) -
-      # testy výš běžely nad čitelným sestavením, tohle je to, co se zabalí.
-      - name: Sestavení pro vydání (minify)
-        run: node scripts/build.mjs
-        env:
-          KINE_RELEASE: '1'
       - name: Instalátor Kine (Kine do PC)
         run: npx electron-builder --win --x64 --publish never --config electron-builder.generated.yml
         env:
@@ -83,6 +103,10 @@ jobs:
           # Kine Clipper hledá na GitHubu clipper.yml (vlastní kanál, ať si appky nepřepisují latest.yml).
           [ -s release/clipper/clipper.yml ] || cp release/clipper/latest.yml release/clipper/clipper.yml
           [ -s release/clipper/latest.yml ] || cp release/clipper/clipper.yml release/clipper/latest.yml
+      # S podpisem: je podepsané opravdu všechno, co Windows spustí (i obsah instalátoru)?
+      # Jinak se nevydá - nepodepsaná jediná .dll = "část této aplikace byla zablokována".
+      - name: Podpis - kontrola
+        run: node scripts/podpis.mjs over
       # Vydání na GitHubu: vznikne, když není; soubory se nahrají s --clobber
       # (přepíšou se), každý až třikrát. Když je tohle hotové, appky mají
       # odkud aktualizovat i bez R2.
@@ -177,6 +201,11 @@ jobs:
           path: |
             release/*/*.exe
             release/*/*.yml
+      # Certum: konec relace SimplySign (vždycky, i když něco výš spadlo). Azure nic neuklízí.
+      - name: Podpis - odhlášení
+        if: always()
+        continue-on-error: true
+        run: node scripts/podpis.mjs odhlas
 
   # Linux (AppImage + deb) a macOS (dmg + zip, univerzální, bez podpisu Apple) ze stejného kódu,
   # obě appky. Běží až po Windows (vydání na GitHubu už existuje) a nahrávají do něj a do R2

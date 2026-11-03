@@ -61,3 +61,22 @@ export function markerChapters(markers: { time: number; label: string }[] | unde
 export function chaptersText(chapters: { time: number; title: string }[]): string {
   return chapters.map((c) => `${chapterTime(c.time)} ${c.title}`).join('\n');
 }
+
+/**
+ * Adresa nahrávání u Cloudflare Stream (tus i jednorázové nahrání), na kterou smí
+ * appka navázat po restartu: https a doména Cloudflare Stream - upload.videodelivery.net
+ * (adresy z /api/videos/create-upload-url) nebo *.cloudflarestream.com (novější
+ * podoba stejných adres). Adresa uložená v index.json mimo tyhle domény se zahodí
+ * (nahrávání pak začne znovu přes Kine) - jinak by šlo poslat soubor kamkoli.
+ */
+export function isCloudflareUploadUrl(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443')) return false;
+    const host = url.hostname.toLowerCase();
+    return host === 'videodelivery.net' || host.endsWith('.videodelivery.net') || host === 'cloudflarestream.com' || host.endsWith('.cloudflarestream.com');
+  } catch {
+    return false;
+  }
+}

@@ -544,9 +544,9 @@ async function priprav() {
 
   if (!mode) {
     exportEnv('KINE_SIGN', 'none');
-    log('Podpis: žádný (chybí tajemství CERTUM_USERNAME a CERTUM_TOTP). Instalátory budou nepodepsané - Inteligentní řízení aplikací (Smart App Control) ve Windows 11 je zablokuje. Návod: JAK-VYDAT.md, část C.');
+    log('Podpis: žádný (chybí tajemství pro Azure - AZURE_* - nebo Certum - CERTUM_*). Instalátory budou nepodepsané - Inteligentní řízení aplikací (Smart App Control) ve Windows 11 je zablokuje. Návod: JAK-VYDAT.md, část C.');
     summary(
-      `### Podpis\n\n⚠️ **Nepodepsané** - chybí tajemství \`CERTUM_USERNAME\` a \`CERTUM_TOTP\`. Na počítačích se zapnutým Inteligentním řízením aplikací (Smart App Control) se Kine nenainstaluje. Návod: \`JAK-VYDAT.md\`, část C.\n\nPomocník kine-helper.exe (zkouška na Windows): ${helper.ok ? '✅' : '❌'} ${helper.note}\n`
+      `### Podpis\n\n⚠️ **Nepodepsané** - chybí tajemství pro podpis (Azure: proměnné \`AZURE_SIGN_*\` + tajemství \`AZURE_TENANT_ID\`, \`AZURE_CLIENT_ID\`, \`AZURE_CLIENT_SECRET\`; nebo Certum: \`CERTUM_USERNAME\`, \`CERTUM_TOTP\`). Na počítačích se zapnutým Inteligentním řízením aplikací (Smart App Control) se Kine nenainstaluje. Návod: \`JAK-VYDAT.md\`, část C.\n\nPomocník kine-helper.exe (zkouška na Windows): ${helper.ok ? '✅' : '❌'} ${helper.note}\n`
     );
     return;
   }

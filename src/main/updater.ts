@@ -107,7 +107,7 @@ export function updateProgress(): UpdateProgress {
 
 /** Jen samočinná zkouška (KINE_TEST): průběh aktualizace pro kontrolu okna (při vývoji se nic nestahuje). */
 export function simulateUpdateProgress(patch: Partial<UpdateProgress>): void {
-  if (!process.env.KINE_TEST) return;
+  if (app.isPackaged || !process.env.KINE_TEST) return;
   setProgress(patch);
 }
 

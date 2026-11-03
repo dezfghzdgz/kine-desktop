@@ -28,7 +28,8 @@ import { log } from './log';
  * Heslo se tak zadává jen na webu Kine - appka ho nikdy nevidí.
  *
  * Relace se ukládá zašifrovaná systémem (safeStorage: na Windows DPAPI),
- * takže si ji nepřečte jiný uživatel počítače.
+ * takže si ji nepřečte jiný uživatel počítače. Kde šifrování není (Linux bez
+ * klíčenky), relace zůstane jen v paměti - nešifrovaně se nezapisuje.
  */
 
 export type DesktopConfig = { supabaseUrl: string; supabaseAnonKey: string; siteUrl: string };
@@ -45,6 +46,12 @@ export class Auth {
   private linkServer: Server | null = null;
   private linkState: string | null = null;
   private readonly dir: string;
+  /**
+   * Relace jen v paměti - když systém neumí šifrovat (Linux bez klíčenky). Drží se
+   * mezi klienty Supabase (jiná adresa webu); null = relace je v šifrovaném auth.bin.
+   */
+  private memory: Record<string, string> | null = null;
+  private memoryNoticed = false;
   /** Kine řekla, že je appka moc stará (minDesktopVersion / 426 / updateRequired). */
   onUpdateRequired: (() => void) | null = null;
 
@@ -164,25 +171,72 @@ export class Auth {
     return this.client;
   }
 
-  /** Úložiště relace: jeden šifrovaný soubor. */
+  /**
+   * Umí systém relaci opravdu zašifrovat? Windows (DPAPI) a macOS (Klíčenka) ano. Linux
+   * bez klíčenky buď vůbec, nebo jen "basic_text" - pevné heslo zabudované v Chromiu,
+   * to je jen zamaskovaný text, ne šifrování; bere se jako "neumí".
+   */
+  private canEncrypt(): boolean {
+    try {
+      if (!safeStorage.isEncryptionAvailable()) return false;
+      if (process.platform === 'linux' && safeStorage.getSelectedStorageBackend() === 'basic_text') return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Úložiště relace: jeden soubor zašifrovaný systémem. Když šifrovat nejde, relace
+   * (s obnovovacím tokenem) se na disk NEzapisuje - zůstane jen v paměti a po restartu
+   * appky se hráč přihlásí znovu. Dřív se v tom případě psala jako čitelný text.
+   */
   private storage() {
     const file = join(this.dir, 'auth.bin');
-    const encrypt = (text: string): Buffer =>
-      safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(text) : Buffer.from('plain:' + text, 'utf8');
-    const decrypt = (buf: Buffer): string => {
-      if (buf.subarray(0, 6).toString('utf8') === 'plain:') return buf.subarray(6).toString('utf8');
-      return safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(buf) : '';
-    };
-    const readAll = (): Record<string, string> => {
+    /** Relace ze souboru; `weak` = ležela tam čitelně ("plain:" ze starší verze) nebo jen zamaskovaná (basic_text). */
+    const readFile = (): { data: Record<string, string>; weak: boolean } => {
       try {
-        return JSON.parse(decrypt(readFileSync(file))) as Record<string, string>;
+        const buf = readFileSync(file);
+        // Starší verze bez šifrování psaly "plain:" + JSON - přečte se, zapíše už jen zašifrovaně (nebo do paměti).
+        if (buf.subarray(0, 6).toString('utf8') === 'plain:') return { data: JSON.parse(buf.subarray(6).toString('utf8')) as Record<string, string>, weak: true };
+        if (!safeStorage.isEncryptionAvailable()) return { data: {}, weak: false };
+        return { data: JSON.parse(safeStorage.decryptString(buf)) as Record<string, string>, weak: !this.canEncrypt() };
       } catch {
-        return {};
+        return { data: {}, weak: false };
       }
     };
+    const toMemory = (data: Record<string, string>, dropWeakFile: boolean): Record<string, string> => {
+      this.memory = data;
+      if (!this.memoryNoticed) {
+        this.memoryNoticed = true;
+        log('přihlášení: systém neumí relaci zašifrovat (safeStorage) - zůstává jen v paměti, po restartu appky je potřeba se přihlásit znovu');
+      }
+      // Čitelná (nebo jen zamaskovaná) relace z dřívějška na disku nezůstane. Opravdu zašifrovaná
+      // (klíčenka se jen ještě nerozjela) zůstává - na disku je v bezpečí.
+      if (dropWeakFile) {
+        try {
+          unlinkSync(file);
+        } catch {
+          // soubor není
+        }
+      }
+      return data;
+    };
+    const readAll = (): Record<string, string> => {
+      if (this.memory) return this.memory;
+      if (this.canEncrypt()) return readFile().data;
+      const { data, weak } = readFile();
+      return toMemory(data, weak);
+    };
     const writeAll = (data: Record<string, string>) => {
+      if (!this.canEncrypt()) {
+        // Poprvé do paměti (bez předchozího čtení): čitelný soubor z dřívějška taky pryč.
+        toMemory(data, this.memory === null && readFile().weak);
+        return;
+      }
+      this.memory = null;
       mkdirSync(this.dir, { recursive: true });
-      writeFileSync(file, encrypt(JSON.stringify(data)));
+      writeFileSync(file, safeStorage.encryptString(JSON.stringify(data)));
     };
     return {
       getItem: (key: string) => readAll()[key] ?? null,
@@ -366,6 +420,7 @@ export class Auth {
     } catch {
       // Soubor už není.
     }
+    if (this.memory) this.memory = {};
     this.setAccount(null);
   }
 

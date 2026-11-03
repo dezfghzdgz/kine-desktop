@@ -1,5 +1,6 @@
 import { appendFileSync, closeSync, mkdirSync, openSync, readSync, renameSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { redactStreamKeys } from '../shared/redact';
 
 /**
  * Protokol do souboru (userData/logs/kine.log), ať má hráč co poslat,
@@ -17,7 +18,8 @@ export function logDir(): string {
 }
 
 export function log(message: string): void {
-  const line = `${new Date().toISOString()} ${message}\n`;
+  // Klíč vysílání do protokolu nikdy (protokol jde podpoře přes Zkopírovat diagnostiku) - pojistka pro každý řádek.
+  const line = `${new Date().toISOString()} ${redactStreamKeys(message)}\n`;
   if (process.env.KINE_DEBUG) process.stdout.write(line);
   if (!dir) return;
   try {

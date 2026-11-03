@@ -15,8 +15,8 @@
 //                          Windows; obojí nastaví `node scripts/podpis.mjs priprav`
 //                          po přihlášení (tajemství CERTUM_USERNAME, CERTUM_TOTP).
 //                          Má přednost před Azure.
-//  AZURE_SIGN_ENDPOINT, AZURE_SIGN_ACCOUNT, AZURE_SIGN_PROFILE, AZURE_SIGN_PUBLISHER
-//                          -> podpis přes Azure Trusted Signing (k tomu
+//  AZURE_SIGN_ENDPOINT, AZURE_SIGN_ACCOUNT, AZURE_SIGN_PROFILE (+ nepovinné AZURE_SIGN_PUBLISHER)
+//                          -> podpis přes Azure Artifact Signing (k tomu
 //                          AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
 //                          bere electron-builder sám z prostředí)
 //  KINE_HELPER_EXE=1       -> přibalit podepsaného pomocníka dist/helper/kine-helper.exe
@@ -30,6 +30,14 @@ import { fileURLToPath } from 'node:url';
 
 const OWNER = 'dezfghzdgz';
 const REPO = 'kine-desktop';
+
+// Kontrola podpisu stažené aktualizace: electron-updater pak nainstaluje jen instalátor
+// podepsaný vydavatelem z publisherName. Vypnutá, dokud není podpis nastavený (JAK-VYDAT.md,
+// část C) - nepodepsané sestavení ji mít nemůže (electron-builder.yml ji vypíná vždy).
+// ZAPNUTÍ = změnit jen tenhle řádek na true (platí pro podepsané sestavení, Certum i Azure).
+// Azure pak chce AZURE_SIGN_PUBLISHER přesně podle jména v certifikátu (bez něj sestavení
+// skončí chybou), Certum vezme jméno z certifikátu.
+export const VERIFY_UPDATE_SIGNATURE = false;
 
 export const VARIANTS = {
   full: {
@@ -63,6 +71,11 @@ export function buildConfig(env = process.env) {
   const variantKey = env.KINE_VARIANT === 'clipper' ? 'clipper' : 'full';
   const v = VARIANTS[variantKey];
   const base = (env.DESKTOP_DOWNLOAD_BASE ?? '').trim().replace(/\/+$/, '');
+  // Odsud si nainstalované appky berou aktualizace (latest.yml + instalátor). Podpis se zatím
+  // nekontroluje (VERIFY_UPDATE_SIGNATURE), takže přes http by šly cestou podvrhnout - jen https.
+  if (base && !/^https:\/\/[^\s/]+/i.test(base)) {
+    throw new Error(`DESKTOP_DOWNLOAD_BASE musí být adresa https:// (je "${base}") - aktualizace přes http by šly podvrhnout.`);
+  }
   const sign = {
     endpoint: env.AZURE_SIGN_ENDPOINT?.trim(),
     codeSigningAccountName: env.AZURE_SIGN_ACCOUNT?.trim(),
@@ -99,11 +112,11 @@ export function buildConfig(env = process.env) {
     lines.push('  signExts:', '    - ".dll"', '    - ".node"');
   }
   if (certum) {
-    // Aktualizace se podle jména v certifikátu neověřují: certifikát je na jméno
-    // ("Open Source Developer, …") a s jiným (např. firemním) by pak už žádná
+    // Aktualizace se podle jména v certifikátu zatím neověřují (VERIFY_UPDATE_SIGNATURE): certifikát
+    // je na jméno ("Open Source Developer, …") a s jiným (např. firemním) by pak už žádná
     // aktualizace neprošla. Stahuje se přes HTTPS a kontroluje sha512 z latest.yml.
     lines.push(
-      '  verifyUpdateCodeSignature: false',
+      `  verifyUpdateCodeSignature: ${VERIFY_UPDATE_SIGNATURE}`,
       '  signtoolOptions:',
       `    certificateSha1: ${JSON.stringify(certumSha1)}`,
       '    rfc3161TimeStampServer: "http://time.certum.pl"',
@@ -113,8 +126,19 @@ export function buildConfig(env = process.env) {
       '    sign: "./scripts/podpisHook.mjs"'
     );
   } else if (azure) {
-    lines.push('  verifyUpdateCodeSignature: true', '  azureSignOptions:');
-    for (const [k, val] of Object.entries(sign)) if (val) lines.push(`    ${k}: ${JSON.stringify(val)}`);
+    // Aktualizace jméno v certifikátu nekontrolují (stejně jako u Certumu): stahují se přes
+    // HTTPS a hlídá je kontrolní součet z latest.yml. Jméno v certifikátu Azure je jméno
+    // ověřené firmy / OSVČ (s diakritikou) - sebemenší odchylka by zablokovala všechny další
+    // aktualizace a pozdější přechod na jiný certifikát taky. publisherName ale electron-builder
+    // chce povinně (schéma): bez AZURE_SIGN_PUBLISHER se dá název appky (k ověřování se
+    // nepoužije - s verifyUpdateCodeSignature: false ho electron-builder do aktualizací nedává).
+    // Se zapnutou kontrolou (VERIFY_UPDATE_SIGNATURE) by špatné jméno zablokovalo aktualizace - bez něj radši chyba.
+    if (VERIFY_UPDATE_SIGNATURE && !sign.publisherName) {
+      throw new Error('VERIFY_UPDATE_SIGNATURE: chybí AZURE_SIGN_PUBLISHER (přesně jméno z certifikátu) - bez něj by žádná aktualizace neprošla.');
+    }
+    lines.push(`  verifyUpdateCodeSignature: ${VERIFY_UPDATE_SIGNATURE}`, '  azureSignOptions:');
+    const options = { ...sign, publisherName: sign.publisherName || v.productName };
+    for (const [k, val] of Object.entries(options)) if (val) lines.push(`    ${k}: ${JSON.stringify(val)}`);
   }
   if (helperExe) {
     lines.push('extraResources:', '  - from: dist/helper', '    to: helper', '    filter:', '      - kine-helper.exe');
@@ -172,7 +196,7 @@ export function buildConfig(env = process.env) {
     // Na GitHubu leží obě appky v jednom vydání - ať si nepřepisují latest.yml.
     lines.push('    channel: clipper');
   }
-  const signer = certum ? `Certum (${certumSha1})` : azure ? 'Azure Trusted Signing' : null;
+  const signer = certum ? `Certum (${certumSha1})` : azure ? 'Azure Artifact Signing' : null;
   return { file: v.file, variant: variantKey, base, signing, signer, helperExe, text: lines.join('\n') + '\n' };
 }
 

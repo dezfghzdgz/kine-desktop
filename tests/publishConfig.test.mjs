@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildConfig, VARIANTS } from '../scripts/publish-config.mjs';
+import { buildConfig, VARIANTS, VERIFY_UPDATE_SIGNATURE } from '../scripts/publish-config.mjs';
 
 test('Kine do PC: základ, aktualizace z <BASE>/full', () => {
   const cfg = buildConfig({ DESKTOP_DOWNLOAD_BASE: 'https://pub-x.r2.dev/' });
@@ -35,9 +35,21 @@ test('bez úložiště jen GitHub, s AZURE_* podpis', () => {
   assert.match(plain.text, /provider: github/);
   const signed = buildConfig({ AZURE_SIGN_ENDPOINT: 'https://weu.codesigning.azure.net', AZURE_SIGN_ACCOUNT: 'kine', AZURE_SIGN_PROFILE: 'kine-public', AZURE_SIGN_PUBLISHER: 'CN=Kine' });
   assert.equal(signed.signing, true);
-  assert.match(signed.text, /verifyUpdateCodeSignature: true/);
+  assert.equal(signed.signer, 'Azure Artifact Signing');
+  // Aktualizace jméno v certifikátu nekontrolují (jako u Certumu) - jinak by odchylka ve jméně
+  // (diakritika u OSVČ) nebo pozdější jiný certifikát zablokovaly všechny další aktualizace.
+  assert.match(signed.text, /^  verifyUpdateCodeSignature: false$/m);
   assert.match(signed.text, /publisherName: "CN=Kine"/);
   assert.deepEqual(Object.keys(VARIANTS), ['full', 'clipper']);
+});
+
+test('Azure bez AZURE_SIGN_PUBLISHER: publisherName (povinný ve schématu) = název appky', () => {
+  const azure = { AZURE_SIGN_ENDPOINT: 'https://weu.codesigning.azure.net', AZURE_SIGN_ACCOUNT: 'kine', AZURE_SIGN_PROFILE: 'kine-public' };
+  assert.match(buildConfig(azure).text, /^    publisherName: "Kine"$/m);
+  assert.match(buildConfig({ ...azure, KINE_VARIANT: 'clipper' }).text, /^    publisherName: "Kine Clipper"$/m);
+  assert.match(buildConfig(azure).text, /^    endpoint: "https:\/\/weu\.codesigning\.azure\.net"$/m);
+  assert.match(buildConfig(azure).text, /^    codeSigningAccountName: "kine"$/m);
+  assert.match(buildConfig(azure).text, /^    certificateProfileName: "kine-public"$/m);
 });
 
 const THUMB = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
@@ -71,4 +83,13 @@ test('Certum má přednost před Azure; neplatný otisk = bez podpisu; pomocník
   assert.doesNotMatch(broken.text, /signtoolOptions|signExts|from: dist\/helper|forceCodeSigning/);
   const unsignedHelper = buildConfig({ KINE_HELPER_EXE: '1' });
   assert.equal(unsignedHelper.helperExe, false, 'nepodepsaný pomocník se nepřibaluje');
+});
+
+test('úložiště aktualizací jen přes https; kontrola podpisu aktualizací se zapíná jedním řádkem', () => {
+  assert.throws(() => buildConfig({ DESKTOP_DOWNLOAD_BASE: 'http://pub-x.r2.dev' }), /https/);
+  assert.throws(() => buildConfig({ DESKTOP_DOWNLOAD_BASE: 'ftp://pub-x.r2.dev' }), /https/);
+  assert.doesNotThrow(() => buildConfig({ DESKTOP_DOWNLOAD_BASE: 'HTTPS://stahnout.kine.cz/' }));
+  // Zatím vypnutá (podpis není nastavený) - zapnutí = VERIFY_UPDATE_SIGNATURE v scripts/publish-config.mjs.
+  assert.equal(VERIFY_UPDATE_SIGNATURE, false);
+  assert.match(buildConfig({ KINE_SIGN: 'certum', KINE_SIGN_SHA1: THUMB }).text, /^  verifyUpdateCodeSignature: false$/m);
 });

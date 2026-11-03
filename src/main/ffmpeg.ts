@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { app } from 'electron';
 import { join } from 'node:path';
 import { constants as osConstants, setPriority } from 'node:os';
 import { parseProbe, progressPercent, type ProbeResult } from './editPlan';
@@ -21,7 +22,8 @@ export function ffmpegPath(): string {
     const bundled = join(process.resourcesPath, 'ffmpeg', 'ffmpeg');
     if (existsSync(bundled)) p = bundled;
   }
-  if (process.env.KINE_FFMPEG && existsSync(process.env.KINE_FFMPEG)) p = process.env.KINE_FFMPEG;
+  // Jiný ffmpeg (KINE_FFMPEG) jen při vývoji a v testech - zabalená appka spouští jen ten přibalený.
+  if (!app.isPackaged && process.env.KINE_FFMPEG && existsSync(process.env.KINE_FFMPEG)) p = process.env.KINE_FFMPEG;
   return p;
 }
 

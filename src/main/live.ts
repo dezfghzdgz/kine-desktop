@@ -1,6 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { CaptureCommand, CaptureEvent, CaptureState, LiveAudio, LiveEnded, LiveQuality, LiveScene, LiveStatus, Settings, Visibility } from '../shared/types';
 import { LIVE_PRESETS, liveElapsed, liveErrorKind, livePresetFor } from '../shared/live';
+import { redactStreamKeys } from '../shared/redact';
 import { LIVE_MAX_BACKLOG_BYTES, createProgressReader, liveFfmpegArgs, liveProgressSeconds, liveRetryDelay, maskLiveUrl, rtmpUrl, type LiveCompat } from './livePlan';
 import { HlsWatch, parsePlaylist, pickVariant, type MediaPlaylist } from './liveHealth';
 import type { KineApi } from './kineApi';
@@ -69,6 +70,8 @@ export class LiveController {
   private status: LiveStatus = { ...IDLE };
   private wanted = false;
   private url: string | null = null;
+  /** Klíč vysílání (část url) - z textů chyb, protokolu a okna se skrývá (redact). */
+  private streamKey: string | null = null;
   private quality: LiveQuality = '720p30';
   private bitrateKbps = 0;
   private audio: LiveAudio = { game: true, mic: true };
@@ -169,6 +172,7 @@ export class LiveController {
     this.lastSignalLine = '';
     // Nové vysílání: karta minulého záznamu zmizí (nezveřejněný záznam zůstává 30 dní ve studiu na Kine).
     this.set({ ...IDLE, state: 'starting', title, scene: this.scene, compat: this.compat });
+    this.streamKey = null;
     try {
       if (this.deps.testUrl) {
         this.url = this.deps.testUrl;
@@ -181,6 +185,7 @@ export class LiveController {
         if (!setup.input) setup = await api.liveCreate();
         if (!setup.input) throw new Error('live-not-configured');
         this.url = rtmpUrl(setup.input.rtmpsUrl, setup.input.streamKey);
+        this.streamKey = setup.input.streamKey.trim();
         this.hlsUrl = setup.stream?.hlsUrl ?? null;
         this.autoPublish = setup.recordingAutoSupported && setup.recordingVisibility !== null;
         if (setup.stream?.ownerId) this.set({ watchUrl: `${this.deps.siteUrl()}/live/${setup.stream.ownerId}` });
@@ -198,13 +203,20 @@ export class LiveController {
       this.startWatchdog();
       return this.current();
     } catch (e) {
-      const message = (e as Error).message ?? String(e);
+      const message = this.redact((e as Error)?.message ?? String(e));
+      // Chyba jde i do okna (IPC) - bez klíče, kdyby ho obsahovala.
+      if (e instanceof Error && e.message !== message) e.message = message;
       this.deps.log(`vysílání nezačalo: ${message}`);
       this.wanted = false;
       this.killProcess();
       this.set({ ...IDLE, error: message });
       throw e;
     }
+  }
+
+  /** Text bez klíče vysílání (adresa rtmps…/live/<klíč> v chybách ffmpeg, známý klíč kdekoli). */
+  private redact(text: string): string {
+    return redactStreamKeys(text, [this.streamKey]);
   }
 
   /**
@@ -569,8 +581,9 @@ export class LiveController {
       if (exited) return;
       exited = true;
       if (gen !== this.gen || !this.wanted) return;
-      const last = this.stderr.trim().split('\n').pop() || `ffmpeg ${code}`;
-      this.deps.log(`vysílání: ffmpeg skončil (${code}): ${this.stderr.slice(-500)}`);
+      // ffmpeg píše v chybách celou adresu i s klíčem ("Error opening output rtmps://…/live/<klíč>") - do protokolu ani do důvodu ne.
+      const last = this.redact(this.stderr.trim().split('\n').pop() || `ffmpeg ${code}`);
+      this.deps.log(`vysílání: ffmpeg skončil (${code}): ${this.redact(this.stderr.slice(-500))}`);
       this.onFailure(gen, last);
     };
     child.on('close', (code) => exit(code));
@@ -618,9 +631,11 @@ export class LiveController {
   }
 
   /** Výpadek generace: zkusit znovu, nebo se vzdát. `generation` null = mimo generaci (start snímání se nepovedl). */
-  private onFailure(generation: number | null, reason: string): void {
+  private onFailure(generation: number | null, rawReason: string): void {
     if (!this.wanted) return;
     if (generation !== null && generation !== this.gen) return;
+    // Důvod jde do protokolu, do stavu (okno ho ukáže) i do okénka - vždy bez klíče.
+    const reason = this.redact(rawReason);
     this.gen = 0;
     this.killProcess();
     this.deps.capture.sendLive({ type: 'live-stop' });

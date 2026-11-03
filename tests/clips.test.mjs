@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ClipLibrary } from '../dist/esm/clips.js';
 import { TRASH_DAYS } from '../dist/esm/types.js';
+import { isCloudflareUploadUrl } from '../dist/esm/upload.js';
 
 const clip = (dir, name, extra = {}) => {
   const file = join(dir, name);
@@ -91,4 +92,80 @@ test('koš: soubor kamery zvlášť jde do koše s klipem, zpátky i nadobro', (
   lib.remove('c.mp4');
   assert.equal(lib.get('c.mp4') ?? null, null);
   assert.ok(!existsSync(join(dir, '.trash', 'c.camera.webm')), 'nadobro = i soubor kamery pryč');
+});
+
+test('index.json: cesty mimo složku s klipy se vynechají a nic se nesmaže (ani starý koš)', () => {
+  const base = mkdtempSync(join(tmpdir(), 'kine-index-'));
+  const dir = join(base, 'klipy');
+  const thumbs = join(base, 'thumbs');
+  const outside = join(base, 'dokumenty');
+  for (const d of [dir, thumbs, outside]) mkdirSync(d);
+  const victim = join(outside, 'prace.docx');
+  writeFileSync(victim, 'důležité');
+  const good = clip(dir, 'ok.mp4');
+  writeFileSync(join(thumbs, 'ok.jpg'), 'jpg');
+  const old = new Date(Date.now() - (TRASH_DAYS + 5) * 86400000).toISOString();
+  const entries = [
+    { ...good, thumb: join(thumbs, 'ok.jpg') },
+    // Klip mimo složku (a dávno v koši - dřív by se při načtení smazal).
+    { ...good, id: 'venku', file: victim, deletedAt: old },
+    // Klip uvnitř, ale náhled a kamera ukazují ven: zůstane bez nich, cizí soubor se nesmaže.
+    { ...clip(dir, 'stary.mp4'), id: 'stary', thumb: victim, camera: { file: victim, offsetMs: 0, x: 0, y: 0, w: 0.2, shape: 'circle', mirror: false, width: 1, height: 1 }, deletedAt: old },
+    { ...good, id: 'relativni', file: 'ok.mp4' },
+    { ...good, id: 'sit', file: '\\\\server\\share\\x.mp4' },
+    { ...good, id: 'ven', file: join(dir, '..', 'dokumenty', 'prace.docx') },
+    null,
+    'nesmysl',
+  ];
+  writeFileSync(join(dir, 'index.json'), JSON.stringify(entries));
+  const logs = [];
+  const lib = new ClipLibrary(dir, (m) => logs.push(m), { thumbDirs: [thumbs] });
+  lib.load();
+  assert.deepEqual(lib.listAll().map((c) => c.id), ['ok.mp4'], 'zůstane jen klip uvnitř (starý z koše se smazal - je uvnitř)');
+  assert.equal(lib.get('ok.mp4').thumb, join(thumbs, 'ok.jpg'), 'náhled ve složce s náhledy platí');
+  assert.ok(existsSync(victim), 'soubor mimo složku zůstal');
+  assert.ok(!existsSync(join(dir, 'stary.mp4')), 'klip uvnitř z dávného koše se smazal jako dřív');
+  assert.ok(logs.some((m) => m.includes('vynechány')), 'v protokolu je, kolik se vynechalo');
+  const saved = JSON.parse(readFileSync(join(dir, 'index.json'), 'utf8'));
+  assert.deepEqual(saved.map((c) => c.id), ['ok.mp4']);
+});
+
+test('index.json: rozjeté nahrávání naváže jen u Cloudflare, jinak se adresa zahodí', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kine-index-'));
+  const paused = (tusUrl) => ({ state: 'paused', percent: 40, reason: 'offline', tusUrl, videoId: 'v1' });
+  const entries = [
+    clip(dir, 'cf.mp4', { upload: paused('https://upload.videodelivery.net/tus/abc?tusv2=true') }),
+    clip(dir, 'cizi.mp4', { upload: paused('https://evil.example/tus/abc') }),
+    clip(dir, 'http.mp4', { upload: { state: 'uploading', percent: 10, tusUrl: 'http://upload.videodelivery.net/tus/x', videoId: 'v2' } }),
+  ];
+  writeFileSync(join(dir, 'index.json'), JSON.stringify(entries));
+  const lib = new ClipLibrary(dir);
+  lib.load();
+  assert.equal(lib.get('cf.mp4').upload.tusUrl, 'https://upload.videodelivery.net/tus/abc?tusv2=true');
+  assert.equal(lib.get('cizi.mp4').upload.tusUrl, undefined);
+  assert.equal(lib.get('cizi.mp4').upload.state, 'paused', 'nahrávání zůstává ve frontě - začne znovu přes Kine');
+  assert.equal(lib.get('http.mp4').upload.tusUrl, undefined);
+  assert.equal(lib.get('http.mp4').upload.videoId, 'v2');
+
+  assert.equal(isCloudflareUploadUrl('https://upload.videodelivery.net/f65014bc6ff5419ea86e7972a047ba22'), true);
+  assert.equal(isCloudflareUploadUrl('https://upload.cloudflarestream.com/abc'), true);
+  assert.equal(isCloudflareUploadUrl('https://videodelivery.net.evil.example/x'), false);
+  assert.equal(isCloudflareUploadUrl('https://user:pw@upload.videodelivery.net/x'), false);
+  assert.equal(isCloudflareUploadUrl('https://upload.videodelivery.net:8443/x'), false);
+  assert.equal(isCloudflareUploadUrl(null), false);
+});
+
+test('purge: soubor mimo složku (podstrčený za běhu) se nesmaže', () => {
+  const base = mkdtempSync(join(tmpdir(), 'kine-index-'));
+  const dir = join(base, 'klipy');
+  mkdirSync(dir);
+  const victim = join(base, 'cizi.jpg');
+  writeFileSync(victim, 'x');
+  const lib = new ClipLibrary(dir);
+  lib.load();
+  lib.add(clip(dir, 'a.mp4', { thumb: victim }));
+  lib.purge('a.mp4');
+  assert.equal(lib.get('a.mp4'), null);
+  assert.ok(!existsSync(join(dir, 'a.mp4')));
+  assert.ok(existsSync(victim), 'náhled mimo složku zůstal');
 });

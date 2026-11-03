@@ -881,6 +881,48 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   `playerFullscreenOk` přes tlačítko v liště, `settingsSectionsOk` (Záznam
   pět oddílů, Appka vzhled / obecné / o appce, staré cíle).
 
+## Novinky 0.13.5
+
+Bezpečnostní vydání (z bezpečnostní kontroly appky):
+
+- **Web Kine v appce má pravidla od startu**: záložka Kine i okno s chatem vysílání (relace
+  `persist:kine-web`) mají pravidla oprávnění nastavená hned při startu - dřív je dostala až
+  záložka Kine, takže v Kine Clipperu (záložku nemá) dostal chat od Electronu cokoli. Kamera
+  a mikrofon jen hlavní stránce Kine; oznámení, schránka a celá obrazovka jen Kine; všechno
+  ostatní (i otevírání jiných protokolů systémem) nikdo (`src/shared/webGuard.ts`).
+  Přesměrování serverem (`will-redirect`) hlídá stejné pravidlo jako odkazy, vložené rámce
+  (`will-frame-navigate`) smí jen na web. Oficiální adresy Kine se berou jako Kine.
+- **Klíč vysílání se neukáže**: chyby ffmpeg (adresa `rtmps://…/live/<klíč>`) v protokolu,
+  důvod pádu vysílání v okně i „Zkopírovat diagnostiku“ klíč skryjí (`src/shared/redact.ts`).
+- **index.json ve složce s klipy appka nebere naslepo** (složku může sdílet síť, cloud nebo
+  jiný účet na druhém disku): klip i kamera musí ležet ve složce s klipy, náhled tam nebo ve
+  složce s náhledy - jinak se záznam při načtení vynechá a nic se nemaže. Rozjeté nahrávání
+  naváže jen na adresu u Cloudflare. „Otevřít“ pustí jen video ze složky s klipy.
+- Kontroly cest (poslat na Discord, ukázat ve složce, mazání v koši) přes `path.relative`
+  a skutečnou cestu místo začátku textu; složku s klipy z okna mění jen dialog.
+- Zabalená appka nebere zkušební proměnné (`KINE_TEST`, `KINE_FFMPEG`, `KINE_USER_DATA`).
+- Linux bez klíčenky: přihlášení se nezapisuje nešifrovaně, drží se jen v paměti (po restartu
+  appky je potřeba se přihlásit znovu).
+- Vydání: `DESKTOP_DOWNLOAD_BASE` musí být https; joby Linux a macOS nenechávají token gitu
+  v `.git/config`. Kontrola podpisu aktualizací se po nastavení podpisu zapne jedním řádkem
+  (`VERIFY_UPDATE_SIGNATURE` v `scripts/publish-config.mjs`).
+- Testy: `tests/redact.test.mjs`, `tests/webGuard.test.mjs`, `tests/safePath.test.mjs`,
+  nové případy v `tests/clips.test.mjs` a `tests/publishConfig.test.mjs`.
+
+## Novinky 0.13.4
+
+- **Vysílání z jiného monitoru**: v záložce **Živě** (oddíl Jak se vysílá) je výběr
+  monitoru - dřív šlo vysílat jen hlavní obrazovku (výběr byl schovaný v nastavení
+  snímání). Je to stejné nastavení jako pro klipy (vysílání i klipy jdou z jednoho
+  snímání); změna během vysílání obraz na pár vteřin přeruší (snímání se rozjede
+  znovu, vysílání se samo znovu připojí). Seznam monitorů se obnoví při otevření
+  záložky Živě / Nastavení (monitor připojený až po spuštění appky).
+- **Výběr monitoru i bez display_id**: na některých Windows (dvě grafiky, notebook +
+  monitor) Electron u zdrojů obrazovky nevyplní `display_id` a snímal se vždy první -
+  teď se v tom případě vezme zdroj podle pořadí monitorů (`src/shared/displayPick.ts`,
+  hlavní proces i starší cesta snímání).
+- Testy: unit testy výběru monitoru (`tests/displayPick.test.mjs`).
+
 ## Novinky 0.13.3
 
 - **Přihlášení jen přes prohlížeč**: e-mail a heslo přímo v appce jsou pryč. Web Kine

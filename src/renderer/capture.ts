@@ -445,7 +445,8 @@ async function getStreams(settings: Settings): Promise<void> {
   if (!display) {
     const sources = await bridge.sources();
     const settingsNow = await bridge.getSettings();
-    const source = sources.find((s) => s.display_id === settingsNow.displayId && settingsNow.displayId) ?? sources[0];
+    // Vybraný monitor určí hlavní proces (preferred - src/shared/displayPick.ts), jinak podle display_id.
+    const source = sources.find((s) => s.preferred) ?? sources.find((s) => s.display_id === settingsNow.displayId && settingsNow.displayId) ?? sources[0];
     if (!source) throw new Error(`žádná obrazovka (${String(lastError)})`);
     const mandatory: Record<string, unknown> = { chromeMediaSource: 'desktop', chromeMediaSourceId: source.id, maxFrameRate: effectiveFps };
     if (settings.maxHeight > 0) {

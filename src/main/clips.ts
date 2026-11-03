@@ -2,6 +2,8 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, 
 import { basename, extname, join } from 'node:path';
 import { TRASH_DAYS, type Clip, type ClipUpload } from '../shared/types';
 import { compressTempPath } from '../shared/compress';
+import { isCloudflareUploadUrl } from '../shared/upload';
+import { isPathInside } from './safePath';
 
 /**
  * Knihovna klipů: soubory ve složce s klipy + index.json vedle nich.
@@ -10,10 +12,23 @@ import { compressTempPath } from '../shared/compress';
  * Když hráč soubor smaže ručně ve Windows, klip z indexu při načtení
  * zmizí taky - nic se nehlásí, prostě ho nemá.
  *
+ * Index ale leží ve složce s klipy, kterou může sdílet síť, cloud nebo jiný
+ * účet na PC (druhý disk) - appka mu proto nevěří naslepo: klip a kamera musí
+ * ležet ve složce s klipy, náhled tam nebo ve složce s náhledy, rozjeté
+ * nahrávání smí navázat jen u Cloudflare. Co nesedí, se při načtení vynechá
+ * (nic se nemaže) - viz sanitize().
+ *
  * Smazání = koš: soubor se přesune do podsložky .trash a klip dostane
  * deletedAt. Odtud jde obnovit; po TRASH_DAYS dnech (nebo "vysypat koš")
  * zmizí nadobro. Klipy v koši nejsou v list(), jen v trash().
  */
+export type ClipLibraryOptions = {
+  /** Složky s náhledy klipů (userData/thumbs této i sourozenecké appky) - náhled smí ležet i tam. */
+  thumbDirs?: readonly string[];
+  /** Adresa rozjetého nahrávání, na kterou se smí po restartu navázat (výchozí: jen Cloudflare Stream). */
+  allowTusUrl?: (url: string) => boolean;
+};
+
 export class ClipLibrary {
   private clips: Clip[] = [];
   private listeners = new Set<(clips: Clip[]) => void>();
@@ -23,8 +38,40 @@ export class ClipLibrary {
   constructor(
     private dir: string,
     /** Kam hlásit, když se soubor nepovede přesunout (koš). */
-    private log: (message: string) => void = () => undefined
+    private log: (message: string) => void = () => undefined,
+    private readonly options: ClipLibraryOptions = {}
   ) {}
+
+  /** Kde smí ležet náhled: ve složce s klipy nebo ve složce s náhledy. */
+  private get thumbRoots(): string[] {
+    return [this.dir, ...(this.options.thumbDirs ?? [])];
+  }
+
+  /**
+   * Záznam z index.json, kterému appka věří, nebo null (vynechat). Kontroluje se
+   * jen text cest a skutečná cesta uvnitř složky - na cestu mimo složku (jiný disk,
+   * síťová, relativní) se na disk vůbec nesahá. Klip mimo složku = pryč z knihovny;
+   * náhled nebo kamera mimo = jen ten údaj pryč; nahrávání jinam než k Cloudflare =
+   * zapomenout adresu (začne se znovu přes Kine).
+   */
+  private sanitize(raw: unknown): Clip | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const c = raw as Clip;
+    if (typeof c.id !== 'string' || !c.id || typeof c.file !== 'string' || !isPathInside(c.file, [this.dir])) return null;
+    const clip: Clip = { ...c };
+    if (clip.thumb !== null && !(typeof clip.thumb === 'string' && isPathInside(clip.thumb, this.thumbRoots))) clip.thumb = null;
+    if (clip.camera !== undefined && clip.camera !== null && !(typeof clip.camera === 'object' && isPathInside(clip.camera.file, [this.dir]))) delete clip.camera;
+    const up = clip.upload;
+    if (up && (up.state === 'paused' || up.state === 'uploading') && up.tusUrl !== undefined) {
+      const allowed = this.options.allowTusUrl ?? isCloudflareUploadUrl;
+      if (typeof up.tusUrl !== 'string' || !allowed(up.tusUrl)) {
+        const next = { ...up };
+        delete next.tusUrl;
+        clip.upload = next;
+      }
+    }
+    return clip;
+  }
 
   get directory(): string {
     return this.dir;
@@ -49,11 +96,17 @@ export class ClipLibrary {
     } catch {
       parsed = [];
     }
-    const list = Array.isArray(parsed) ? (parsed as Clip[]) : [];
+    const raw = Array.isArray(parsed) ? (parsed as unknown[]) : [];
+    // Dřív, než se na cokoli sáhne: jen záznamy s cestami uvnitř složky (viz sanitize).
+    const list: Clip[] = [];
+    for (const item of raw) {
+      const clip = this.sanitize(item);
+      if (clip) list.push(clip);
+    }
+    if (list.length < raw.length) this.log(`knihovna: ${raw.length - list.length} záznamů v index.json ukazuje mimo složku s klipy - vynechány (soubory se nemažou)`);
     // Zmenšování klipu přerušené uprostřed výměny (pád, vypnutí PC): původní soubor zpátky,
     // nedokončený zmenšený pryč (src/main/compress.ts).
     for (const c of list) {
-      if (!c || typeof c.file !== 'string') continue;
       try {
         const backup = `${c.file}.kine-orig`;
         if (existsSync(backup)) {
@@ -67,7 +120,7 @@ export class ClipLibrary {
         // nevadí - zkusí se příště
       }
     }
-    this.clips = list.filter((c) => c && typeof c.id === 'string' && typeof c.file === 'string' && existsSync(c.file));
+    this.clips = list.filter((c) => existsSync(c.file));
     this.purgeExpired();
     // Rozjeté nahrávání z minula nemá kdo dokončit - vrátí se do fronty,
     // po startu si ho uploader vezme znovu (tus umí pokračovat).
@@ -237,17 +290,26 @@ export class ClipLibrary {
     return clip;
   }
 
-  /** Smaže klip nadobro i s náhledem. */
+  /** Smaže klip nadobro i s náhledem - jen soubory ve složce s klipy (náhled i ve složce s náhledy). */
   purge(id: string): void {
     const clip = this.get(id);
     if (!clip) return;
-    for (const f of [clip.file, clip.thumb, clip.camera?.file ?? null]) {
-      if (f) {
-        try {
-          unlinkSync(f);
-        } catch {
-          // Soubor už není - to je v pořádku.
-        }
+    const files: [string | null | undefined, string[]][] = [
+      [clip.file, [this.dir]],
+      [clip.thumb, this.thumbRoots],
+      [clip.camera?.file, [this.dir]],
+    ];
+    for (const [f, roots] of files) {
+      if (!f) continue;
+      // Pojistka i za běhu (odkaz / junction podstrčený po načtení): mimo složku se nic nemaže.
+      if (!isPathInside(f, roots)) {
+        this.log(`koš: ${f} leží mimo složku s klipy - nemaže se`);
+        continue;
+      }
+      try {
+        unlinkSync(f);
+      } catch {
+        // Soubor už není - to je v pořádku.
       }
     }
     this.clips = this.clips.filter((c) => c.id !== id);

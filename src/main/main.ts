@@ -52,6 +52,7 @@ import {
   type Visibility,
 } from '../shared/types';
 import { GB, storageCleanupPlan } from '../shared/storage';
+import { pickScreenSource } from '../shared/displayPick';
 import { CAMERA_WIDTH_MAX, CAMERA_WIDTH_MIN, cameraRect } from '../shared/liveLayout';
 import { chaptersText, markerChapters, parseHashtags } from '../shared/upload';
 import { hexToRgbTriplet } from '../shared/plan';
@@ -61,6 +62,9 @@ import { clipFileBase, defaultClipTitle, safeFilePart } from '../shared/clipNami
 import { DISCORD_FILE_MAX_BYTES } from '../shared/settingsSchema';
 import { clipsPlusActive, maxClipSecondsFor } from '../shared/plan';
 import { kineAppHeader, withKineHeader } from '../shared/kineClient';
+import { redactStreamKeys } from '../shared/redact';
+import { isKineSite, isKineUrl as kineUrlMatches, isWebFrameUrl, kineWebPermission } from '../shared/webGuard';
+import { isPathInside } from './safePath';
 import { performanceProfile } from '../shared/performance';
 import { initLog, log, logDir, tailLog } from './log';
 import { SettingsStore } from './settings';
@@ -120,6 +124,16 @@ const RENDERER_DIR = join(__dirname, '..', 'renderer');
 /** Která ze dvou appek běží (Kine do PC / Kine Clipper) - viz variant.ts. */
 const VARIANT = detectVariant();
 const PRODUCT = PRODUCT_NAMES[VARIANT];
+/**
+ * Samočinná zkouška (KINE_TEST, tests/e2e.sh) - jen při vývoji. Zabalená appka
+ * zkušební proměnné nebere (pojistky Electronu zavírají spouštění cizího kódu
+ * přes prostředí - proměnná by to zase otevřela).
+ */
+const TEST_MODE = !app.isPackaged && !!process.env.KINE_TEST;
+/** Relace webu Kine v appce (záložka Kine, chat vysílání): trvalé přihlášení a vlastní pravidla oprávnění. */
+const KINE_WEB_PARTITION = 'persist:kine-web';
+/** Co appka pustí do přehrávače systému (clips:open) - jen video ze složky s klipy. */
+const CLIP_VIDEO_EXT = /\.(?:mp4|webm|mkv|mov|m4v)$/i;
 
 /**
  * Cesta do pole Exec v souboru .desktop (Linux): v uvozovkách, se zpětným
@@ -195,8 +209,8 @@ function mimeFor(file: string): string {
   return ext === '.gif' ? 'image/gif' : ext === '.webm' ? 'video/webm' : ext === '.mp4' ? 'video/mp4' : 'application/octet-stream';
 }
 
-// Pro zkoušky: vlastní složka s daty, ať se nesahá na skutečné nastavení.
-if (process.env.KINE_USER_DATA) app.setPath('userData', process.env.KINE_USER_DATA);
+// Pro zkoušky: vlastní složka s daty, ať se nesahá na skutečné nastavení (jen při vývoji).
+if (!app.isPackaged && process.env.KINE_USER_DATA) app.setPath('userData', process.env.KINE_USER_DATA);
 
 // Jedna instance: druhé spuštění jen předá argumenty (kine:// odkaz) té první.
 if (!app.requestSingleInstanceLock()) {
@@ -334,7 +348,7 @@ class KineApp {
     // Kine Clipper jen klipuje. Starší nastavení (kde se režim volil) se srovná.
     const mode = modeForVariant(VARIANT);
     if (this.settings.get().appMode !== mode || !this.settings.get().appModeChosen) this.settings.update({ appMode: mode, appModeChosen: true });
-    this.library = new ClipLibrary(this.settings.clipsDir(), log);
+    this.library = new ClipLibrary(this.settings.clipsDir(), log, { thumbDirs: this.thumbDirs() });
     this.library.load();
     this.compressor = new ClipCompressor({
       list: () => this.library.list(),
@@ -490,7 +504,7 @@ class KineApp {
       notify: (kind, info) => this.onLiveNotice(kind, info),
       onEnded: () => this.afterLive(),
       // Samočinná zkouška vysílá na místní RTMP server místo Kine.
-      testUrl: process.env.KINE_TEST ? process.env.KINE_TEST_LIVE_URL ?? null : null,
+      testUrl: TEST_MODE ? process.env.KINE_TEST_LIVE_URL ?? null : null,
       saveRecording: (info) => this.saveStreamRecording(info),
       // Playlist vysílání u Cloudflare (jako divák) - vidí diváci obraz? (live.ts, liveHealth.ts)
       fetchText: async (url, timeoutMs) => {
@@ -555,6 +569,8 @@ class KineApp {
     });
 
     this.installDisplayMediaHandler();
+    // Pravidla pro web Kine v appce dřív, než ho otevře jakékoli okno (záložka Kine, chat vysílání).
+    this.installKineWebSession();
     this.registerIpc();
     // Nejdřív zkratky (pomocník si je vezme při startu), pak pomocník - ať se nespouští dvakrát.
     this.registerHotkeys();
@@ -647,7 +663,7 @@ class KineApp {
     // Odkaz kine://…, kterým appku někdo spustil (Windows předává v argv).
     for (const arg of process.argv) if (arg.startsWith('kine://')) void this.handleDeepLink(arg);
 
-    if (process.env.KINE_TEST) void runTestDriver(this as any);
+    if (TEST_MODE) void runTestDriver(this as any);
     this.pushStatus();
   }
 
@@ -662,7 +678,7 @@ class KineApp {
   private siblingWarnedAt = 0;
 
   private onProcesses(names: Set<string>): void {
-    if (process.platform !== 'win32' || process.env.KINE_TEST) return;
+    if (process.platform !== 'win32' || TEST_MODE) return;
     if (!names.has(siblingExe(VARIANT))) return;
     if (VARIANT === 'clipper') {
       if (this.siblingQuitting) return;
@@ -753,7 +769,7 @@ class KineApp {
 
   /** Jen samočinná zkouška (KINE_TEST): aktualizace, která neprošla, a stav Smart App Control. */
   simulateUpdateIssue(issue: UpdateIssue | null, sac: SmartAppControlState | null): void {
-    if (!process.env.KINE_TEST) return;
+    if (!TEST_MODE) return;
     this.smartAppControl = sac;
     this.updateIssue = issue;
     if (issue) this.addNotice({ id: 'update-failed', text: this.updateIssueText(), kind: 'warn', tab: 'about' });
@@ -1086,13 +1102,31 @@ class KineApp {
       text = text.split(home).join('~');
       text = text.split(home.replace(/\\/g, '/')).join('~');
     }
-    return text.replace(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, '<e-mail>');
+    // Klíč vysílání (i ze starších řádků protokolu) do schránky nesmí - diagnostika se posílá podpoře.
+    return redactStreamKeys(text.replace(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, '<e-mail>'));
   }
 
   // ---- soubor k nahrání -----------------------------------------------------------
 
   private uploadCacheDir(): string {
     return join(app.getPath('userData'), 'upload-cache');
+  }
+
+  /**
+   * Složky s náhledy klipů, kde smí ležet náhled z index.json: tahle appka a
+   * sourozenecká (Kine i Kine Clipper mají výchozí složku s klipy Videa/Kine
+   * a každá náhledy ve svých datech - podle názvu appky i balíčku).
+   */
+  private thumbDirs(): string[] {
+    const own = join(app.getPath('userData'), 'thumbs');
+    const appData = dirname(app.getPath('userData'));
+    const names = [...Object.values(PRODUCT_NAMES), 'kine-desktop', 'kine-clipper'];
+    return [own, ...names.map((name) => join(appData, name, 'thumbs'))];
+  }
+
+  /** Leží soubor ve složce s klipy (přes path.relative a skutečnou cestu)? Jen takové okno smí otevřít, ukázat nebo poslat. */
+  private inClipsDir(file: unknown): boolean {
+    return isPathInside(file, [this.settings.clipsDir()]);
   }
 
   /**
@@ -1224,7 +1258,7 @@ class KineApp {
     const s = this.settings.get();
     const quality = (LIVE_QUALITIES as readonly string[]).includes(String(opts?.quality)) ? (opts.quality as LiveQuality) : s.liveQuality;
     const title = String(opts?.title ?? '').trim().slice(0, 100) || s.liveTitle || this.games.current()?.name || this.t('liveDefaultTitle');
-    if (!this.auth.current() && !(process.env.KINE_TEST && process.env.KINE_TEST_LIVE_URL)) throw new Error('not-logged-in');
+    if (!this.auth.current() && !(TEST_MODE && process.env.KINE_TEST_LIVE_URL)) throw new Error('not-logged-in');
     this.settings.update({ liveTitle: title, liveQuality: quality });
     if (!this.live.active()) {
       this.liveStartedCapture = this.capture.state !== 'on';
@@ -1298,7 +1332,7 @@ class KineApp {
    */
   private async followSiteMove(): Promise<void> {
     // Testy (e2e) mluví s napodobeným webem - adresa se jim nemění.
-    if (process.env.KINE_TEST) return;
+    if (TEST_MODE) return;
     const current = this.settings.get().siteUrl;
     const next = await checkSiteMove(current, this.kineFetch as unknown as Parameters<typeof checkSiteMove>[1]).catch(() => null);
     if (!next || next === this.settings.get().siteUrl) return;
@@ -1510,7 +1544,7 @@ class KineApp {
       backgroundColor: '#0b0b0d',
       autoHideMenuBar: true,
       icon: this.appIcon(),
-      webPreferences: { partition: 'persist:kine-web', contextIsolation: true, sandbox: true, spellcheck: true },
+      webPreferences: { partition: KINE_WEB_PARTITION, contextIsolation: true, sandbox: true, spellcheck: true },
     });
     win.setMenuBarVisibility(false);
     win.setAlwaysOnTop(onTop, 'floating');
@@ -1525,11 +1559,11 @@ class KineApp {
       if (/^https?:/.test(url)) void shell.openExternal(url);
       return { action: 'deny' };
     });
-    win.webContents.on('will-navigate', (e, target) => {
-      if (!this.isKineUrl(target)) {
-        e.preventDefault();
-        if (/^https?:/.test(target)) void shell.openExternal(target);
-      }
+    // Okno zůstává na Kine: cizí web (odkaz i přesměrování serverem) jde do prohlížeče, nic jiného nikam.
+    this.guardNavigation(win.webContents, (target) => {
+      if (this.isKineSite(target)) return false;
+      if (/^https?:/i.test(target)) void shell.openExternal(target);
+      return true;
     });
     let url = site + chatPath;
     if (account) {
@@ -1554,7 +1588,7 @@ class KineApp {
   }
 
   private liveErrorText(message: string | undefined): string {
-    const clean = cleanLiveError(message ?? '');
+    const clean = redactStreamKeys(cleanLiveError(message ?? ''));
     const key = liveErrorTextKey(clean);
     return this.t(key, key === 'liveErrOther' ? { message: clean.slice(0, 160) } : {});
   }
@@ -1829,7 +1863,7 @@ class KineApp {
     // Kine tuhle verzi odmítá: aktualizace se stáhne a nainstaluje sama, hned jak je klid (updater.ts).
     requireUpdateSoon();
     // Za chvíli: při startu se tohle dozví dřív, než je kontrola aktualizací připravená.
-    if (!process.env.KINE_TEST) setTimeout(() => void checkForUpdates().catch(() => undefined), 20_000);
+    if (!TEST_MODE) setTimeout(() => void checkForUpdates().catch(() => undefined), 20_000);
   }
 
   private addNotice(notice: Omit<AppNotice, 'at'>): void {
@@ -1861,7 +1895,7 @@ class KineApp {
    * s odkazem rovnou do nastavení systému. Kamera a mikrofon se ptají samy.
    */
   private checkMacPermissions(): void {
-    if (process.platform !== 'darwin' || process.env.KINE_TEST) return;
+    if (process.platform !== 'darwin' || TEST_MODE) return;
     try {
       const status = systemPreferences.getMediaAccessStatus('screen');
       if (status === 'granted') {
@@ -1955,7 +1989,7 @@ class KineApp {
    * - jen ten, který opravdu vede na tuhle appku.
    */
   private ensureShortcuts(settingChanged = false, afterInstall = false): void {
-    if (process.platform !== 'win32' || !app.isPackaged || process.env.KINE_TEST) return;
+    if (process.platform !== 'win32' || !app.isPackaged || TEST_MODE) return;
     const target = process.execPath;
     const name = `${PRODUCT}.lnk`;
     const options = { target, cwd: dirname(target), icon: target, iconIndex: 0, appUserModelId: APP_USER_MODEL_IDS[VARIANT], description: PRODUCT };
@@ -2010,18 +2044,22 @@ class KineApp {
     }
   }
 
+  /** Monitory v pořadí, v jakém je hlásí systém (k výběru zdroje obrazovky). */
+  private displayRefs(): { id: string; primary: boolean }[] {
+    const primary = screen.getPrimaryDisplay().id;
+    return screen.getAllDisplays().map((d) => ({ id: String(d.id), primary: d.id === primary }));
+  }
+
   private installDisplayMediaHandler(): void {
     session.defaultSession.setDisplayMediaRequestHandler(
       async (request, callback) => {
         try {
           const s = this.settings.get();
           const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } });
-          const primaryId = String(screen.getPrimaryDisplay().id);
-          const source =
-            sources.find((x) => x.display_id === s.displayId && s.displayId) ??
-            sources.find((x) => x.display_id === primaryId) ??
-            sources[0];
+          // Vybraný monitor (klipy i vysílání) - i tam, kde Electron nevyplní display_id (src/shared/displayPick.ts).
+          const source = pickScreenSource(sources, this.displayRefs(), s.displayId);
           if (!source) throw new Error('no display');
+          if (s.displayId && source.display_id !== s.displayId) log(`monitor ${s.displayId}: zdroj podle pořadí (${source.name})`);
           const audio = request.audioRequested && process.platform === 'win32' && s.systemAudio ? 'loopback' : undefined;
           callback(audio ? { video: source, audio } : { video: source });
         } catch (e) {
@@ -2036,6 +2074,42 @@ class KineApp {
     session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => {
       cb(['media', 'display-capture', 'notifications', 'fullscreen', 'pointerLock'].includes(permission));
     });
+  }
+
+  /**
+   * Relace webu Kine v appce (záložka Kine, chat vysílání) - nastaví se při startu,
+   * dřív než ji použije jakékoli okno. Dřív se pravidla nastavovala až se záložkou
+   * Kine, takže v Kine Clipperu (záložku nemá) dostal chat od Electronu cokoli.
+   * Co smí kdo, rozhoduje src/shared/webGuard.ts: kamera a mikrofon jen hlavní
+   * stránce Kine, zbytek seznamu jen Kine, všechno ostatní (i openExternal) nikdo.
+   */
+  private installKineWebSession(): void {
+    const ses = session.fromPartition(KINE_WEB_PARTITION);
+    const topUrl = (wc: Electron.WebContents | null): string | null => {
+      try {
+        return wc && !wc.isDestroyed() ? wc.getURL() : null;
+      } catch {
+        return null;
+      }
+    };
+    ses.setPermissionRequestHandler((wc, permission, callback, details) => {
+      const ok = kineWebPermission(permission, { requestingUrl: details.requestingUrl, isMainFrame: details.isMainFrame, topUrl: topUrl(wc) }, this.settings.get().siteUrl);
+      if (!ok) {
+        let origin = '?';
+        try {
+          origin = new URL(details.requestingUrl).origin;
+        } catch {
+          // adresa bez původu
+        }
+        log(`web Kine v okně: oprávnění ${permission} zamítnuto (${origin})`);
+      }
+      callback(ok);
+    });
+    ses.setPermissionCheckHandler((wc, permission, requestingOrigin, details) =>
+      kineWebPermission(permission, { requestingUrl: details.requestingUrl ?? requestingOrigin, isMainFrame: details.isMainFrame, topUrl: topUrl(wc) }, this.settings.get().siteUrl)
+    );
+    // USB / HID / sériová zařízení web Kine nepotřebuje.
+    ses.setDevicePermissionHandler(() => false);
   }
 
   // ---- tray -------------------------------------------------------------------
@@ -2276,16 +2350,34 @@ class KineApp {
     });
   }
 
-  /** Adresa patří ke Kine (stejný web; playkine.com a www.playkine.com jsou totéž). */
+  /** Adresa patří ke Kine z nastavení (stejný web; playkine.com a www.playkine.com jsou totéž). */
   private isKineUrl(url: string): boolean {
-    try {
-      const a = new URL(url);
-      const b = new URL(this.settings.get().siteUrl);
-      const host = (h: string) => h.toLowerCase().replace(/^www\./, '');
-      return a.protocol === b.protocol && a.port === b.port && host(a.hostname) === host(b.hostname);
-    } catch {
-      return false;
-    }
+    return kineUrlMatches(url, this.settings.get().siteUrl);
+  }
+
+  /** Kine pro přechody stránek: web z nastavení nebo oficiální adresa Kine (src/shared/webGuard.ts). */
+  private isKineSite(url: string): boolean {
+    return isKineSite(url, this.settings.get().siteUrl);
+  }
+
+  /**
+   * Hlídání přechodů webu Kine v appce (záložka Kine, chat vysílání). O hlavní
+   * stránce rozhodne `mainFrame` (true = zastavit) - stejně pro odkaz (will-navigate)
+   * i pro přesměrování serverem (will-redirect), ať se cizí web nedostane do okna
+   * oklikou přes přesměrování z Kine. Vložené rámce (přehrávač, ochrana proti botům)
+   * smí jen na web - na kine:// ani jiné protokoly systému ne (a nic se kvůli nim
+   * neotvírá v prohlížeči).
+   */
+  private guardNavigation(wc: Electron.WebContents, mainFrame: (url: string) => boolean): void {
+    wc.on('will-navigate', (e) => {
+      if (mainFrame(e.url)) e.preventDefault();
+    });
+    wc.on('will-redirect', (e) => {
+      if (e.isMainFrame ? mainFrame(e.url) : !isWebFrameUrl(e.url)) e.preventDefault();
+    });
+    wc.on('will-frame-navigate', (e) => {
+      if (!e.isMainFrame && !isWebFrameUrl(e.url)) e.preventDefault();
+    });
   }
 
   /**
@@ -2333,13 +2425,9 @@ class KineApp {
   /** Web Kine vložený do hlavního okna; vznikne, až ho stránka poprvé ukáže. */
   private ensureKineView(win: BrowserWindow): WebContentsView {
     if (this.kineView && !this.kineView.webContents.isDestroyed()) return this.kineView;
-    const partition = 'persist:kine-web';
-    // Žádný preload (web mluví s appkou jen přes odkazy kine://) a jen
-    // oprávnění, která web opravdu potřebuje.
-    session.fromPartition(partition).setPermissionRequestHandler((_wc, permission, cb) => {
-      cb(['fullscreen', 'notifications', 'clipboard-sanitized-write', 'pointerLock', 'media'].includes(permission));
-    });
-    const view = new WebContentsView({ webPreferences: { partition, contextIsolation: true, sandbox: true } });
+    // Žádný preload (web mluví s appkou jen přes odkazy kine://); oprávnění relace
+    // nastavuje už start appky (installKineWebSession).
+    const view = new WebContentsView({ webPreferences: { partition: KINE_WEB_PARTITION, contextIsolation: true, sandbox: true } });
     // Web pozná, že běží v appce (Sidebar ukáže "Klipy v PC", /download řekne, že appku už máš).
     view.webContents.setUserAgent(`${view.webContents.getUserAgent()} KineDesktop/${app.getVersion()}`);
     const external = (target: string) => {
@@ -2347,19 +2435,18 @@ class KineApp {
         void this.handleDeepLink(target);
         return true;
       }
-      if (/^https?:/.test(target) && !this.isKineUrl(target)) {
+      if (/^https?:/i.test(target) && !this.isKineSite(target)) {
         void shell.openExternal(target);
         return true;
       }
       return false;
     };
     view.webContents.setWindowOpenHandler(({ url: target }) => {
-      if (!external(target) && this.isKineUrl(target)) void view.webContents.loadURL(target);
+      if (!external(target) && this.isKineSite(target)) void view.webContents.loadURL(target);
       return { action: 'deny' };
     });
-    view.webContents.on('will-navigate', (e, target) => {
-      if (external(target)) e.preventDefault();
-    });
+    // Odkazy, přesměrování serverem i vložené rámce (guardNavigation).
+    this.guardNavigation(view.webContents, external);
     view.webContents.on('did-fail-load', (_e, code, description, url, isMainFrame) => {
       if (!isMainFrame || code === -3) return;
       log(`Kine v okně: ${description} (${code}) ${url}`);
@@ -2450,7 +2537,7 @@ class KineApp {
   private async clearWebLogin(): Promise<void> {
     this.lastWebUser = null;
     try {
-      await session.fromPartition('persist:kine-web').clearStorageData({ storages: ['localstorage', 'cookies', 'indexdb'] });
+      await session.fromPartition(KINE_WEB_PARTITION).clearStorageData({ storages: ['localstorage', 'cookies', 'indexdb'] });
       if (this.kineView && !this.kineView.webContents.isDestroyed()) void this.kineView.webContents.loadURL(this.settings.get().siteUrl);
     } catch (e) {
       log(`odhlášení webu: ${(e as Error).message}`);
@@ -3023,9 +3110,9 @@ class KineApp {
   async shareFileToDiscord(file: string, title: string, fromCache = false): Promise<void> {
     const webhook = this.settings.get().discordWebhook;
     if (!webhook) throw new Error('no webhook');
-    const dir = this.settings.clipsDir();
     // Jen soubory ze složky s klipy (okno nesmí poslat cokoli z disku) - nebo kopie z upload-cache (bakedFileFor).
-    const allowed = file.startsWith(dir) || (fromCache && file.startsWith(this.uploadCacheDir()));
+    // Přes path.relative a skutečnou cestu, ne podle začátku textu ("…\Kine\..\Dokumenty" začíná stejně).
+    const allowed = this.inClipsDir(file) || (fromCache && isPathInside(file, [this.uploadCacheDir()]));
     if (!allowed || !existsSync(file)) throw new Error('not found');
     const size = statSync(file).size;
     if (size > DISCORD_FILE_MAX_BYTES) throw new Error('too-large');
@@ -3139,9 +3226,8 @@ class KineApp {
 
   /** Ukázat soubor ve složce - jen soubory ve složce s klipy (nic jiného okno nesmí otvírat). */
   revealFile(file: string): void {
-    const dir = this.settings.clipsDir();
-    const target = String(file);
-    if (!target.startsWith(dir) || !existsSync(target)) return;
+    const target = String(file ?? '');
+    if (!this.inClipsDir(target) || !existsSync(target)) return;
     shell.showItemInFolder(target);
   }
 
@@ -3193,11 +3279,18 @@ class KineApp {
     });
     ipcMain.handle('capture:sources', async () => {
       const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } });
-      return sources.map((x) => ({ id: x.id, name: x.name, display_id: x.display_id }));
+      const picked = pickScreenSource(sources, this.displayRefs(), this.settings.get().displayId);
+      return sources.map((x) => ({ id: x.id, name: x.name, display_id: x.display_id, preferred: x.id === picked?.id }));
     });
 
     ipcMain.handle('settings:get', () => this.settings.get());
-    ipcMain.handle('settings:update', (_e, patch: Partial<Settings>) => this.settings.update(patch));
+    ipcMain.handle('settings:update', (_e, patch: Partial<Settings>) => {
+      // Složku s klipy mění jen dialog (clips:pickDir) - z okna se nebere: kontroly cest
+      // (otevřít, ukázat, poslat na Discord) stojí právě na ní.
+      const clean: Partial<Settings> = patch && typeof patch === 'object' ? { ...patch } : {};
+      delete clean.clipsDir;
+      return this.settings.update(clean);
+    });
     ipcMain.handle('status:get', () => this.status());
     ipcMain.handle('platform', () => process.platform);
 
@@ -3222,12 +3315,18 @@ class KineApp {
       return this.library.update(id, { game: name || null });
     });
     ipcMain.handle('clips:open', (_e, id: string) => {
-      const clip = this.library.get(id);
-      return clip ? shell.openPath(clip.file) : '';
+      const clip = this.library.get(String(id));
+      if (!clip) return '';
+      // Systém soubor "spustí" podle přípony - jen video ze složky s klipy, nic jiného.
+      if (!CLIP_VIDEO_EXT.test(clip.file) || !this.inClipsDir(clip.file)) {
+        log(`otevření klipu odmítnuto (není video ve složce s klipy): ${clip.file}`);
+        return 'not-allowed';
+      }
+      return shell.openPath(clip.file);
     });
     ipcMain.handle('clips:reveal', (_e, id: string) => {
-      const clip = this.library.get(id);
-      if (clip) shell.showItemInFolder(clip.file);
+      const clip = this.library.get(String(id));
+      if (clip && this.inClipsDir(clip.file)) shell.showItemInFolder(clip.file);
     });
     ipcMain.handle('clips:upload', (_e, requests: unknown) => {
       // Hráč klikl Nahrát (knihovna, přehrávač, "Nahrát hned"): jede hned, i když se zrovna hraje.
@@ -3469,7 +3568,7 @@ class KineApp {
    * v ruce (instalace appku zavře a znovu spustí).
    */
   canAutoInstall(): boolean {
-    if (this.quitting || process.env.KINE_TEST) return false;
+    if (this.quitting || TEST_MODE) return false;
     if (this.games.current() || this.live.active() || this.capture.recordingInfo() || this.finishingRecording) return false;
     const win = this.settingsWindow;
     if (win && !win.isDestroyed() && win.isVisible() && win.isFocused()) return false;
@@ -3561,7 +3660,7 @@ app.on('will-quit', () => {
 
 // Zkouška bez zvukové karty (Xvfb): Chromium podstrčí falešný mikrofon s tónem,
 // ať se dá ověřit míchání zvuku, měřáky a že klip zvuk opravdu má.
-if (process.env.KINE_TEST_FAKE_AUDIO) app.commandLine.appendSwitch('use-fake-device-for-media-stream');
+if (!app.isPackaged && process.env.KINE_TEST_FAKE_AUDIO) app.commandLine.appendSwitch('use-fake-device-for-media-stream');
 // Linux s Waylandem: snímání obrazovky jde přes PipeWire (portál) - bez téhle volby by Chromium nenašlo žádnou obrazovku.
 if (process.platform === 'linux') app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer');
 

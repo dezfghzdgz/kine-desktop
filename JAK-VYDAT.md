@@ -102,8 +102,8 @@ ověřeného vydavatele – nepodepsaný instalátor zablokuje celý („…zabl
 aplikaci, která může být nebezpečná“) nebo jeho část („část této aplikace
 byla zablokována“) a tlačítko „Přesto spustit“ tam **není**. Kódem se to
 obejít nedá (a nemá). Jediné řešení je **podpis** a ten jde jen na tvoje
-jméno – certifikát si musíš pořídit ty (ověřují totožnost). Všechno ostatní
-je hotové: jakmile do GitHubu přidáš dvě tajemství, každé vydání se podepíše
+jméno – podpis si musíš zařídit ty (ověřují totožnost). Všechno ostatní
+je hotové: jakmile do GitHubu přidáš tajemství, každé vydání se podepíše
 celé – instalátor, odinstalátor, Kine.exe, všechny .dll, ffmpeg.exe, pluginy
 instalátoru (NSIS, ty se rozbalují do %TEMP%) i pomocník `kine-helper.exe`.
 Krok „Podpis – kontrola“ ověří, že je podepsaný opravdu každý soubor, jinak
@@ -114,13 +114,74 @@ aplikací“ → **Vypnuto** → spusť instalátor znovu. S aktuálními aktual
 Windows (od dubna 2026) jde později zase zapnout bez přeinstalace Windows –
 ale dokud Kine není podepsané, Windows by ho pak blokoval i při spuštění.
 
-### Doporučeno: Certum „Open Source Code Signing in the Cloud“ (od 49 € / rok)
+### Doporučeno: Azure Artifact Signing (Microsoft, asi 10 $ / měsíc)
 
-Nejlevnější cesta pro jednotlivce v ČR (Azure Artifact Signing bere
-jednotlivce jen z USA a Kanady). Repo kine-desktop je veřejné s licencí MIT,
-takže na „open source“ certifikát máš nárok. Certum je v programu důvěryhodných
-certifikačních autorit Microsoftu – Inteligentní řízení aplikací podepsané
-Kine pustí hned. V podpisu bude „Open Source Developer, <tvoje jméno>“.
+V EU ho dostanou firmy – jako OSVČ se ověřuješ jako **Organization** s IČO.
+Projít to nemusí; když ne, účet smaž a zaplatíš jen ten měsíc. Ve Windows bude
+jako vydavatel jméno z ARES. Platí se celý měsíc dopředu (ne poměrně).
+
+**1. Dva e-maily na playkine.com** – Microsoft je chce na doméně webu (Gmail
+neprojde). Zdarma přes **ImprovMX** (improvmx.com): přidej doménu
+playkine.com, přeposílání třeba `kontakt@` a `podpis@` do svého Gmailu, a ve
+správě domény (Vercel → Domains → playkine.com → DNS) přidej záznamy MX a TXT,
+které ImprovMX ukáže.
+
+**2. Azure** – portal.azure.com, přihlas se firemním účtem (…@…onmicrosoft.com):
+1. *Subscriptions*: musí tam být placené **Pay-As-You-Go** (zkušební Free
+   Trial podpis nebere → *Upgrade*).
+2. V předplatném *Resource providers* → **Microsoft.CodeSigning** → *Register*.
+3. Vyhledej **Artifact Signing Accounts** → *Create*: Resource group
+   `kine-podpis`, Account name třeba `kinepodpis` (jen písmena a čísla),
+   Region **North Europe** (West Europe nové zákazníky nebere - „The selected
+   region is currently not accepting new customers“), Pricing **Basic**.
+   Účet Kine je v North Europe.
+4. V účtu *Access control (IAM)* → *Add role assignment* → **Artifact Signing
+   Identity Verifier** → sobě (jinak je tlačítko na ověření šedé).
+5. *Identity validations* → *Organization* → *New identity* → *Public*:
+   Organization Name a adresa **přesně podle ARES**, Business Identifier = IČO,
+   Website `https://www.playkine.com`, Primary a Secondary e-mail = ty dva
+   z bodu 1, jméno a příjmení přesně jako v občance → *Create*. Pak odkaz
+   v e-mailu → ověření totožnosti (mobil + doklad). Můžou chtít výpis ze
+   živnostenského rejstříku (ne starší než 12 měsíců). Trvá 1–20 pracovních dní.
+
+**3. Až je ověření „Completed“:**
+1. V účtu *Certificate profiles* → *Create* → **Public Trust** → název třeba
+   `kine` → *Verified CN and O* = tvoje ověření → *Create*.
+2. **Microsoft Entra ID** → *App registrations* → *New registration* → název
+   `kine-github` → *Register*. Zkopíruj **Application (client) ID** a
+   **Directory (tenant) ID**. Pak *Certificates & secrets* → *New client
+   secret* → zkopíruj **Value** (ukáže se jen jednou).
+3. Zpátky v Artifact Signing účtu: *Access control (IAM)* → *Add role
+   assignment* → **Artifact Signing Certificate Profile Signer** → *Members* →
+   vyhledej `kine-github` → *Review + assign*.
+4. **GitHub** → repo kine-desktop → *Settings* → *Secrets and variables* →
+   *Actions*:
+   - *Secrets* (tajné): `AZURE_TENANT_ID` = Directory (tenant) ID,
+     `AZURE_CLIENT_ID` = Application (client) ID, `AZURE_CLIENT_SECRET` = Value
+   - *Variables* (záložka vedle): `AZURE_SIGN_ENDPOINT` = adresa podle oblasti
+     účtu - pro North Europe `https://neu.codesigning.azure.net` (West Europe
+     `https://weu…`, East US `https://eus…`), `AZURE_SIGN_ACCOUNT` = název účtu
+     (`kinepodpis`), `AZURE_SIGN_PROFILE` = název profilu (třeba `kine`)
+5. V repu musí být nový `.github/workflows/release.yml` (kroky „Podpis -
+   příprava“, „Podpis - kontrola“). Přetažením se `.github` nenahraje: na GitHubu
+   otevři `.github/workflows/release.yml` → tužka → smaž obsah, vlož nový →
+   *Commit changes*.
+6. *Actions* → *Vydání* → *Run workflow*. V *Summary* uvidíš „Podpis ✅ Azure
+   Artifact Signing“ a „Kontrola podpisu ✅ všech N spustitelných souborů je
+   podepsaných“. Kontrola u tebe: stažený `Kine-Clipper-Setup.exe` → pravým →
+   *Vlastnosti* → *Digitální podpisy*.
+
+**Když krok „Podpis - příprava“ spadne**, pošli mi jeho log. Chybějící nebo
+napůl vyplněná tajemství vypíše jménem. Bez tajemství se vydává jako dřív,
+jen nepodepsaně.
+
+### Certum „Open Source Code Signing in the Cloud“ (od 49 € / rok) – jen nekomerční
+
+Pozor: Certum ho dává jen na **nekomerční** projekty a když zjistí, že jím
+podepisuješ software, který se prodává (Kine má placené Plus), certifikát
+zruší. Chce i účet za energie / telefon na tvoje jméno. Pro Kine proto spíš
+Azure výš. Kdybys ho přesto chtěl: V podpisu bude „Open Source Developer,
+<tvoje jméno>“, workflow ho umí (má přednost před Azure).
 
 1. **Koupit:** shop.certum.eu → Code Signing → **Open Source Code Signing in
    the Cloud** (1 rok) → zaplatit.
@@ -181,15 +242,11 @@ certifikát (třeba firemní) aktualizace nerozbije.
 
 ### Další možnosti
 
-- **Azure Artifact Signing** (Microsoft, 9,99 $/měsíc) – jednotlivci jen USA
-  a Kanada, v EU jen ověřená **firma**. Workflow ho umí (podepíše i pluginy):
-  *Secrets* `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`;
-  *Variables* `AZURE_SIGN_ENDPOINT` (např. `https://weu.codesigning.azure.net`),
-  `AZURE_SIGN_ACCOUNT`, `AZURE_SIGN_PROFILE`, `AZURE_SIGN_PUBLISHER` (přesně
-  jako v certifikátu, např. `CN=Kine s.r.o.`). Když jsou nastavené Certum
-  i Azure, použije se Certum.
-- **Microsoft Store** (zdarma, podepíše Microsoft) – Kine by se instalovalo ze
-  Storu (balík MSIX); větší přestavba, jde udělat později.
+- **Microsoft Store** (zdarma, podepíše Microsoft) – Kine Clipper ze Storu
+  (balík MSIX, aktualizace dělá Store). Rozjednáno: účet v Partner Center je,
+  verze pro Store se přidá do workflow podle údajů z *Product identity*.
+- **Certum Standard** (přes prodejce, od ~155 € / rok bez DPH) – komerční
+  použití v pořádku, workflow ho umí stejně jako Certum Open Source.
 - **SignPath Foundation** (zdarma pro open source) – schvalují projekt ručně,
   v podpisu je „SignPath Foundation“.
 - Klasický **OV certifikát** (Certum Standard, SSL.com…) – funguje stejně

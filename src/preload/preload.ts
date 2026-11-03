@@ -200,7 +200,7 @@ const kineCapture = {
   /** Kousek proudu živého vysílání (generace vysílání). */
   liveChunk: (generation: number, data: ArrayBuffer) => ipcRenderer.send('capture:liveChunk', generation, data),
   event: (event: CaptureEvent) => ipcRenderer.send('capture:event', event),
-  sources: (): Promise<{ id: string; name: string; display_id: string }[]> => ipcRenderer.invoke('capture:sources'),
+  sources: (): Promise<{ id: string; name: string; display_id: string; preferred?: boolean }[]> => ipcRenderer.invoke('capture:sources'),
   getSettings: (): Promise<Settings> => ipcRenderer.invoke('settings:get'),
   /** Zvuk hry přímo z Windows (pomocník, WASAPI loopback) - když ho Chromium otevřít nejde. */
   loopbackStart: (): Promise<{ ok: true; format: { sampleRate: number; channels: number; channelMask: number; device: string } } | { ok: false; error: string }> =>

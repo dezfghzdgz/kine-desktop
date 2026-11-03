@@ -831,6 +831,14 @@ function tabButton(name: Tab) {
       onclick: () => {
         tab = name;
         render();
+        // Monitor připojený až po spuštění appky - ať je hned ve výběru (Živě, Nastavení).
+        if (name === 'live' || name === 'settings') {
+          void kine.listDisplays().then((list) => {
+            if (JSON.stringify(list) === JSON.stringify(displays)) return;
+            displays = list;
+            render();
+          });
+        }
       },
     },
     tabIcon(name),
@@ -1742,6 +1750,20 @@ function renderLive() {
           )
         )
       ),
+      // Který monitor se vysílá (dřív jen hlavní - výběr byl schovaný v Nastavení snímání).
+      // Je to stejné nastavení jako pro klipy: vysílání i klipy jdou z jednoho snímání.
+      h(
+        'label',
+        { class: 'grow live-display' },
+        t('liveDisplayLabel'),
+        h(
+          'select',
+          { class: 'live-display-select', onchange: (e: Event) => update({ displayId: (e.target as HTMLSelectElement).value }) },
+          h('option', { value: '', selected: settings.displayId === '' }, t('displayPrimary')),
+          ...displays.map((d) => h('option', { value: d.id, selected: settings.displayId === d.id }, d.label))
+        )
+      ),
+      h('p', { class: 'hint' }, onAir ? t('liveDisplayHintOnAir') : t('liveDisplayHint')),
       checkbox('liveOpenPage', t('liveOpenPage'), { icon: 'external' }),
       checkbox('liveCompat', t('liveCompatSetting'), { icon: 'gauge', disabled: locked, help: t('liveCompatHint') })
     ),

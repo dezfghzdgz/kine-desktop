@@ -881,6 +881,30 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   `playerFullscreenOk` přes tlačítko v liště, `settingsSectionsOk` (Záznam
   pět oddílů, Appka vzhled / obecné / o appce, staré cíle).
 
+## Novinky 0.13.6
+
+Oprava „sekání“ zvuku v klipech (hlášení: seká se všechno kromě VP8):
+
+- **Kousky zásobníku se skládají přesně**: délka každého dvousekundového kousku v klipu je
+  teď čas do začátku dalšího kousku. Dřív se brala délka ze seznamu ffmpeg (od prvního do
+  posledního snímku), která vychází o pár až desítky ms jinak - nejvíc u VP9 (až ~60 ms),
+  u H.264 ~10 ms, u VP8 skoro vůbec. Každý spoj tak posunul zbytek klipu: obraz na spoji
+  poskočil, zvuk dostal překryv a mikrofon (samostatný proud) se proti obrazu za 20 s
+  posunul až o desetiny sekundy. Když odstup nedává smysl (chybějící kousek, jiná
+  generace), bere se délka ze seznamu jako dřív (`pieceDuration` v `src/main/segments.ts`).
+- **Zvuk se při stavbě klipu nesrovnává po milisekundách**: časové značky zvuku z Chromia
+  kolísají o milisekundy až desítky ms (zvuk Windows chodí po kouscích, při zátěži později)
+  a ffmpeg (`aresample`) je srovnával už od 10 ms - vkládal ticho a ořezával zvuk mnohokrát
+  za sekundu. Týkalo se to klipů, kde se zvuk znovu kóduje: vždy H.264 (mp4 + AAC), u VP8
+  a VP9 s mikrofonem nebo změněnou hlasitostí. Srovnává se teď až od 100 ms - skutečné
+  mezery (výpadek zvuku, nová generace po klipu) se tichem doplní dál (`src/main/editPlan.ts`).
+- Ověřeno na stejné nahrávce s rozkolísanými značkami: dřív 276 skoků ve zvuku, teď 0.
+  Zkouška celé appky (zvuk hry přes pomocníka, klip 20 s): dřív 191 skoků a 40 krátkých
+  výpadků (zhruba každé 0,3 s), teď žádné pravidelné - zbylé jednotlivé jen ve chvílích,
+  kdy byl zkušební počítač přetížený.
+- Klipy uložené dřív zůstávají, jak jsou - oprava platí pro nové klipy.
+- Testy: nové případy v `tests/segments.test.mjs`, upravené `tests/editPlan.test.mjs`.
+
 ## Novinky 0.13.5
 
 Bezpečnostní vydání (z bezpečnostní kontroly appky):

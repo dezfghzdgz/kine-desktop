@@ -87,6 +87,31 @@ test('plán klipu: zpoždění mikrofonu ho posune dopředu, překryv se uřízn
   assert.equal(concatScript([{ file: "C:\\it's\\a.mkv", duration: 2 }]), "ffconcat version 1.0\nfile 'C:\\it'\\''s\\a.mkv'\nduration 2.000\n");
 });
 
+test('0.13.6: délka kousku = do začátku dalšího kousku generace (spoje bez poskoku obrazu a mezer ve zvuku)', async () => {
+  const { pieceDuration } = await import('../dist/esm/segments.js');
+  // Jak to zapisuje ffmpeg: konec = poslední snímek - jednou o snímek dřív, jindy o kus dál než začátek dalšího.
+  const video = [seg('a', 1, 0, 1983), seg('b', 1, 2000, 4050), seg('c', 1, 4016, 6030), seg('d', 2, 6200, 8200)];
+  const plan = planClip(video, [], 0);
+  assert.deepEqual(plan.video.map((e) => e.duration), [2, 2.016, 2.014, 2]);
+  // Uvnitř generace = přesně čas od začátku prvního kousku do konce posledního; mezera mezi generacemi se vypouští.
+  assert.equal(plan.videoSeconds, 8.03);
+  // Nesmyslný odstup (chybějící kousek, rozbité časy) -> délka ze seznamu jako dřív.
+  assert.equal(pieceDuration(seg('x', 1, 0, 2000), seg('y', 1, 6000, 8000)), 2);
+  assert.equal(pieceDuration(seg('x', 1, 0, 2000), seg('y', 1, 500, 2500)), 2);
+  assert.equal(pieceDuration(seg('x', 1, 0, 2000), undefined), 2);
+  assert.equal(pieceDuration(seg('x', 1, 0, 2000), seg('y', 2, 2050, 4000)), 2);
+});
+
+test('0.13.6: mikrofon sedí na obraz i po mnoha spojích (pozice podle začátků kousků)', () => {
+  // 10 kousků obrazu po 2,016 s, ffmpeg u každého zapsal konec o snímek kratší (1,999 s).
+  const video = Array.from({ length: 10 }, (_, i) => seg(`v${i}`, 1, i * 2016, i * 2016 + 1999));
+  const mic = [seg('m', 1, 18144, 20160)];
+  const plan = planClip(video, mic, 0);
+  // Mikrofon z 18,144 s (začátek 10. kousku) patří přesně na 18,144 s klipu - dřív by ujel o 9 x 17 ms dopředu.
+  assert.equal(plan.micOffsetMs, 18144);
+  assert.equal(plan.videoSeconds, 20.143);
+});
+
 test('obnova po pádu: kousky od startu nahrávání, jen formát poslední generace, i s mikrofonem', async () => {
   const { recoverySegments } = await import('../dist/esm/segments.js');
   const seg = (gen, dir, start, end) => toSegment({ file: `${start}.mkv`, start, end }, gen, 100_000, dir, join);

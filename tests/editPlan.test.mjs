@@ -108,7 +108,7 @@ test('slepení klipu: jen obraz + zvuk hry', () => {
   assert.deepEqual(args.slice(0, 10), ['-loglevel', 'error', '-fflags', '+genpts', '-f', 'concat', '-safe', '0', '-i', 'v.txt']);
   // mp4: zvuk hry přes srovnání podle časů (mezery/překryvy mezi kousky) a do AAC.
   const fc = args[args.indexOf('-filter_complex') + 1];
-  assert.equal(fc, '[0:a]aresample=async=1:min_hard_comp=0.010:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[g1]');
+  assert.equal(fc, '[0:a]aresample=async=1:min_hard_comp=0.100:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[g1]');
   assert.deepEqual(mapsOf(args), ['0:v:0', '[g1]']);
   assert.deepEqual(args.slice(args.indexOf('-c:v'), args.indexOf('-c:v') + 6), ['-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k']);
   assert.equal(args[args.length - 1], 'out.mp4');
@@ -141,7 +141,7 @@ test('slepení klipu: hra + mikrofon = tři stopy (mix, hra, mikrofon) s hlasito
   });
   const fc = args[args.indexOf('-filter_complex') + 1];
   assert.equal(args.filter((a) => a === '-i').length, 2);
-  assert.match(fc, /\[0:a\]aresample=async=1:min_hard_comp=0\.010:first_pts=0,volume=0\.80,adelay=delays=40:all=1,aformat=[^,]*,asplit=2\[g1\]\[g2\]/);
+  assert.match(fc, /\[0:a\]aresample=async=1:min_hard_comp=0\.100:first_pts=0,volume=0\.80,adelay=delays=40:all=1,aformat=[^,]*,asplit=2\[g1\]\[g2\]/);
   // Mikrofon: -1250 + 40 = -1210 ms -> uříznout 1.210 s.
   assert.match(fc, /\[1:a\]aresample=[^,]*,volume=1\.50,atrim=start=1\.210,asetpts=PTS-STARTPTS,aformat=[^,]*,asplit=2\[m1\]\[m2\]/);
   assert.match(fc, /\[g1\]\[m1\]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0\.97[^\[]*\[mix\]/);

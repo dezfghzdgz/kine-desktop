@@ -252,12 +252,22 @@ export type ClipPlan = {
  * Jak slepit obraz a mikrofon, aby seděly na sebe.
  *
  * Obraz (se zvukem hry) a mikrofon se nahrávají dvěma recordery do dvou
- * řad kousků. Kousky obrazu jdou v klipu za sebou (každý přesně tak dlouhý,
- * jak ho zapsal ffmpeg - `duration` v seznamu, ať si concat nic nedomýšlí).
- * Každý kousek mikrofonu se pak umístí podle hodin počítače na místo, kam
- * patří vůči obrazu STEJNÉ generace (po klipu se nahrávání rozjíždí znovu
- * a mezi generacemi je malá mezera - ta se v klipu vypouští u obrazu, tak
- * i u mikrofonu). `latencyMs` = o kolik je mikrofon pozadu (posune se dopředu).
+ * řad kousků. Kousky obrazu jdou v klipu za sebou (`duration` v seznamu,
+ * ať si concat nic nedomýšlí). Každý kousek mikrofonu se pak umístí podle
+ * hodin počítače na místo, kam patří vůči obrazu STEJNÉ generace (po klipu
+ * se nahrávání rozjíždí znovu a mezi generacemi je malá mezera - ta se
+ * v klipu vypouští u obrazu, tak i u mikrofonu). `latencyMs` = o kolik je
+ * mikrofon pozadu (posune se dopředu).
+ *
+ * Délka kousku uvnitř generace = do začátku dalšího kousku (0.13.6), ne
+ * „konec“ ze seznamu ffmpeg. Konec v seznamu je poslední snímek obrazu
+ * a podle kodéru vychází o snímek kratší nebo delší, než kde začíná další
+ * kousek - každý spoj pak posunul zbytek klipu o pár až desítky ms: obraz
+ * na spoji poskočil a zvuk dostal mezeru nebo překryv (klip „sekal“ po
+ * dvou sekundách, hlavně u H.264 a VP9). Podle začátku dalšího kousku
+ * leží všechno přesně tam, kde se to nahrálo. Poslední kousek generace
+ * a kousek s nesmyslným odstupem (chybějící soubor, rozbité časy) berou
+ * délku ze seznamu jako dřív.
  */
 export function planClip(video: Segment[], mic: Segment[], latencyMs = 0): ClipPlan {
   const videoSorted = [...video].sort((a, b) => a.startWall - b.startWall);
@@ -265,14 +275,14 @@ export function planClip(video: Segment[], mic: Segment[], latencyMs = 0): ClipP
   // Kde v klipu začíná která generace obrazu a od kdy (podle hodin) tam je.
   const layout = new Map<number, { wallStart: number; wallEnd: number; outStart: number }>();
   let out = 0;
-  for (const s of videoSorted) {
-    const duration = Math.max(0.001, (s.endWall - s.startWall) / 1000);
+  videoSorted.forEach((s, i) => {
+    const duration = pieceDuration(s, videoSorted[i + 1]);
     entries.push({ file: s.file, duration: round3(duration) });
     const g = layout.get(s.generation);
     if (!g) layout.set(s.generation, { wallStart: s.startWall, wallEnd: s.endWall, outStart: out });
     else g.wallEnd = Math.max(g.wallEnd, s.endWall);
     out += duration;
-  }
+  });
   const videoSeconds = round3(out);
 
   // Kousky mikrofonu z generací, které v klipu jsou, a jen ty, co se s obrazem překrývají.
@@ -294,6 +304,18 @@ export function planClip(video: Segment[], mic: Segment[], latencyMs = 0): ClipP
     return slot < actual - 0.0005 ? { file: p.seg.file, duration: round3(slot), outpoint: round3(slot) } : { file: p.seg.file, duration: round3(slot) };
   });
   return { video: entries, videoSeconds, mic: micEntries, micOffsetMs: Math.round(placed[0].outMs) };
+}
+
+/**
+ * Jak dlouho kousek obrazu v klipu trvá (s): do začátku dalšího kousku téže
+ * generace, když odstup dává smysl (od poloviny délky ze seznamu do délky
+ * + 0,5 s), jinak délka ze seznamu ffmpeg - viz planClip.
+ */
+export function pieceDuration(s: Segment, next: Segment | undefined): number {
+  const own = Math.max(0.001, (s.endWall - s.startWall) / 1000);
+  if (!next || next.generation !== s.generation) return own;
+  const spacing = (next.startWall - s.startWall) / 1000;
+  return spacing >= own * 0.5 && spacing <= own + 0.5 ? spacing : own;
 }
 
 /** Seznam pro concat demuxer i s délkami (a případně výstupním bodem) každého souboru. */

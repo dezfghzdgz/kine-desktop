@@ -213,12 +213,19 @@ function volumeFilter(gain: number | undefined): string | null {
 }
 
 /**
- * Srovnání zvuku podle časových značek: mezery (mezi generacemi, výpadky)
- * se doplní tichem a překryvy uříznou, jakmile přesáhnou 10 ms - jinak by
- * se zvuk po každém kousku posunul o pár milisekund a na konci dlouhého
- * záznamu by "ujížděl".
+ * Srovnání zvuku podle časových značek: skutečné mezery (mezi generacemi,
+ * výpadky) se doplní tichem a překryvy uříznou - ale až od 100 ms.
+ *
+ * Do 0.13.5 to bylo od 10 ms. Časové značky zvuku z Chromia ale kolísají
+ * o milisekundy až desítky ms (zvuk Windows chodí po kouscích, při zátěži
+ * později), takže ffmpeg vkládal ticho a ořezával zvuk mnohokrát za
+ * sekundu - klip „sekal“. Týkalo se to klipů, kde se zvuk znovu kóduje:
+ * vždy H.264 (mp4 + AAC), u VP8/VP9 jen s mikrofonem nebo hlasitostí;
+ * VP8 bez mikrofonu zvuk jen kopíruje, proto tam sekání nebylo. Kousky se
+ * od 0.13.6 skládají přesně podle času nahrání (segments.planClip), takže
+ * se zvuk na spojích neposouvá a jemné srovnávání není potřeba.
  */
-const RESAMPLE = 'aresample=async=1:min_hard_comp=0.010:first_pts=0';
+const RESAMPLE = 'aresample=async=1:min_hard_comp=0.100:first_pts=0';
 const STEREO = 'aformat=sample_fmts=fltp:channel_layouts=stereo';
 
 /** Které stopy klip bude mít (podle toho, co se nahrálo a jak je nastaveno). */

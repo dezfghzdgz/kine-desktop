@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { createServer, request as httpRequest } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { basename, dirname, join } from 'node:path';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { BrowserWindow, app, clipboard, nativeImage } from 'electron';
 import { log } from './log';
 import { trayIcon } from './icon';
@@ -1281,6 +1282,155 @@ export async function runTestDriver(kine: {
       result.performance = panel && low && noPreview && kine.settings.get().performance === 'balanced';
     }
 
+    // ---- 0.14.0: co se nahrává (monitor / aplikace), živý náhled -------------------------------
+    // S oknovým správcem (KINE_TEST_WM - bez něj Xvfb okna aplikací nehlásí): cizí okno (druhý
+    // Electron s fialovou stránkou), výběr zdrojů s náhledy, náhled ze snímání, přepnutí na okno
+    // bez nového startu (zásobník zůstává), klip z okna, zavřené okno -> monitor, otevřené -> zpět.
+    const E2E_WINDOW = 'Kine E2E okno';
+    let e2eWin: ChildProcess | null = null;
+    let e2eWinRef: { kind: 'window'; id: string; name: string } | null = null;
+    const startE2eWindow = async (): Promise<ChildProcess> => {
+      const dir = join(outDir, 'e2e-window-app');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'kine-e2e-window', version: '1.0.0', main: 'main.js' }));
+      const page = `<title>${E2E_WINDOW}</title><body style="margin:0;background:#ff00ff;color:#fff;font:90px sans-serif"><div id=t>E2E</div><script>setInterval(()=>{t.textContent=String(Date.now()%100000)},40)</script></body>`;
+      writeFileSync(
+        join(dir, 'main.js'),
+        `const { app, BrowserWindow } = require('electron');\napp.whenReady().then(() => {\n  const w = new BrowserWindow({ width: 640, height: 480, x: 40, y: 40, title: ${JSON.stringify(E2E_WINDOW)}, backgroundColor: '#ff00ff' });\n  w.loadURL('data:text/html,' + encodeURIComponent(${JSON.stringify(page)}));\n});\n`
+      );
+      const child = spawn(process.execPath, ['--no-sandbox', `--user-data-dir=${join(outDir, 'e2e-window-ud')}`, dir], { stdio: 'ignore', env: { ...process.env, KINE_TEST: '', ELECTRON_RUN_AS_NODE: '' } });
+      await sleep(3000);
+      return child;
+    };
+    const avgColor = async (file: string, at: number): Promise<[number, number, number] | null> => {
+      const frames = await rawFramesAt(file, at);
+      return frames;
+    };
+    if (process.env.KINE_TEST_WM) {
+      const k = kine as any;
+      e2eWin = await startE2eWindow();
+      const list = await k.listCaptureSources();
+      const win = list.windows.find((w: any) => w.name === E2E_WINDOW);
+      e2eWinRef = win ? { kind: 'window', id: win.id, name: win.name } : null;
+      const ownListed = list.windows.some((w: any) => /^Kine( Clipper)?$/.test(w.name));
+      // Náhled ze snímání (to, co jde do klipů): malé JPEGy, dvakrát za sekundu.
+      const previews: { size: number; jpeg: boolean; kind: string; width: number; height: number }[] = [];
+      const origPreview = k.capture.deps.onPreviewFrame;
+      k.capture.deps.onPreviewFrame = (data: Uint8Array, info: any) => {
+        previews.push({ size: data.byteLength, jpeg: data[0] === 0xff && data[1] === 0xd8, ...info });
+        origPreview?.(data, info);
+      };
+      k.setPreviewWant('record');
+      await sleep(2600);
+      const previewScreen = { count: previews.length, last: previews[previews.length - 1] ?? null };
+      // Okno "Co nahrávat" v Záznamu: náhled, dvě záložky, karty s náhledy, Esc zavře.
+      kine.openSettings('settings:quality');
+      await sleep(1500);
+      const ui = kine.settingsWindow && !kine.settingsWindow.isDestroyed()
+        ? await kine.settingsWindow.webContents.executeJavaScript(`(async () => {
+            const panel = !!document.querySelector('.record-source-panel');
+            const img = document.querySelector('.record-source-panel img.preview-feed');
+            // Náhled se opravdu ukáže (obrázek se načte - dřív ho CSP okna nepustila).
+            for (let i = 0; i < 20 && !(img && img.complete && img.naturalWidth > 0); i++) await new Promise((r) => setTimeout(r, 150));
+            const fed = !!img && img.src.startsWith('blob:') && img.complete && img.naturalWidth > 0;
+            const name = document.querySelector('.source-current-name')?.textContent ?? '';
+            document.querySelector('.source-choose')?.click();
+            await new Promise((r) => setTimeout(r, 1500));
+            const dialog = !!document.querySelector('.source-dialog');
+            const screens = document.querySelectorAll('.source-dialog .source-card').length;
+            const tabs = [...document.querySelectorAll('.source-tabs [role=tab]')];
+            tabs[1]?.click();
+            await new Promise((r) => setTimeout(r, 300));
+            const apps = [...document.querySelectorAll('.source-dialog .source-card .source-name')].map((n) => n.textContent);
+            return { panel, fed, name, dialog, screens, apps };
+          })()`)
+        : null;
+      await shot(kine.settingsWindow, 'settings-source-picker');
+      if (kine.settingsWindow && !kine.settingsWindow.isDestroyed()) await kine.settingsWindow.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); !document.querySelector('.source-dialog')`);
+      await sleep(300);
+      const dialogClosed = kine.settingsWindow && !kine.settingsWindow.isDestroyed() ? await kine.settingsWindow.webContents.executeJavaScript(`!document.querySelector('.source-dialog')`) : false;
+      // Přepnout na okno: snímání se nerestartuje (stav pořád 'on', zásobník zůstává), nahrává se okno.
+      const bufferedBefore = kine.capture.bufferedSeconds();
+      let toWindow = false;
+      let windowClip: any = null;
+      let windowColor: [number, number, number] | null = null;
+      let bufferKept = false;
+      let previewWindow: any = null;
+      if (e2eWinRef) {
+        kine.settings.update({ captureWindow: e2eWinRef });
+        for (let i = 0; i < 40 && !toWindow; i++) {
+          await sleep(250);
+          toWindow = k.status().captureSource?.kind === 'window' && k.capture.state === 'on';
+        }
+        await sleep(4500);
+        previewWindow = previews[previews.length - 1] ?? null;
+        bufferKept = kine.capture.bufferedSeconds() >= bufferedBefore && k.capture.state === 'on';
+        await shot(kine.settingsWindow, 'settings-source-window');
+        windowClip = await kine.onClipHotkey().catch((e: Error) => ({ error: e.message }));
+        if (windowClip?.file) windowColor = await avgColor(windowClip.file, 1);
+      }
+      // Zpátky na monitor.
+      kine.settings.update({ captureWindow: null });
+      let backToScreen = false;
+      for (let i = 0; i < 40 && !backToScreen; i++) {
+        await sleep(250);
+        backToScreen = k.status().captureSource?.kind === 'screen';
+      }
+      // Zavřená aplikace: nahrává se monitor (missing) a po otevření se snímání vrátí na ni samo.
+      let missing = false;
+      let reopened = false;
+      if (e2eWinRef) {
+        kine.settings.update({ captureWindow: e2eWinRef });
+        for (let i = 0; i < 40 && k.status().captureSource?.kind !== 'window'; i++) await sleep(250);
+        e2eWin.kill();
+        for (let i = 0; i < 60 && !missing; i++) {
+          await sleep(250);
+          const info = k.status().captureSource;
+          missing = !!info && info.kind === 'screen' && info.missing === E2E_WINDOW && k.capture.state === 'on';
+        }
+        e2eWin = await startE2eWindow();
+        for (let i = 0; i < 60 && !reopened; i++) {
+          await sleep(250);
+          const info = k.status().captureSource;
+          reopened = !!info && info.kind === 'window' && !info.missing;
+        }
+        const relist = await k.listCaptureSources();
+        const again = relist.windows.find((w: any) => w.name === E2E_WINDOW);
+        if (again) e2eWinRef = { kind: 'window', id: again.id, name: again.name };
+        kine.settings.update({ captureWindow: null });
+        for (let i = 0; i < 40 && k.status().captureSource?.kind !== 'screen'; i++) await sleep(250);
+      }
+      k.setPreviewWant(null);
+      k.capture.deps.onPreviewFrame = origPreview;
+      result.sources = {
+        screens: list.screens.length,
+        windows: list.windows.length,
+        found: !!win,
+        thumb: !!win?.thumb,
+        ownListed,
+        previewScreen,
+        previewWindow,
+        ui,
+        dialogClosed,
+        toWindow,
+        bufferKept,
+        windowClip: windowClip ? { width: windowClip.width ?? null, height: windowClip.height ?? null, duration: windowClip.durationSeconds ?? null, error: windowClip.error ?? null } : null,
+        windowColor,
+        backToScreen,
+        missing,
+        reopened,
+        captureState: k.capture.state,
+      };
+      const magenta = (c: [number, number, number] | null) => !!c && c[0] > 150 && c[1] < 120 && c[2] > 150;
+      result.sourcesOk =
+        !!win && !!win.thumb && !ownListed && list.screens.length >= 1 &&
+        previewScreen.count >= 3 && !!previewScreen.last?.jpeg && previewScreen.last.width >= 1000 &&
+        !!ui && ui.panel && ui.fed && !!ui.name && ui.dialog && ui.screens >= 1 && ui.apps.includes(E2E_WINDOW) && dialogClosed === true &&
+        toWindow && bufferKept && !!previewWindow && previewWindow.width < 1000 &&
+        !!windowClip?.width && windowClip.width < 1000 && magenta(windowColor) &&
+        backToScreen && missing && reopened && k.capture.state === 'on';
+    }
+
     // Nahrávání celého zápasu: tlačítko v postranním panelu spustí nahrávku
     // (tiká v něm čas), druhý klik ji uloží jako dlouhý klip s odznakem REC.
     // Zkratka pro nahrávání je v Záznamu třetí pole zkratky.
@@ -1446,6 +1596,7 @@ export async function runTestDriver(kine: {
         let endedPublished = false;
         let endedClosed = false;
         let onKineLine = false;
+        let liveScenes: Record<string, unknown> | null = null;
         // Kamera (falešná kamera Chromia při KINE_TEST_FAKE_AUDIO) vpravo dole, velká, obdélník.
         const withCamera = !!process.env.KINE_TEST_FAKE_AUDIO;
         kine.settings.update({ liveCamera: withCamera, liveCameraPosition: 'bottom-right', liveCameraSize: 'large', liveCameraShape: 'rect', liveCameraMirror: false, liveBrbText: 'E2E BRB' });
@@ -1498,11 +1649,73 @@ export async function runTestDriver(kine: {
           brbOff = (kine as any).toggleLiveBrb(false) === false && (kine as any).live.current().scene?.brb === false;
           micMuted = (kine as any).setLiveMicMuted(true) === true && (kine as any).live.current().scene?.micMuted === true;
           await sleep(3000);
+          // Scény (0.14.0): text "Začínáme za chvíli", aplikace (okno) - za běhu, bez přerušení vysílání;
+          // náhled v okně ukazuje to, co jde ven. Po konci vysílání se snímání vrátí na monitor.
+          {
+            const k = kine as any;
+            const previews: { kind: string; width: number; height: number; color: number[] | null }[] = [];
+            const origPreview = k.capture.deps.onPreviewFrame;
+            k.capture.deps.onPreviewFrame = (data: Uint8Array, info: any) => {
+              previews.push({ ...info, color: jpegColor(data) });
+              origPreview?.(data, info);
+            };
+            k.setPreviewWant('live');
+            const sceneIds = k.settings.get().liveScenes.map((x: any) => x.id);
+            const textOk = k.setLiveScene('starting') === true;
+            await sleep(2500);
+            const textScene = k.live.current().scene?.screenText === k.t('sceneStartingText') && k.live.current().scene?.brb === false;
+            const textPreview = previews[previews.length - 1] ?? null;
+            await liveWin.webContents.executeJavaScript(`(() => { document.querySelector('.live-scene-panel')?.scrollIntoView({ block: 'start' }); return true; })()`);
+            await shot(liveWin, 'settings-live-scene-text');
+            const uiStrip = await liveWin.webContents.executeJavaScript(`(() => { const img = document.querySelector('.live-preview.on-air img.preview-feed'); return { strip: document.querySelectorAll('.scene-strip .scene-btn[data-scene]').length, active: document.querySelector('.scene-btn.active')?.dataset.scene ?? null, img: !!img && img.complete && img.naturalWidth > 0 }; })()`);
+            let appScene = false;
+            let appPreview: any = null;
+            let stillLive = false;
+            if (e2eWinRef) {
+              kine.settings.update({ liveScenes: [...k.settings.get().liveScenes, { id: 'e2e-app', name: 'E2E aplikace', kind: 'source', source: e2eWinRef, camera: false, text: '' }] });
+              await sleep(300);
+              k.setLiveScene('e2e-app');
+              for (let i = 0; i < 40 && !appScene; i++) {
+                await sleep(250);
+                appScene = k.status().captureSource?.kind === 'window';
+              }
+              await sleep(4000);
+              appPreview = previews[previews.length - 1] ?? null;
+              stillLive = k.live.current().state === 'live';
+              await liveWin.webContents.executeJavaScript(`(() => { document.querySelector('.live-scene-panel')?.scrollIntoView({ block: 'start' }); return true; })()`);
+            await shot(liveWin, 'settings-live-scene-app');
+            }
+            k.setLiveScene('game');
+            let gameBack = false;
+            for (let i = 0; i < 40 && !gameBack; i++) {
+              await sleep(250);
+              gameBack = k.status().captureSource?.kind === 'screen' && k.live.current().scene?.sceneId === 'game';
+            }
+            await sleep(1500);
+            k.setPreviewWant(null);
+            k.capture.deps.onPreviewFrame = origPreview;
+            // Před koncem vysílání znovu scéna s aplikací: po konci se snímání musí vrátit na monitor samo.
+            if (e2eWinRef) {
+              k.setLiveScene('e2e-app');
+              for (let i = 0; i < 40 && k.status().captureSource?.kind !== 'window'; i++) await sleep(250);
+              await sleep(1500);
+            }
+            liveScenes = { sceneIds, textOk, textScene, textPreview, uiStrip, appScene, appPreview, stillLive, gameBack };
+          }
           // Ukončit: tlačítko hned "Ukončuji…" a nejde zmáčknout znovu.
           await liveWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-live.on'); if (b) b.click(); return !!b; })()`);
           await sleep(100);
           stoppingUi = await liveWin.webContents.executeJavaScript(`(() => { const b = document.querySelector('.side-live'); return !!b && b.disabled; })()`);
           await (kine as any).stopLive();
+          if (liveScenes) {
+            let reverted = false;
+            for (let i = 0; i < 40 && !reverted; i++) {
+              await sleep(250);
+              reverted = (kine as any).status().captureSource?.kind === 'screen';
+            }
+            liveScenes.revertedAfterLive = reverted;
+            kine.settings.update({ liveScenes: kine.settings.get().liveScenes.filter((x: any) => x.id !== 'e2e-app'), liveSceneId: 'game' });
+          }
           // Po konci: karta záznamu v záložce Živě (zveřejnit na Kine); bez přihlášení tlačítko nejde.
           kine.openSettings('live');
           await sleep(700);
@@ -1595,6 +1808,35 @@ export async function runTestDriver(kine: {
             recordingSaved.thumb === true && Number(recordingSaved.duration) >= 5 && recordingSaved.added === 1;
           // Stažený záznam z knihovny pryč, ať neplete další kroky.
           if (added) (kine as any).library.purge(added.id);
+        }
+        // Scény ve vysílání: snímky s aplikací (fialové okno uprostřed, černé pruhy), rozměry proudu stejné celou dobu.
+        if (liveScenes) {
+          const appFrames = frames.filter((f) => {
+            let r = 0;
+            let g = 0;
+            let b = 0;
+            let n = 0;
+            for (let y = 12; y < 24; y++) for (let x = 24; x < 40; x++) {
+              const i = (y * 64 + x) * 3;
+              r += f[i];
+              g += f[i + 1];
+              b += f[i + 2];
+              n += 1;
+            }
+            return r / n > 150 && g / n < 120 && b / n > 150;
+          });
+          const gaps = existsSync(liveOut) ? await videoPacketGaps(liveOut) : null;
+          const tp = liveScenes.textPreview as any;
+          const ap = liveScenes.appPreview as any;
+          liveScenes.appFrames = appFrames.length;
+          liveScenes.maxGapMs = gaps;
+          result.liveScenes = liveScenes;
+          result.liveScenesOk =
+            liveScenes.textOk === true && liveScenes.textScene === true && !!tp && tp.kind === 'live' && !!tp.color && tp.color[0] < 60 && tp.color[1] < 60 &&
+            (liveScenes.uiStrip as any)?.strip >= 3 && (liveScenes.uiStrip as any)?.img === true &&
+            liveScenes.appScene === true && liveScenes.stillLive === true && !!ap && ap.kind === 'live' && !!info && ap.width === info.width && ap.height === info.height &&
+            !!ap.color && ap.color[0] > 60 && ap.color[2] > 60 && ap.color[1] < ap.color[0] &&
+            liveScenes.gameBack === true && liveScenes.revertedAfterLive === true && appFrames.length >= 4 && gaps !== null && gaps < 2500;
         }
         result.live = {
           opened, liveState, sideLive, clipDuringLive, titleKept, brbOn, brbOff, micMuted, stoppingUi, withCamera, endedCard, endedPublished, endedClosed, endedExtras, recordingSaved, onKineLine,
@@ -2348,10 +2590,14 @@ export async function runTestDriver(kine: {
       'updateIssueOk', 'settingsSectionsOk', 'compressOk', 'uploadCancelUiOk', 'overlayUiOk',
     ];
     if (process.env.KINE_TEST_LIVE_URL) common.push('liveOk', 'liveCompatOk');
+    if (process.env.KINE_TEST_WM) common.push('sourcesOk');
+    if (process.env.KINE_TEST_WM && process.env.KINE_TEST_LIVE_URL) common.push('liveScenesOk');
     const checks = clipperApp ? [...common, 'clipperSide', 'clipperPanel', 'kineViewNever'] : [...common, 'kineViewShown', 'kineViewAwake', 'kineBar', 'kineBarBack', 'kineViewHidden', 'kineViewAsleep'];
     if (process.env.KINE_TEST_FAKE_AUDIO) checks.push('fakeAudioMeter', 'fakeAudioClip', 'clipCameraOk', 'clipCameraSeparateOk');
     if (process.env.KINE_TEST_FAKE_LOOPBACK) checks.push('nativeLoopbackMeter', 'nativeLoopbackClip');
     if (process.env.KINE_TEST_FAKE_AUDIO === 'full') checks.push('multiTrackOk', 'trimAudioSelect');
+    // Cizí okno pro zkoušku nahrávání aplikace (KINE_TEST_WM) už netřeba.
+    e2eWin?.kill();
     result.failed = checks.filter((k) => result[k] !== true);
     result.ok = !!clip1 && !!clip2 && kine.capture.state === 'on' && (result.failed as string[]).length === 0 && result.brandColor === '#a34ff7';
   } catch (e) {
@@ -2376,6 +2622,64 @@ async function keyframeTimes(file: string): Promise<number[]> {
 }
 
 /** Snímky videa jako surové RGB (zmenšené), `fps` za sekundu - pro kontrolu obsahu vysílání v testu. */
+/** Průměrná barva snímku klipu v čase `at` (s) - zmenšeno na 1×1 px. */
+async function rawFramesAt(file: string, at: number): Promise<[number, number, number] | null> {
+  return new Promise((resolve) => {
+    const child = spawnFfmpeg(['-loglevel', 'error', '-ss', String(at), '-i', file, '-frames:v', '1', '-vf', 'scale=1:1:flags=area', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']);
+    const chunks: Buffer[] = [];
+    child.stdout.on('data', (d: Buffer) => chunks.push(d));
+    child.on('close', () => {
+      const all = Buffer.concat(chunks);
+      resolve(all.length >= 3 ? [all[0], all[1], all[2]] : null);
+    });
+    child.on('error', () => resolve(null));
+  });
+}
+
+/** Průměrná barva JPEGu náhledu (RGB). */
+function jpegColor(data: Uint8Array): number[] | null {
+  try {
+    const img = nativeImage.createFromBuffer(Buffer.from(data));
+    if (img.isEmpty()) return null;
+    const small = img.resize({ width: 8, height: 8, quality: 'good' });
+    const bmp = small.toBitmap();
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    const n = bmp.length / 4;
+    for (let i = 0; i < bmp.length; i += 4) {
+      // toBitmap: BGRA
+      b += bmp[i];
+      g += bmp[i + 1];
+      r += bmp[i + 2];
+    }
+    return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
+  } catch {
+    return null;
+  }
+}
+
+/** Největší mezera mezi snímky obrazu v souboru (ms) - vysílání se při přepnutí scény nesmí zastavit. */
+async function videoPacketGaps(file: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    const child = spawnFfmpeg(['-loglevel', 'error', '-i', file, '-map', '0:v:0', '-c', 'copy', '-f', 'framecrc', 'pipe:1']);
+    let out = '';
+    child.stdout.on('data', (d: Buffer) => (out += d.toString()));
+    child.on('close', () => {
+      const dts = out
+        .split('\n')
+        .filter((l) => /^\s*0,/.test(l))
+        .map((l) => Number(l.split(',')[2]))
+        .filter((n) => Number.isFinite(n));
+      if (dts.length < 2) return resolve(null);
+      let max = 0;
+      for (let i = 1; i < dts.length; i++) max = Math.max(max, dts[i] - dts[i - 1]);
+      resolve(max);
+    });
+    child.on('error', () => resolve(null));
+  });
+}
+
 async function rawFrames(file: string, width: number, height: number, fps: number): Promise<Buffer[]> {
   return new Promise((resolve) => {
     const child = spawnFfmpeg(['-loglevel', 'error', '-i', file, '-vf', `fps=${fps},scale=${width}:${height}`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']);

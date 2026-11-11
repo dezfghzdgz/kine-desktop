@@ -1,6 +1,7 @@
 import { CATEGORY_KEYS, GLASS_BACKDROPS, LANGS, LAUNCH_CAPTURE, LIVE_CAMERA_POSITIONS, LIVE_CAMERA_SHAPES, LIVE_CAMERA_SIZES, LOOKS, LOOK_CORNERS, LOOK_SIZES, STORAGE_LIMITS_GB, VISIBILITIES, type Settings } from './types';
 import { isHotkey } from './hotkeys';
 import { LIVE_QUALITIES, liveBitrate } from './live';
+import { defaultScenes, sanitizeScenes, sanitizeSourceRef, sceneIdOrFirst } from './scenes';
 
 /**
  * Výchozí nastavení a jeho očištění po načtení ze souboru.
@@ -46,6 +47,9 @@ export const DEFAULT_SETTINGS: Settings = {
   liveBrbText: '',
   liveBrbHotkey: '',
   liveBrbMuteMic: true,
+  liveScenes: defaultScenes(),
+  liveSceneId: 'game',
+  liveSceneHotkey: '',
   liveCompat: false,
   launchCapture: 'auto',
   clipSound: true,
@@ -77,6 +81,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // Mikrofon od začátku - hráč nemá co nastavovat, klip má i jeho hlas.
   microphone: true,
   displayId: '',
+  captureWindow: null,
   detection: 'games',
   detectFullscreen: true,
   customGames: {},
@@ -168,6 +173,10 @@ export function sanitizeSettings(input: unknown): Settings {
   // 1080p60 20 Mb/s; kdo si ji nastavil, tomu zůstane.
   const oldDefaults = raw.version !== 3 && (raw.fps === 30 || raw.fps === undefined) && (raw.videoMbps === 8 || raw.videoMbps === undefined) && (raw.maxHeight === 1080 || raw.maxHeight === undefined);
 
+  // Scény vysílání a nahrávaná aplikace (0.14.0): co nesedí, je výchozí (src/shared/scenes.ts).
+  const liveScenes = sanitizeScenes(raw.liveScenes);
+  const captureWindow = sanitizeSourceRef(raw.captureWindow);
+
   return {
     version: 3,
     lang: oneOf(raw.lang, LANGS, d.lang),
@@ -205,6 +214,9 @@ export function sanitizeSettings(input: unknown): Settings {
     liveBrbText: text(raw.liveBrbText, d.liveBrbText, 80).replace(/[\r\n]+/g, ' '),
     liveBrbHotkey: raw.liveBrbHotkey === '' ? '' : isHotkey(raw.liveBrbHotkey) ? (raw.liveBrbHotkey as string) : d.liveBrbHotkey,
     liveBrbMuteMic: bool(raw.liveBrbMuteMic, d.liveBrbMuteMic),
+    liveScenes,
+    liveSceneId: sceneIdOrFirst(liveScenes, raw.liveSceneId),
+    liveSceneHotkey: raw.liveSceneHotkey === '' ? '' : isHotkey(raw.liveSceneHotkey) ? (raw.liveSceneHotkey as string) : d.liveSceneHotkey,
     liveCompat: bool(raw.liveCompat, d.liveCompat),
     launchCapture: oneOf(raw.launchCapture, LAUNCH_CAPTURE, d.launchCapture),
     clipSound: bool(raw.clipSound, d.clipSound),
@@ -236,6 +248,7 @@ export function sanitizeSettings(input: unknown): Settings {
     clipCameraSeparate: bool(raw.clipCameraSeparate, d.clipCameraSeparate),
     microphone: upgrade ? true : bool(raw.microphone, d.microphone),
     displayId: text(raw.displayId, d.displayId, 100),
+    captureWindow: captureWindow?.kind === 'window' ? captureWindow : null,
     detection: oneOf(raw.detection, ['games', 'always', 'manual'] as const, d.detection),
     detectFullscreen: bool(raw.detectFullscreen, d.detectFullscreen),
     customGames,

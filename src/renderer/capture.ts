@@ -1,5 +1,5 @@
 import type { KineCaptureBridge } from '../preload/preload';
-import type { CaptureCommand, LiveAudio, LivePreset, LiveScene, SceneCamera, Settings } from '../shared/types';
+import type { CaptureCommand, LiveAudio, LivePreset, LiveScene, PreviewKind, SceneCamera, Settings } from '../shared/types';
 import { LiveCompositor } from './liveCompositor';
 
 /**
@@ -32,6 +32,14 @@ import { LiveCompositor } from './liveCompositor';
  * smíchané přes Web Audio (s hlasitostmi z nastavení), vždy H.264 kvůli
  * RTMP. Klipy mezi tím běží dál; restart zásobníku při klipu vysílání
  * nepřeruší (má vlastní stopy).
+ *
+ * Jiný zdroj obrazu (0.14.0 - monitor nebo okno aplikace, i scénou za
+ * vysílání): povel "source" otevře nový obraz, zvuk běží dál, zásobník
+ * pokračuje novou generací a vysílání si skládání přepne na nový obraz
+ * (rozměry proudu zůstanou - viz LiveCompositor.setSource).
+ *
+ * Náhled pro okno appky (povel "preview"): dvakrát za sekundu malý JPEG
+ * toho, co se nahrává nebo co vidí diváci - jen když se na něj někdo dívá.
  */
 declare const window: Window & { kineCapture: KineCaptureBridge };
 const bridge = window.kineCapture;
@@ -85,6 +93,8 @@ let micDeviceLabel = '';
 let bluetoothMicAvoided = false;
 /** Všechny stopy ze zdrojů (obrazovka, zvuk hry, mikrofon) - při konci se zastaví. */
 const sourceTracks: MediaStreamTrack[] = [];
+/** Nahrává se monitor, nebo okno aplikace (podle hlavního procesu - vysílání z okna má plátno 16:9). */
+let sourceKind: 'screen' | 'window' = 'screen';
 
 function report(event: Parameters<KineCaptureBridge['event']>[0]) {
   bridge.event(event);
@@ -962,6 +972,7 @@ type LiveSession = {
   micGain: GainNode | null;
   micLevel: number;
   scene: LiveScene;
+  preset: LivePreset;
 };
 let live: LiveSession | null = null;
 
@@ -972,8 +983,8 @@ function applyLiveScene(session: LiveSession, scene: LiveScene) {
   session.scene = scene;
   if (session.compositor) session.compositor.setScene(scene);
   else {
-    // Bez skládání: "Hned jsem zpět" = černý obraz (hra není vidět); kamera nejde.
-    session.video.enabled = !scene.brb;
+    // Bez skládání: "Hned jsem zpět" / scéna s textem / jen kamera = černý obraz (hra není vidět); kamera nejde.
+    session.video.enabled = !scene.brb && typeof scene.screenText !== 'string' && !scene.cameraFull;
     if (scene.camera) report({ type: 'live-warning', generation: session.generation, kind: 'camera', message: 'camera-unsupported' });
   }
   if (session.micGain) {
@@ -1012,6 +1023,9 @@ async function startLive(gen: number, preset: LivePreset, wanted: LiveAudio = { 
       compositor = new LiveCompositor(video, scene, {
         brand: currentSettings?.brandColor || '#00c9a7',
         onWarning: (message) => report({ type: 'live-warning', generation: gen, kind: 'camera', message }),
+        // Rozměry proudu napořád - scéna s jiným monitorem / aplikací se do nich vejde.
+        // Vysílání, které začíná na okně aplikace, má plátno 16:9 podle kvality (okno bývá malé a jinak široké).
+        lockSize: sourceKind === 'window' ? { width: preset.width, height: preset.height } : true,
       });
     } catch (e) {
       compositor = null;
@@ -1074,6 +1088,7 @@ async function startLive(gen: number, preset: LivePreset, wanted: LiveAudio = { 
     micGain,
     micLevel,
     scene,
+    preset,
   };
   rec.ondataavailable = (e) => {
     if (!e.data || e.data.size === 0) return;
@@ -1112,6 +1127,7 @@ function stopLive() {
 
 function stopAll() {
   stopLive();
+  stopPreviewTap();
   stopRecorders();
   stopMeters();
   stopNativeLoopback();
@@ -1131,9 +1147,251 @@ function stopAll() {
   defaultOutputAtStart = '';
 }
 
+// ---- jiný zdroj obrazu za běhu (monitor / okno aplikace) -------------------------------------
+
+/** Obraz zvoleného zdroje (id z desktopCapturer) - stejná omezení jako při startu (snímky, výška). */
+async function openSourceTrack(sourceId: string, settings: Settings): Promise<MediaStreamTrack> {
+  const mandatory: Record<string, unknown> = { chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId, maxFrameRate: effectiveFps };
+  if (settings.maxHeight > 0) {
+    mandatory.maxHeight = settings.maxHeight;
+    mandatory.maxWidth = Math.round((settings.maxHeight * 16) / 9);
+  }
+  const media = await navigator.mediaDevices.getUserMedia({ audio: false, video: { mandatory } as unknown as MediaTrackConstraints });
+  const track = media.getVideoTracks()[0];
+  if (!track) throw new Error('no video');
+  return track;
+}
+
+/**
+ * Obrazovka / okno přestalo posílat obraz. Zavřená aplikace = upozornění
+ * (hlavní proces přepne na monitor a počká, až se aplikace zase otevře);
+ * odpojený monitor = chyba (snímání se rozjede znovu).
+ */
+function watchEnded(track: MediaStreamTrack) {
+  const kind = sourceKind;
+  track.addEventListener('ended', () => {
+    if (screenTrack && track !== screenTrack) return;
+    if (kind === 'window') report({ type: 'warning', generation, kind: 'source', message: 'window-closed' });
+    else report({ type: 'error', generation, message: 'obrazovka přestala posílat obraz' });
+  });
+}
+
+/** Vysílání si vezme nový obraz (zmenšený na kvalitu vysílání) - proud se nepřeruší. */
+async function swapLiveSource(session: LiveSession, next: MediaStreamTrack): Promise<void> {
+  if (!session.compositor) {
+    // Bez skládání nejde stopa vyměnit - vysílá se dál, co bylo.
+    report({ type: 'live-warning', generation: session.generation, kind: 'camera', message: 'source-unsupported' });
+    return;
+  }
+  const clone = next.clone();
+  clone.contentHint = 'motion';
+  try {
+    await clone.applyConstraints({ width: { max: session.preset.width }, height: { max: session.preset.height }, frameRate: { max: session.preset.fps } });
+  } catch {
+    // zmenšení nejde - skládání obraz zmenší samo
+  }
+  if (live !== session) {
+    clone.stop();
+    return;
+  }
+  session.compositor.setSource(clone);
+  const old = session.video;
+  session.video = clone;
+  session.tracks = session.tracks.map((t) => (t === old ? clone : t));
+  old.stop();
+}
+
+/**
+ * Povel "source": nový obraz místo starého. Zvuk (loopback hry, mikrofon)
+ * běží dál; recordery zásobníku se rozjedou znovu na novou generaci (obraz
+ * může mít jiné rozměry - klip z konce zásobníku si vezme jen souvislý
+ * kus se stejnými rozměry). Když nový obraz nejde otevřít, nahrává se dál
+ * starý (hlavní proces dostane upozornění) - generace se rozjede tak jako tak.
+ */
+async function switchSource(sourceId: string, kind: 'screen' | 'window', gen: number): Promise<void> {
+  if (!stream || !currentSettings) throw new Error('snímání neběží');
+  const settings = currentSettings;
+  let next: MediaStreamTrack | null = null;
+  try {
+    next = await openSourceTrack(sourceId, settings);
+  } catch (e) {
+    report({ type: 'warning', generation: gen, kind: 'source', message: `switch-failed: ${errorText(e)}` });
+  }
+  if (!stream) {
+    next?.stop();
+    throw new Error('snímání neběží');
+  }
+  const old = screenTrack;
+  if (next) {
+    next.contentHint = 'motion';
+    screenTrack = next;
+    sourceKind = kind;
+    sourceTracks.push(next);
+    watchEnded(next);
+    clipCompositor?.setSource(next);
+    if (live) await swapLiveSource(live, next);
+  }
+  stopRecorders();
+  const video = clipCompositor ? clipCompositor.track : screenTrack;
+  stream = new MediaStream([...(video ? [video] : []), ...stream.getAudioTracks()]);
+  startRecorders(settings, gen);
+  watchSize();
+  if (next && old && old !== next) {
+    // Jen obraz: zvuk hry ze stejného snímání (loopback) běží dál jako samostatná stopa.
+    old.stop();
+    const i = sourceTracks.indexOf(old);
+    if (i >= 0) sourceTracks.splice(i, 1);
+  }
+  if (previewTap && previewTap.source === old) stopPreviewTap();
+}
+
+// ---- náhled pro okno appky ---------------------------------------------------------------------
+
+/** Šířka náhledu (px) - malý JPEG dvakrát za sekundu nic nestojí. */
+const PREVIEW_WIDTH = 640;
+let previewWant: PreviewKind | null = null;
+let previewTimer: ReturnType<typeof setInterval> | null = null;
+let previewBusy = false;
+let previewCanvas: OffscreenCanvas | null = null;
+/**
+ * Obraz obrazovky pro náhled: kopie stopy čtená naprázdno - každý snímek se hned zavře, jen když
+ * náhled chce další, nakreslí se nejdřív do malého plátna. Snímky se nedrží (viz LiveCompositor.grab).
+ */
+let previewTap: { source: MediaStreamTrack; track: MediaStreamTrack; reader: ReadableStreamDefaultReader<VideoFrame>; grab: ((frame: VideoFrame) => void) | null } | null = null;
+
+type ProcessorCtorLike = new (init: { track: MediaStreamTrack; maxBufferSize?: number }) => { readable: ReadableStream<VideoFrame> };
+
+function startPreviewTap(source: MediaStreamTrack) {
+  if (previewTap?.source === source) return;
+  stopPreviewTap();
+  const Processor = (window as unknown as { MediaStreamTrackProcessor?: ProcessorCtorLike }).MediaStreamTrackProcessor;
+  if (!Processor) return;
+  const track = source.clone();
+  const reader = new Processor({ track, maxBufferSize: 1 }).readable.getReader();
+  const tap = { source, track, reader, grab: null as ((frame: VideoFrame) => void) | null };
+  previewTap = tap;
+  void (async () => {
+    while (previewTap === tap) {
+      let result: ReadableStreamReadResult<VideoFrame>;
+      try {
+        result = await reader.read();
+      } catch {
+        break;
+      }
+      if (result.done) break;
+      const frame = result.value;
+      try {
+        if (previewTap === tap && tap.grab) {
+          const draw = tap.grab;
+          tap.grab = null;
+          draw(frame);
+        }
+      } catch {
+        // další snímek
+      } finally {
+        frame.close();
+      }
+    }
+  })();
+}
+
+function stopPreviewTap() {
+  const tap = previewTap;
+  previewTap = null;
+  if (!tap) return;
+  tap.grab = null;
+  void tap.reader.cancel().catch(() => undefined);
+  tap.track.stop();
+}
+
+function setPreview(want: PreviewKind | null) {
+  previewWant = want;
+  if (!want) {
+    if (previewTimer) clearInterval(previewTimer);
+    previewTimer = null;
+    stopPreviewTap();
+    live?.compositor?.grabNext(null);
+    clipCompositor?.grabNext(null);
+    return;
+  }
+  if (!previewTimer) previewTimer = setInterval(() => void previewTick(), 500);
+  void previewTick();
+}
+
+/** Další snímek ze zdroje do malého plátna (nejdéle 1 s - obraz, který stojí, nové snímky neposílá). */
+function grabInto(set: (draw: ((frame: VideoFrame) => void) | null) => void): Promise<{ width: number; height: number } | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      set(null);
+      resolve(null);
+    }, 1000);
+    set((frame) => {
+      clearTimeout(timer);
+      const sw = frame.displayWidth;
+      const sh = frame.displayHeight;
+      if (!sw || !sh) return resolve(null);
+      const width = Math.min(PREVIEW_WIDTH, sw);
+      const height = Math.max(2, Math.round((width * sh) / sw));
+      if (!previewCanvas || previewCanvas.width !== width || previewCanvas.height !== height) previewCanvas = new OffscreenCanvas(width, height);
+      const ctx = previewCanvas.getContext('2d') as OffscreenCanvasRenderingContext2D | null;
+      if (!ctx) return resolve(null);
+      ctx.drawImage(frame, 0, 0, width, height);
+      resolve({ width: sw, height: sh });
+    });
+  });
+}
+
+/** Jeden snímek náhledu: co se chce (vysílání / zásobník / obrazovka), zmenšit, JPEG, do hlavního procesu. */
+async function previewTick(): Promise<void> {
+  if (previewBusy || !previewWant || !stream) return;
+  previewBusy = true;
+  try {
+    let kind: PreviewKind = previewWant;
+    if (kind === 'live' && !live?.compositor) kind = 'screen';
+    if (kind === 'record' && !clipCompositor) kind = 'screen';
+    if (kind !== 'live') live?.compositor?.grabNext(null);
+    if (kind !== 'record') clipCompositor?.grabNext(null);
+    let size: { width: number; height: number } | null = null;
+    if (kind === 'screen') {
+      if (!screenTrack) return;
+      startPreviewTap(screenTrack);
+      const tap = previewTap;
+      if (!tap) return;
+      size = await grabInto((draw) => (tap.grab = draw));
+    } else {
+      stopPreviewTap();
+      const compositor = kind === 'live' ? live?.compositor : clipCompositor;
+      if (!compositor) return;
+      size = await grabInto((draw) => compositor.grabNext(draw));
+    }
+    if (!size || !previewCanvas || !previewWant) return;
+    const blob = await previewCanvas.convertToBlob({ type: 'image/jpeg', quality: 0.72 });
+    if (!previewWant) return;
+    bridge.previewFrame(await blob.arrayBuffer(), { kind, width: size.width, height: size.height });
+  } catch {
+    // další pokus za půl sekundy
+  } finally {
+    previewBusy = false;
+  }
+}
+
 let currentSettings: Settings | null = null;
+/** Povely "source" jdou po jednom (rychlé přepínání scén). */
+let sourceChain: Promise<void> = Promise.resolve();
 
 bridge.onCommand(async (command: CaptureCommand) => {
+  if (command.type === 'preview') {
+    setPreview(command.want);
+    return;
+  }
+  if (command.type === 'source') {
+    sourceChain = sourceChain.then(() =>
+      switchSource(command.sourceId, command.sourceKind, command.generation).catch((e) => {
+        report({ type: 'error', generation: command.generation, message: (e as Error).message ?? String(e) });
+      })
+    );
+    return;
+  }
   // Vysílání má vlastní hlášení chyb - chyba vysílání nesmí shodit zásobník s klipy.
   if (command.type === 'live-start' || command.type === 'live-stop' || command.type === 'live-scene') {
     try {
@@ -1152,10 +1410,10 @@ bridge.onCommand(async (command: CaptureCommand) => {
       currentSettings = command.settings;
       testNativeLoopback = !!command.testNativeLoopback;
       if (command.nativeLoopbackKnown) nativeWorkedBefore = true;
+      sourceKind = command.sourceKind ?? 'screen';
       await getStreams(command.settings);
-      (screenTrack ?? stream!.getVideoTracks()[0])?.addEventListener('ended', () => {
-        report({ type: 'error', generation, message: 'obrazovka přestala posílat obraz' });
-      });
+      const first = screenTrack ?? stream!.getVideoTracks()[0];
+      if (first) watchEnded(first);
       startRecorders(command.settings, command.generation);
       watchSize();
     } else if (command.type === 'restart') {

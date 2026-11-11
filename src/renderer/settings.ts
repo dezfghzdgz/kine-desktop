@@ -14,6 +14,8 @@ import { COMPRESS_LEVELS, compressSummary, type CompressLevel } from '../shared/
 import { VIDEO_LANGS, openUploadDialog } from './uploadDialog';
 import { LIVE_BITRATES_KBPS, LIVE_QUALITIES, LIVE_THUMBNAIL_HEIGHT, LIVE_THUMBNAIL_WIDTH, cleanLiveError, coverRect, liveElapsed, liveErrorTextKey, livePresetFor, livePresetLabel, liveUploadMbps } from '../shared/live';
 import { CAMERA_WIDTH_MAX, CAMERA_WIDTH_MIN, cameraRect, cameraWidthFraction } from '../shared/liveLayout';
+import { MAX_SCENES, findScene, mainSource, newSceneId, sameSource, sourceKey, type CaptureSourceRef, type LiveSceneDef, type LiveSceneKind } from '../shared/scenes';
+import { handlePreviewFrame, openSourcePicker, previewImage, syncPreviewWant } from './sourcePicker';
 
 /**
  * Hlavní okno: v režimu "Kine + klipy" první záložka Kine - web Kine přes
@@ -60,7 +62,7 @@ let tab: Tab = 'clips';
 let wizardStep: number | null = null;
 let authWaiting = false;
 let authError: string | null = null;
-type HotkeyField = 'clipHotkey' | 'toggleHotkey' | 'recordHotkey' | 'liveBrbHotkey';
+type HotkeyField = 'clipHotkey' | 'toggleHotkey' | 'recordHotkey' | 'liveBrbHotkey' | 'liveSceneHotkey';
 let hotkeyRecording: HotkeyField | null = null;
 let hotkeyError: string | null = null;
 const recorder = new HotkeyRecorder();
@@ -136,6 +138,9 @@ async function init() {
     if (!visibleTabs().includes(tab)) tab = 'clips';
     scheduleRender();
   });
+  // Živý náhled toho, co se nahrává / vysílá (sourcePicker.ts) - snímky jen když ho okno ukazuje.
+  kine.onPreviewFrame(handlePreviewFrame);
+  document.addEventListener('visibilitychange', () => syncPreviewWant(kine));
   kine.onStatus((s) => {
     // Jen průběh stahování aktualizace (procenta chodí mnohokrát za sekundu): překreslit
     // nejvýš dvakrát za sekundu, ne při každém kousku - jinak okno při stahování trhalo.
@@ -470,7 +475,7 @@ function finishIfDone(done: ReturnType<HotkeyRecorder['keyUp']>) {
   const field = hotkeyRecording;
   const text = formatHotkey(done);
   // Stejná zkratka na dvě věci by jedna z nich nikdy nedostala.
-  const HOTKEY_LABELS: Record<HotkeyField, Key> = { clipHotkey: 'clipHotkey', toggleHotkey: 'toggleHotkey', recordHotkey: 'recordHotkey', liveBrbHotkey: 'liveBrbHotkey' };
+  const HOTKEY_LABELS: Record<HotkeyField, Key> = { clipHotkey: 'clipHotkey', toggleHotkey: 'toggleHotkey', recordHotkey: 'recordHotkey', liveBrbHotkey: 'liveBrbHotkey', liveSceneHotkey: 'sceneHotkey' };
   const duplicate = (Object.keys(HOTKEY_LABELS) as HotkeyField[]).find((f) => f !== field && !!settings[f] && settings[f].toLowerCase() === text.toLowerCase());
   if (duplicate) {
     hotkeyError = t('hotkeyDuplicate', { name: t(HOTKEY_LABELS[duplicate]) });
@@ -627,6 +632,7 @@ function render() {
   if (wizardStep !== null) {
     app.append(h('div', { class: 'main' }, renderWizard()));
     syncKineView();
+    syncPreviewWant(kine);
     return;
   }
   // Záložka Kine: web přes celé okno + úzká lišta dole, žádný postranní panel
@@ -652,6 +658,7 @@ function render() {
   focusSearch = false;
   if (keep) restoreField(keep);
   syncCamPreview();
+  syncPreviewWant(kine);
 }
 
 type KeptField = { key: string; value: string; start: number | null; end: number | null };
@@ -989,7 +996,8 @@ function cameraErrorMessage(code: string): string {
  */
 function wantedCamPreview(): string | null {
   if (wizardStep !== null || document.visibilityState !== 'visible') return null;
-  if (tab === 'live' && settings.liveCamera) return settings.liveCameraDevice;
+  // Během vysílání ukazuje náhled obraz přímo z vysílání (i s kamerou) - druhá kamera v okně netřeba.
+  if (tab === 'live' && status.live.state === 'idle' && (settings.liveCamera || editingScene().kind === 'camera')) return settings.liveCameraDevice;
   if (tab === 'settings' && settingsSection === 'camera' && settings.clipCamera) return settings.clipCameraDevice;
   return null;
 }
@@ -1039,37 +1047,308 @@ function stopCamPreview() {
 document.addEventListener('visibilitychange', () => syncCamPreview());
 
 /**
- * Náhled toho, co uvidí diváci: plocha 16:9 (hra) a kamera přesně tam a tak
- * velká, jak ji nakreslí vysílání (shared/liveLayout - stejná čísla), nebo
- * obrazovka "Hned jsem zpět".
+ * Náhled toho, co uvidí diváci. Během vysílání živý obraz přímo z vysílání
+ * (skládání: kamera, scéna, "Hned jsem zpět" - přesně to, co jde ven). Před
+ * vysíláním obraz, který se nahrává, a přes něj vybraná scéna: kamera přesně
+ * tam a tak velká, jak ji nakreslí vysílání (shared/liveLayout - stejná
+ * čísla), jen kamera, nebo obrazovka s textem.
  */
 function livePreview() {
   const W = 1280;
   const H = 720;
-  const brb = !!status.live.scene?.brb && status.live.state !== 'idle';
-  const box = h('div', { class: `live-preview ${brb ? 'brb' : ''}` });
-  if (brb) {
-    box.append(h('div', { class: 'live-preview-brb' }, h('b', {}, settings.liveBrbText.trim() || t('liveBrbDefault')), h('span', { class: 'bar' })));
+  if (status.live.state !== 'idle') {
+    return h('div', { class: 'live-preview on-air' }, previewImage('live'), h('span', { class: 'preview-badge live' }, h('span', { class: 'rec-dot' }), t('livePreviewOnAir')));
+  }
+  const scene = editingScene();
+  if (scene.kind === 'text') {
+    return h('div', { class: 'live-preview brb' }, h('div', { class: 'live-preview-brb' }, h('b', {}, scene.text || t('sceneStartingText')), h('span', { class: 'bar' })));
+  }
+  const cameraVideo = () => {
+    const video = h('video', { autoplay: '', muted: '', playsinline: '', class: settings.liveCameraMirror ? 'mirror' : '' }) as HTMLVideoElement;
+    video.muted = true;
+    video.srcObject = camPreview!.stream;
+    void video.play().catch(() => undefined);
+    return video;
+  };
+  if (scene.kind === 'camera') {
+    const box = h('div', { class: 'live-preview camera-full' });
+    if (camPreview?.stream) box.append(cameraVideo());
+    else box.append(h('div', { class: 'live-preview-game' }, h('span', {}, camPreview?.error ? cameraErrorMessage(camPreview.error) : t('sceneCameraWaiting'))));
     return box;
   }
-  box.append(h('div', { class: 'live-preview-game' }, h('span', {}, status.game ?? t('liveWhatPictureShort'))));
-  if (!settings.liveCamera) return box;
+  const box = h('div', { class: 'live-preview' });
+  const own = scene.source && !sameSource(scene.source, mainSource(settings)) ? scene.source : null;
+  if (own) box.append(h('div', { class: 'live-preview-game' }, h('span', {}, icon(own.kind === 'window' ? 'desktop' : 'monitor', 14), ' ', t('sceneSourceLater', { source: sourceRefLabel(own) }))));
+  else if (status.capture === 'on') box.append(previewImage('screen'));
+  else box.append(h('div', { class: 'live-preview-game' }, h('span', {}, status.game ?? t('liveWhatPictureShort'))));
+  if (!scene.camera || !settings.liveCamera) return box;
   const track = camPreview?.stream?.getVideoTracks()[0] ?? null;
   const cs = track?.getSettings();
   const r = cameraRect(W, H, cs?.width ?? 1280, cs?.height ?? 720, { position: settings.liveCameraPosition, size: settings.liveCameraSize, shape: settings.liveCameraShape });
   const style = `left:${(r.x / W) * 100}%;top:${(r.y / H) * 100}%;width:${(r.w / W) * 100}%;height:${(r.h / H) * 100}%;border-radius:${settings.liveCameraShape === 'circle' ? '50%' : `${(r.radius / r.w) * 100}% / ${(r.radius / r.h) * 100}%`}`;
   const cam = h('div', { class: 'live-preview-cam', style });
-  if (camPreview?.stream) {
-    const video = h('video', { autoplay: '', muted: '', playsinline: '', class: settings.liveCameraMirror ? 'mirror' : '' }) as HTMLVideoElement;
-    video.muted = true;
-    video.srcObject = camPreview.stream;
-    void video.play().catch(() => undefined);
-    cam.append(video);
-  } else {
-    cam.append(h('span', { class: 'faint' }, camPreview?.error ? icon('warning', 16) : '…'));
-  }
+  if (camPreview?.stream) cam.append(cameraVideo());
+  else cam.append(h('span', { class: 'faint' }, camPreview?.error ? icon('warning', 16) : '…'));
   box.append(cam);
   return box;
+}
+
+// ---- co se nahrává (monitor / aplikace) a scény vysílání ---------------------------------------
+
+/** Scéna, která se upravuje (výchozí = vybraná); přidaná scéna se během vysílání jen upravuje, nepřepne se. */
+let editSceneId: string | null = null;
+
+function editingScene(): LiveSceneDef {
+  const id = editSceneId && settings.liveScenes.some((x) => x.id === editSceneId) ? editSceneId : settings.liveSceneId;
+  return findScene(settings.liveScenes, id);
+}
+
+function sceneLabel(scene: LiveSceneDef): string {
+  if (scene.name) return scene.name;
+  return t(scene.kind === 'camera' ? 'sceneDefaultCamera' : scene.kind === 'text' ? 'sceneDefaultText' : 'sceneDefaultGame');
+}
+
+function sceneIcon(scene: LiveSceneDef): IconName {
+  if (scene.kind === 'camera') return 'camera';
+  if (scene.kind === 'text') return 'pencil';
+  return scene.source?.kind === 'window' ? 'desktop' : 'gamepad';
+}
+
+/** Popis zdroje jako v okně výběru ("Hlavní obrazovka · Monitor 1 (2560×1440)", název aplikace). */
+function sourceRefLabel(ref: CaptureSourceRef): string {
+  if (ref.kind === 'window') return ref.name || t('sourceAppUnnamed');
+  if (!ref.displayId) {
+    const primary = displays.find((d) => d.primary);
+    return primary ? `${t('displayPrimary')} · ${primary.label}` : t('displayPrimary');
+  }
+  return displays.find((d) => d.id === ref.displayId)?.label ?? t('displayPrimary');
+}
+
+/** Okno "Co nahrávat" pro hlavní zdroj (Záznam - klipy i vysílání). */
+function chooseMainSource() {
+  openSourcePicker({
+    t,
+    kine,
+    title: t('sourcePickerTitle'),
+    current: mainSource(settings),
+    onPick: (ref) => {
+      if (!ref) return;
+      if (ref.kind === 'window') update({ captureWindow: ref });
+      else update({ displayId: ref.displayId, captureWindow: null });
+    },
+  });
+}
+
+/** Řádek "Nahrává se: ... · Změnit" (Záznam i záložka Živě). */
+function sourceSummary() {
+  const chosen = mainSource(settings);
+  const info = status.captureSource;
+  const running = status.capture === 'on';
+  // Během vysílání může nahrávat zdroj scény - pak se ukáže, co se opravdu nahrává.
+  const actual = running && info ? info.label : sourceRefLabel(chosen);
+  return h(
+    'div',
+    { class: 'stack source-summary', style: 'gap:6px' },
+    h(
+      'div',
+      { class: 'row source-current', style: 'gap:8px;align-items:center;flex-wrap:wrap' },
+      icon((running && info ? info.kind : chosen.kind) === 'window' ? 'desktop' : 'monitor', 16),
+      h('span', { class: 'faint' }, running ? t('sourceRecordingLabel') : t('sourceChosenLabel')),
+      h('b', { class: 'source-current-name' }, actual),
+      h('span', { class: 'grow' }),
+      h('button', { class: 'small source-choose', onclick: () => chooseMainSource() }, icon('monitor', 14), t('sourceChoose')),
+      chosen.kind === 'window' ? h('button', { class: 'small quiet source-back', onclick: () => update({ captureWindow: null }) }, t('sourceBackToScreen')) : null
+    ),
+    running && info?.missing ? h('p', { class: 'hint warn', style: 'margin:0' }, icon('warning', 14), ' ', t('sourceMissing', { app: info.missing, display: info.label })) : null,
+    running && info && !info.missing && info.key !== sourceKey(chosen) ? h('p', { class: 'hint', style: 'margin:0' }, icon('broadcast', 14), ' ', t('sourceSceneOverride', { source: sourceRefLabel(chosen) })) : null
+  );
+}
+
+/** Záznam -> Co se nahrává: živý náhled toho, co jde do klipů, a výběr monitoru / aplikace (jako na Discordu). */
+function recordSourcePanel() {
+  const running = status.capture === 'on';
+  return h(
+    'div',
+    { class: 'panel stack record-source-panel' },
+    ...panelTitle('monitor', t('sourceTitle'), { id: 'recordSource', help: t('sourceHint') }),
+    h(
+      'div',
+      { class: 'record-source-grid' },
+      h(
+        'div',
+        { class: 'live-preview record-preview' },
+        running ? previewImage('record') : h('div', { class: 'live-preview-game' }, h('span', {}, t('sourceOff'))),
+        running ? h('span', { class: 'preview-badge' }, h('span', { class: 'rec-dot' }), t('sourceRecordingNow')) : null
+      ),
+      sourceSummary()
+    )
+  );
+}
+
+/** Tlačítka scén: klik = přepnout (během vysílání hned, jinak scéna, kterou vysílání začne). */
+function sceneStrip() {
+  const onAir = status.live.state !== 'idle';
+  const editing = editingScene().id;
+  return h(
+    'div',
+    { class: 'scene-strip', role: 'radiogroup', 'aria-label': t('scenesLabel') },
+    ...settings.liveScenes.map((scene) => {
+      const active = scene.id === settings.liveSceneId;
+      return h(
+        'button',
+        {
+          class: `scene-btn ${active ? 'active' : ''} ${editing === scene.id && !active ? 'editing' : ''}`,
+          role: 'radio',
+          'aria-checked': active ? 'true' : 'false',
+          'data-scene': scene.id,
+          title: onAir ? t('sceneSwitchHint') : t('sceneStartHint'),
+          onclick: () => selectScene(scene.id),
+        },
+        icon(sceneIcon(scene), 15),
+        h('span', {}, sceneLabel(scene)),
+        active && onAir ? h('span', { class: 'rec-dot' }) : null
+      );
+    }),
+    settings.liveScenes.length < MAX_SCENES ? h('button', { class: 'scene-btn add', title: t('sceneAdd'), 'aria-label': t('sceneAdd'), onclick: () => addScene() }, icon('plus', 15)) : null
+  );
+}
+
+function selectScene(id: string) {
+  editSceneId = id;
+  if (settings.liveSceneId === id) {
+    render();
+    return;
+  }
+  settings = { ...settings, liveSceneId: id };
+  render();
+  void kine.setLiveScene(id);
+}
+
+function addScene() {
+  if (settings.liveScenes.length >= MAX_SCENES) return;
+  const scene: LiveSceneDef = { id: newSceneId(settings.liveScenes), name: t('sceneNew', { n: settings.liveScenes.length + 1 }), kind: 'source', source: null, camera: true, text: '' };
+  editSceneId = scene.id;
+  // Bez vysílání se nová scéna rovnou vybere; během vysílání se jen upravuje (přepne se kliknutím).
+  update(status.live.state === 'idle' ? { liveScenes: [...settings.liveScenes, scene], liveSceneId: scene.id } : { liveScenes: [...settings.liveScenes, scene] });
+}
+
+function changeScene(id: string, patch: Partial<LiveSceneDef>, mode: 'now' | 'text' = 'now') {
+  const scenes = settings.liveScenes.map((x) => (x.id === id ? { ...x, ...patch } : x));
+  if (mode === 'text') saveText('liveScenes', scenes);
+  else update({ liveScenes: scenes });
+}
+
+function deleteScene(id: string) {
+  if (settings.liveScenes.length <= 1) return;
+  const scenes = settings.liveScenes.filter((x) => x.id !== id);
+  editSceneId = null;
+  update(settings.liveSceneId === id ? { liveScenes: scenes, liveSceneId: scenes[0].id } : { liveScenes: scenes });
+}
+
+/** Úprava scény: název, co ukazuje (hra / aplikace, jen kamera, text), vlastní zdroj, kamera v rohu, text. */
+function sceneEditor() {
+  const scene = editingScene();
+  const kinds: { value: LiveSceneKind; label: Key }[] = [
+    { value: 'source', label: 'sceneKindSource' },
+    { value: 'camera', label: 'sceneKindCamera' },
+    { value: 'text', label: 'sceneKindText' },
+  ];
+  return h(
+    'div',
+    { class: 'stack scene-editor' },
+    h('div', { class: 'row', style: 'gap:8px;align-items:center' }, icon('pencil', 14), h('b', {}, t('sceneEditTitle', { scene: sceneLabel(scene) }))),
+    h(
+      'div',
+      { class: 'row', style: 'gap:10px;align-items:flex-end;flex-wrap:wrap' },
+      h(
+        'label',
+        { class: 'grow', style: 'min-width:150px' },
+        t('sceneName'),
+        h('input', {
+          type: 'text',
+          class: 'scene-name',
+          'data-keep': `scene-name-${scene.id}`,
+          maxlength: '40',
+          value: scene.name,
+          placeholder: t(scene.kind === 'camera' ? 'sceneDefaultCamera' : scene.kind === 'text' ? 'sceneDefaultText' : 'sceneDefaultGame'),
+          oninput: (e: Event) => changeScene(scene.id, { name: (e.target as HTMLInputElement).value.slice(0, 40) }, 'text'),
+          onchange: () => render(),
+        })
+      ),
+      h(
+        'label',
+        { class: 'grow', style: 'min-width:150px' },
+        t('sceneKind'),
+        h(
+          'select',
+          {
+            class: 'scene-kind',
+            onchange: (e: Event) => {
+              const kind = (e.target as HTMLSelectElement).value as LiveSceneKind;
+              changeScene(scene.id, { kind, source: null, camera: kind === 'source', text: '' });
+            },
+          },
+          ...kinds.map((k) => h('option', { value: k.value, selected: scene.kind === k.value }, t(k.label)))
+        )
+      )
+    ),
+    scene.kind === 'source'
+      ? h(
+          'div',
+          { class: 'stack', style: 'gap:8px' },
+          h(
+            'div',
+            { class: 'row scene-source-row', style: 'gap:8px;align-items:center;flex-wrap:wrap' },
+            h('span', { class: 'faint' }, t('sceneSource')),
+            h('b', {}, scene.source ? sourceRefLabel(scene.source) : t('sourceSameAsRecording')),
+            h(
+              'button',
+              {
+                class: 'small scene-source',
+                onclick: () =>
+                  openSourcePicker({
+                    t,
+                    kine,
+                    title: t('sceneSourcePickerTitle', { scene: sceneLabel(scene) }),
+                    current: scene.source,
+                    allowInherit: true,
+                    onPick: (ref) => changeScene(scene.id, { source: ref }),
+                  }),
+              },
+              icon('monitor', 14),
+              t('sourceChange')
+            )
+          ),
+          optionRow(
+            h('input', { type: 'checkbox', class: 'scene-camera', checked: scene.camera, onchange: (e: Event) => changeScene(scene.id, { camera: (e.target as HTMLInputElement).checked }) }),
+            t('sceneCamera'),
+            { icon: 'camera', note: scene.camera && !settings.liveCamera ? t('sceneCameraOffHint') : undefined },
+            'opt:sceneCamera'
+          )
+        )
+      : null,
+    scene.kind === 'camera' ? h('p', { class: 'hint', style: 'margin:0' }, icon('info', 14), ' ', t('sceneCameraFullHint')) : null,
+    scene.kind === 'text'
+      ? h(
+          'label',
+          {},
+          t('sceneText'),
+          h('input', {
+            type: 'text',
+            class: 'scene-text',
+            'data-keep': `scene-text-${scene.id}`,
+            maxlength: '80',
+            value: scene.text,
+            placeholder: t('sceneStartingText'),
+            oninput: (e: Event) => changeScene(scene.id, { text: (e.target as HTMLInputElement).value.slice(0, 80) }, 'text'),
+            onchange: () => render(),
+          })
+        )
+      : null,
+    settings.liveScenes.length > 1
+      ? h('div', {}, h('button', { class: 'small quiet scene-delete', onclick: () => deleteScene(scene.id) }, icon('trash', 14), t('sceneDelete')))
+      : null
+  );
 }
 
 /** Klíče nastavení kamery ve vysílání a kamery v klipech (stejné ovládání, jiná místa). */
@@ -1570,72 +1849,24 @@ function renderLive() {
     // Po skončení vysílání: záznam na Kine (zveřejnit / otevřít).
     idle && live.ended ? liveEndedCard(live.ended) : null,
 
-    h(
-      'div',
-      { class: 'panel stack' },
-      ...panelTitle('info', t('liveSecInfo'), { id: 'liveInfo' }),
-      h(
-        'label',
-        {},
-        t('liveDialogName'),
-        h('input', {
-          type: 'text',
-          class: 'live-title',
-          'data-keep': 'live-title',
-          maxlength: '100',
-          value: settings.liveTitle,
-          placeholder: status.game || t('liveDefaultTitle'),
-          disabled: locked,
-          oninput: (e: Event) => saveText('liveTitle', (e.target as HTMLInputElement).value),
-          onchange: (e: Event) => saveText('liveTitle', (e.target as HTMLInputElement).value.trim(), true),
-        })
-      ),
-      field(
-        t('liveDescriptionLabel'),
-        h(
-          'textarea',
-          {
-            class: 'live-description',
-            'data-keep': 'live-description',
-            rows: '3',
-            maxlength: '2000',
-            disabled: locked,
-            oninput: (e: Event) => saveText('liveDescription', (e.target as HTMLTextAreaElement).value),
-            onchange: (e: Event) => saveText('liveDescription', (e.target as HTMLTextAreaElement).value.trim(), true),
-          },
-          settings.liveDescription
-        ),
-        { id: 'liveDescription', help: t('liveDescriptionHint') }
-      ),
-      h(
-        'label',
-        { style: 'max-width:280px' },
-        t('liveCategoryLabel'),
-        h(
-          'select',
-          { class: 'live-category', disabled: locked, onchange: (e: Event) => saveQuiet({ liveCategory: (e.target as HTMLSelectElement).value }) },
-          ...CATEGORY_KEYS.map((key) => h('option', { value: key, selected: settings.liveCategory === key }, t(key)))
-        )
-      ),
-      // Jde měnit i za běhu - Kine nový náhled ukáže hned.
-      liveThumbnailField()
-    ),
-
-    liveChatRecordingPanel(),
-
-    // Co diváci vidí: náhled (hra + kamera), kamera a její místo, tvar, velikost.
+    // Co diváci vidí (hned pod stavem - za vysílání se tu přepínají scény): scény, živý náhled, co se nahrává, kamera.
     h(
       'div',
       { class: 'panel stack live-scene-panel' },
       ...panelTitle('monitor', t('liveSecWhat'), {
         id: 'liveWhat',
-        help: t('liveWhatPicture'),
+        help: t('liveScenesIntro'),
         right: h('button', { class: 'small quiet', onclick: () => void navigateTo('settings:quality') }, icon('quality', 14), t('liveChangeCapture')),
       }),
+      sceneStrip(),
+      h('div', { class: 'live-scene-grid' },
+        h('div', { class: 'stack', style: 'gap:10px' }, livePreview(), sourceSummary()),
+        sceneEditor()
+      ),
+      hotkeyField('liveSceneHotkey', t('sceneHotkey'), t('sceneHotkeyHint'), { clearable: true, icon: 'keyboard' }),
       checkbox('liveGameAudio', t('liveGameAudio'), { note: gameOff ? t('liveAudioOffInCapture') : undefined, disabled: locked, icon: 'volume' }),
       checkbox('liveMic', t('liveMicOn'), { note: micOff ? t('liveAudioOffInCapture') : undefined, disabled: locked, icon: 'mic' }),
-      h('div', { class: 'live-scene-grid' },
-        livePreview(),
+      h('div', { class: 'live-camera-block' },
         h(
           'div',
           { class: 'stack live-camera-settings' },
@@ -1697,6 +1928,60 @@ function renderLive() {
       )
     ),
 
+
+    h(
+      'div',
+      { class: 'panel stack' },
+      ...panelTitle('info', t('liveSecInfo'), { id: 'liveInfo' }),
+      h(
+        'label',
+        {},
+        t('liveDialogName'),
+        h('input', {
+          type: 'text',
+          class: 'live-title',
+          'data-keep': 'live-title',
+          maxlength: '100',
+          value: settings.liveTitle,
+          placeholder: status.game || t('liveDefaultTitle'),
+          disabled: locked,
+          oninput: (e: Event) => saveText('liveTitle', (e.target as HTMLInputElement).value),
+          onchange: (e: Event) => saveText('liveTitle', (e.target as HTMLInputElement).value.trim(), true),
+        })
+      ),
+      field(
+        t('liveDescriptionLabel'),
+        h(
+          'textarea',
+          {
+            class: 'live-description',
+            'data-keep': 'live-description',
+            rows: '3',
+            maxlength: '2000',
+            disabled: locked,
+            oninput: (e: Event) => saveText('liveDescription', (e.target as HTMLTextAreaElement).value),
+            onchange: (e: Event) => saveText('liveDescription', (e.target as HTMLTextAreaElement).value.trim(), true),
+          },
+          settings.liveDescription
+        ),
+        { id: 'liveDescription', help: t('liveDescriptionHint') }
+      ),
+      h(
+        'label',
+        { style: 'max-width:280px' },
+        t('liveCategoryLabel'),
+        h(
+          'select',
+          { class: 'live-category', disabled: locked, onchange: (e: Event) => saveQuiet({ liveCategory: (e.target as HTMLSelectElement).value }) },
+          ...CATEGORY_KEYS.map((key) => h('option', { value: key, selected: settings.liveCategory === key }, t(key)))
+        )
+      ),
+      // Jde měnit i za běhu - Kine nový náhled ukáže hned.
+      liveThumbnailField()
+    ),
+
+    liveChatRecordingPanel(),
+
     // "Hned jsem zpět": soukromí a pauza během vysílání (hra i kamera se schovají).
     h(
       'div',
@@ -1750,20 +2035,7 @@ function renderLive() {
           )
         )
       ),
-      // Který monitor se vysílá (dřív jen hlavní - výběr byl schovaný v Nastavení snímání).
-      // Je to stejné nastavení jako pro klipy: vysílání i klipy jdou z jednoho snímání.
-      h(
-        'label',
-        { class: 'grow live-display' },
-        t('liveDisplayLabel'),
-        h(
-          'select',
-          { class: 'live-display-select', onchange: (e: Event) => update({ displayId: (e.target as HTMLSelectElement).value }) },
-          h('option', { value: '', selected: settings.displayId === '' }, t('displayPrimary')),
-          ...displays.map((d) => h('option', { value: d.id, selected: settings.displayId === d.id }, d.label))
-        )
-      ),
-      h('p', { class: 'hint' }, onAir ? t('liveDisplayHintOnAir') : t('liveDisplayHint')),
+      // Monitor / aplikace se vybírá v "Co jde do vysílání" (okno jako na Discordu) - stejné jako pro klipy.
       checkbox('liveOpenPage', t('liveOpenPage'), { icon: 'external' }),
       checkbox('liveCompat', t('liveCompatSetting'), { icon: 'gauge', disabled: locked, help: t('liveCompatHint') })
     ),
@@ -2229,7 +2501,8 @@ function renderSettings() {
       body = [hotkeysPanel(win)];
       break;
     case 'quality':
-      body = [qualityPanel()];
+      // Co se nahrává (monitor / aplikace, živý náhled) hned nahoře - dřív to byl jen výběr monitoru dole.
+      body = [recordSourcePanel(), qualityPanel()];
       break;
     case 'audio':
       body = [audioPanel(win)];
@@ -2405,16 +2678,6 @@ function qualityPanel() {
         ),
         { id: 'codec', help: t('codecHint'), cls: 'grow' }
       ),
-      field(
-        t('display'),
-        h(
-          'select',
-          { onchange: (e: Event) => update({ displayId: (e.target as HTMLSelectElement).value }) },
-          h('option', { value: '', selected: settings.displayId === '' }, t('displayPrimary')),
-          ...displays.map((d) => h('option', { value: d.id, selected: settings.displayId === d.id }, d.label))
-        ),
-        { icon: 'monitor', cls: 'grow' }
-      )
     )
   );
 }

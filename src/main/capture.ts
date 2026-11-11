@@ -2,7 +2,7 @@ import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, re
 import { basename, join } from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { BrowserWindow, app } from 'electron';
-import type { AudioLevels, CaptureCommand, CaptureEvent, CaptureState, ClipCameraStatus, SceneCamera, Settings } from '../shared/types';
+import type { AudioLevels, CaptureCommand, CaptureEvent, CaptureState, ClipCameraStatus, PreviewFrameInfo, PreviewKind, SceneCamera, Settings } from '../shared/types';
 import { clipFileBase } from '../shared/clipNaming';
 import { log } from './log';
 import { probe, runFfmpeg, spawnFfmpeg } from './ffmpeg';
@@ -170,6 +170,10 @@ export class CaptureManager {
       onSavingProgress?: () => void;
       /** Zvuk hry už v tomhle běhu appky šel přes pomocníka (audioLoopback.ts) - snímací stránka nemusí zkoušet Chromium znovu. */
       nativeLoopbackKnown?: () => boolean;
+      /** Nahrává se monitor, nebo okno aplikace (vysílání z okna má plátno 16:9). */
+      sourceKind?: () => 'screen' | 'window';
+      /** Snímek náhledu pro okno appky (JPEG). */
+      onPreviewFrame?: (data: Uint8Array, info: PreviewFrameInfo) => void;
     }
   ) {
     this.bufferName = deps.bufferName ?? 'kine-buffer';
@@ -307,10 +311,13 @@ export class CaptureManager {
         generation: gen.id,
         ...(process.env.KINE_TEST_FAKE_LOOPBACK ? { testNativeLoopback: true } : {}),
         ...(this.deps.nativeLoopbackKnown?.() ? { nativeLoopbackKnown: true } : {}),
+        sourceKind: this.deps.sourceKind?.() ?? 'screen',
       });
       await started;
       this.startCsvPolling();
       this.setState('on');
+      // Nová snímací stránka neví, že se někdo dívá na náhled.
+      if (this.previewWant) this.sendSafe({ type: 'preview', want: this.previewWant });
     } catch (e) {
       const message = (e as Error).message;
       log(`snímání se nerozjelo: ${message}`);
@@ -433,6 +440,57 @@ export class CaptureManager {
   setClipCamera(camera: SceneCamera | null): void {
     if (this._state !== 'on') return;
     this.sendSafe({ type: 'clip-camera', camera });
+  }
+
+  /** Náhled pro okno appky (null = nikdo se nedívá - snímací stránka nic neposílá). */
+  private previewWant: PreviewKind | null = null;
+  setPreview(want: PreviewKind | null): void {
+    if (this.previewWant === want) return;
+    this.previewWant = want;
+    this.sendSafe({ type: 'preview', want });
+  }
+
+  /** Snímek náhledu ze snímací stránky - jen když ho někdo chce (a jen z běžící stránky). */
+  handlePreview(data: ArrayBuffer | Uint8Array, info: PreviewFrameInfo): void {
+    if (!this.previewWant || this._state !== 'on') return;
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    if (bytes.byteLength === 0 || bytes.byteLength > 2_000_000) return;
+    this.deps.onPreviewFrame?.(bytes, info);
+  }
+
+  /** Přepínání zdroje jde po jednom (rychlé přepínání scén). */
+  private switching: Promise<void> = Promise.resolve();
+
+  /**
+   * Jiný zdroj obrazu (monitor / okno aplikace) bez nového startu: zásobník
+   * pokračuje novou generací (staré kousky zůstávají - klip si z konce vezme
+   * jen kus se stejnými rozměry), zvuk ani vysílání se nepřeruší.
+   */
+  switchSource(sourceId: string, kind: 'screen' | 'window'): Promise<void> {
+    const run = this.switching.then(() => this.doSwitchSource(sourceId, kind));
+    this.switching = run.catch(() => undefined);
+    return run;
+  }
+
+  private async doSwitchSource(sourceId: string, kind: 'screen' | 'window'): Promise<void> {
+    if (this._state !== 'on') return;
+    // Recorder mohl skončit sám (zavřené okno bez zvuku hry = stopa obrazu skončila) - pak není na co čekat,
+    // nová generace se rozjede tak jako tak (jinak by snímání viselo "zapnuté" bez nahrávání).
+    const live = this.live;
+    const last = this.generations[this.generations.length - 1];
+    const next = this.newGeneration(live?.mimeType ?? last?.mimeType ?? '');
+    const stopped = live ? this.waitFor(`stopped:${live.id}`, 8000) : Promise.resolve();
+    const started = this.waitFor(`started:${next.id}`, 15000);
+    log(`snímání: jiný zdroj obrazu (${kind}, gen ${next.id})`);
+    this.send({ type: 'source', generation: next.id, sourceId, sourceKind: kind });
+    await stopped.catch((e) => log(`přepnutí zdroje: stará generace nedoběhla: ${e.message}`));
+    try {
+      await started;
+    } catch (e) {
+      log(`přepnutí zdroje: nová generace nenaběhla: ${(e as Error).message}`);
+      this.setState('error', (e as Error).message, true);
+      throw e;
+    }
   }
 
   /** Plynulé měřáky zvuku (10x za sekundu) jen když se na ně někdo dívá - jinak jednou za sekundu. */

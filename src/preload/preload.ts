@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AudioLevels, CaptureCommand, CaptureEvent, Clip, DisplayInfo, GameSource, LiveAfterStream, LiveQuality, LiveStatus, ProcessInfo, ResourceUsage, Settings, Status, UploadRequest, Visibility } from '../shared/types';
+import type { AudioLevels, CaptureCommand, CaptureEvent, CaptureSourceOption, Clip, DisplayInfo, PreviewFrameInfo, PreviewKind, GameSource, LiveAfterStream, LiveQuality, LiveStatus, ProcessInfo, ResourceUsage, Settings, Status, UploadRequest, Visibility } from '../shared/types';
 
 /**
  * Most mezi stránkami a hlavním procesem. Stránky nemají Node ani
@@ -115,6 +115,14 @@ const kine = {
   liveBrb: (on?: boolean): Promise<boolean> => ipcRenderer.invoke('live:brb', on),
   /** Mikrofon jen ve vysílání ztlumit / zapnout. */
   liveMuteMic: (muted: boolean): Promise<boolean> => ipcRenderer.invoke('live:muteMic', muted),
+  /** Přepnout scénu vysílání (během vysílání hned; jinak scéna, kterou vysílání začne). */
+  setLiveScene: (id: string): Promise<boolean> => ipcRenderer.invoke('live:scene', id),
+  /** Monitory a otevřené aplikace s náhledy (okno "Co nahrávat", jako sdílení na Discordu). */
+  listCaptureSources: (): Promise<{ screens: CaptureSourceOption[]; windows: CaptureSourceOption[] }> => ipcRenderer.invoke('capture:listSources'),
+  /** Náhled toho, co se nahrává / vysílá (null = nic, okno ho nevidí). */
+  setPreview: (want: PreviewKind | null): Promise<void> => ipcRenderer.invoke('preview:want', want),
+  /** Snímek náhledu (JPEG) - dvakrát za sekundu, jen když ho okno chce. */
+  onPreviewFrame: (cb: (frame: { data: Uint8Array; info: PreviewFrameInfo }) => void) => on<{ data: Uint8Array; info: PreviewFrameInfo }>('preview:frame', cb),
   /** Kolik appka právě bere (procesor, paměť). */
   resourceUsage: (): Promise<ResourceUsage> => ipcRenderer.invoke('app:usage'),
   /** Schovat upozornění v panelu. */
@@ -200,6 +208,8 @@ const kineCapture = {
   /** Kousek proudu živého vysílání (generace vysílání). */
   liveChunk: (generation: number, data: ArrayBuffer) => ipcRenderer.send('capture:liveChunk', generation, data),
   event: (event: CaptureEvent) => ipcRenderer.send('capture:event', event),
+  /** Snímek náhledu pro okno appky (malý JPEG). */
+  previewFrame: (data: ArrayBuffer, info: PreviewFrameInfo) => ipcRenderer.send('capture:preview', data, info),
   sources: (): Promise<{ id: string; name: string; display_id: string; preferred?: boolean }[]> => ipcRenderer.invoke('capture:sources'),
   getSettings: (): Promise<Settings> => ipcRenderer.invoke('settings:get'),
   /** Zvuk hry přímo z Windows (pomocník, WASAPI loopback) - když ho Chromium otevřít nejde. */

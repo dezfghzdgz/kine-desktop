@@ -90,6 +90,7 @@ await build({
     liveLayout: 'src/shared/liveLayout.ts',
     storage: 'src/shared/storage.ts',
     displayPick: 'src/shared/displayPick.ts',
+    scenes: 'src/shared/scenes.ts',
     siteMove: 'src/main/siteMove.ts',
     updateOutcome: 'src/main/updateOutcome.ts',
     compress: 'src/shared/compress.ts',

@@ -5,6 +5,9 @@
  * testy a stránky v okně.
  */
 
+import type { CaptureSourceRef, LiveSceneDef } from './scenes';
+export type { CaptureSourceRef, LiveSceneDef } from './scenes';
+
 /** Jazyky appky - stejných osm jako web Kine. Výchozí je angličtina. */
 export type Lang = 'en' | 'cs' | 'sk' | 'de' | 'pl' | 'es' | 'fr' | 'uk';
 export const LANGS: readonly Lang[] = ['en', 'cs', 'sk', 'de', 'pl', 'es', 'fr', 'uk'];
@@ -149,6 +152,12 @@ export type Settings = {
   liveBrbHotkey: string;
   /** Na obrazovce "Hned jsem zpět" ztlumit mikrofon (diváci neslyší, co se děje u stolu). */
   liveBrbMuteMic: boolean;
+  /** Scény vysílání (hra s kamerou, jen kamera, text...) - přepínají se tlačítky, zkratkou a z lišty. */
+  liveScenes: LiveSceneDef[];
+  /** Vybraná scéna: během vysílání ta, která je vidět; jinak ta, kterou vysílání začne. */
+  liveSceneId: string;
+  /** Zkratka "Další scéna" během vysílání (prázdná = jen tlačítky). */
+  liveSceneHotkey: string;
   /**
    * Kompatibilní režim vysílání: ffmpeg obraz kóduje znovu (víc práce pro procesor). Zapne se
    * sám, když diváci viděli zamrzlý obraz a kompatibilní režim to spravil - pak platí napořád.
@@ -221,6 +230,11 @@ export type Settings = {
   clipCameraSeparate: boolean;
   /** Prázdné = hlavní obrazovka. Jinak id obrazovky z Electronu. */
   displayId: string;
+  /**
+   * Nahrávat jen jednu aplikaci (okno) místo monitoru - jako sdílení na Discordu.
+   * null = monitor podle displayId. Okno se po restartu aplikace najde podle názvu.
+   */
+  captureWindow: CaptureSourceRef | null;
   detection: DetectionMode;
   /** Program přes celou obrazovku bez rámečku brát jako hru, i když ho appka nezná. */
   detectFullscreen: boolean;
@@ -415,6 +429,8 @@ export type PlanPrices = { kine: string | null; clips: string | null; all: strin
 export type Status = {
   capture: CaptureState;
   captureError: string | null;
+  /** Co se právě nahrává (monitor / aplikace); null = snímání neběží. */
+  captureSource: CaptureSourceInfo | null;
   /** Právě běžící hra (název), nebo null. */
   game: string | null;
   /** Odkud appka hru zná (pro nastavení: "poznáno podle celé obrazovky" jde pojmenovat). */
@@ -548,7 +564,7 @@ export type CaptureCommand =
    * nativeLoopbackKnown: pomocník (zvuk hry přímo z Windows) už v tomhle běhu appky pomohl - druhý
    * pokus přes Chromium se přeskočí (snímací stránka je při každém startu nová, sama si to nepamatuje).
    */
-  | { type: 'start'; settings: Settings; generation: number; testNativeLoopback?: boolean; nativeLoopbackKnown?: boolean }
+  | { type: 'start'; settings: Settings; generation: number; testNativeLoopback?: boolean; nativeLoopbackKnown?: boolean; sourceKind?: 'screen' | 'window' }
   | { type: 'restart'; generation: number }
   | { type: 'stop' }
   /** Živé vysílání: druhý recorder (nižší datový tok, hra + mikrofon smíchané) na stejném snímání. */
@@ -559,7 +575,33 @@ export type CaptureCommand =
   /** Měřáky zvuku rychle (někdo se dívá do nastavení), nebo jednou za sekundu. */
   | { type: 'meters'; fast: boolean }
   /** Kamera v klipech za běhu: jiná kamera, poloha, velikost, tvar, zrcadlo (null = bez kamery) - bez restartu zásobníku. */
-  | { type: 'clip-camera'; camera: SceneCamera | null };
+  | { type: 'clip-camera'; camera: SceneCamera | null }
+  /**
+   * Jiný zdroj obrazu (monitor / okno aplikace) bez nového startu snímání: zvuk běží dál,
+   * zásobník pokračuje novou generací, vysílání se nepřeruší (skládání si vezme nový obraz).
+   */
+  | { type: 'source'; generation: number; sourceId: string; sourceKind: 'screen' | 'window' }
+  /** Náhled pro okno appky: obrazovka / to, co jde do klipů / to, co vidí diváci; null = nic neposílat. */
+  | { type: 'preview'; want: PreviewKind | null };
+
+/** Který obraz posílat do náhledu v okně appky. */
+export type PreviewKind = 'screen' | 'record' | 'live';
+export type PreviewFrameInfo = { kind: PreviewKind; width: number; height: number };
+
+/** Monitor nebo okno k výběru (s náhledem) - okno "Co nahrávat". */
+export type CaptureSourceOption =
+  | { kind: 'screen'; displayId: string; label: string; primary: boolean; width: number; height: number; thumb: string }
+  | { kind: 'window'; id: string; name: string; thumb: string; icon: string | null };
+
+/** Co se právě nahrává (pro okno appky). */
+export type CaptureSourceInfo = {
+  kind: 'screen' | 'window';
+  /** Co se opravdu nahrává ("Monitor 1 (2560×1440)" / název okna). */
+  label: string;
+  key: string;
+  /** Chtěná aplikace, která není otevřená (nahrává se místo ní hlavní monitor). */
+  missing?: string;
+};
 
 export type CaptureEvent =
   | {
@@ -597,7 +639,7 @@ export type CaptureEvent =
        * systemLoopback = zvuk hry nejde otevřít; systemAudioFallback = bere se ze Stereo Mix a spol.;
        * systemAudioRetry = povedlo se na druhý pokus; systemAudioNative = bere se přímo z Windows (WASAPI, jako OBS).
        */
-      kind: 'microphone' | 'camera' | 'systemAudio' | 'bluetoothMic' | 'systemLoopback' | 'systemAudioFallback' | 'systemAudioRetry' | 'systemAudioNative';
+      kind: 'microphone' | 'camera' | 'systemAudio' | 'bluetoothMic' | 'systemLoopback' | 'systemAudioFallback' | 'systemAudioRetry' | 'systemAudioNative' | 'source';
       message: string;
     }
   /** Hladiny zvuku (0-1, RMS) zhruba každou sekundu - měřáky v nastavení a hlídání ticha. */
@@ -654,6 +696,12 @@ export type ClipCameraStatus = { state: 'starting' | 'on' | 'error'; message: st
  */
 export type LiveScene = {
   camera: SceneCamera | null;
+  /** Scéna "Jen kamera": kamera přes celý obraz (hra není vidět). */
+  cameraFull?: boolean;
+  /** Scéna s textem ("Začínáme za chvíli"): tmavá obrazovka s textem místo hry. */
+  screenText?: string | null;
+  /** Která scéna to je (stav v okně appky). */
+  sceneId?: string;
   /** Obrazovka "Hned jsem zpět": hra a kamera schované, jen text. */
   brb: boolean;
   brbText: string;

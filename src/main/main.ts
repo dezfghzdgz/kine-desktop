@@ -34,6 +34,10 @@ import {
   type AppNotice,
   type AudioLevels,
   type CaptureEvent,
+  type CaptureSourceInfo,
+  type CaptureSourceOption,
+  type LiveSceneDef,
+  type PreviewKind,
   type Clip,
   type ClipCamera,
   type ClipCameraStatus,
@@ -53,6 +57,7 @@ import {
 } from '../shared/types';
 import { GB, storageCleanupPlan } from '../shared/storage';
 import { pickScreenSource } from '../shared/displayPick';
+import { composeScene, effectiveSource, findScene, mainSource, nextSceneId, pickWindowSource, sourceKey, type CaptureSourceRef } from '../shared/scenes';
 import { CAMERA_WIDTH_MAX, CAMERA_WIDTH_MIN, cameraRect } from '../shared/liveLayout';
 import { chaptersText, markerChapters, parseHashtags } from '../shared/upload';
 import { hexToRgbTriplet } from '../shared/plan';
@@ -299,6 +304,18 @@ class KineApp {
   /** Obrazovka "Hned jsem zpět" a ztlumený mikrofon ve vysílání (jen za běhu, neukládá se). */
   private liveBrb = false;
   private liveMicMuted = false;
+  /**
+   * Na čem snímání právě běží: co se chtělo (klíč zdroje), skutečný zdroj
+   * z desktopCapturer a popis pro okno. null = snímání neběží.
+   */
+  private sourceState: { wantedKey: string; ref: CaptureSourceRef; actualId: string; info: CaptureSourceInfo } | null = null;
+  private sourceApplying: Promise<void> = Promise.resolve();
+  /** Chtěná aplikace není otevřená: každých 5 s se zkusí znovu (nahrává se zatím monitor). */
+  private sourceRetryTimer: ReturnType<typeof setInterval> | null = null;
+  /** Snímací stránka nový zdroj otevřít nemohla (nahrává dál starý). */
+  private sourceSwitchFailed = false;
+  /** Náhled v okně appky: co okno chce vidět. */
+  private previewWant: PreviewKind | null = null;
   /** Na baterii se snímá úsporně - zjišťuje se při startu snímání. */
   private batterySaving = false;
 
@@ -386,6 +403,12 @@ class KineApp {
       preload: PRELOAD,
       rendererDir: RENDERER_DIR,
       onState: (state, error, runtime) => {
+        if (state === 'off' || state === 'error') {
+          this.sourceState = null;
+          this.updateSourceRetry();
+        }
+        // Zdroj se mohl změnit, zatímco se snímání rozjíždělo - srovnat (stejný = nic se neděje).
+        if (state === 'on') void this.applyCaptureSource();
         if (state === 'error' && error) {
           void this.toast.show(this.t('toastCaptureError', { message: error }), 'error', { notification: true });
           if (runtime) this.restartAfterCrash();
@@ -404,7 +427,18 @@ class KineApp {
         void this.recoverRecordings();
       },
       onLiveEvent: (event) => this.live?.handleEvent(event),
+      sourceKind: () => this.wantedSource().kind,
+      onPreviewFrame: (data, info) => {
+        const win = this.settingsWindow;
+        if (win && !win.isDestroyed() && win.isVisible()) win.webContents.send('preview:frame', { data, info });
+      },
       onWarning: (kind, message) => {
+        // Zdroj obrazu: zavřená aplikace / nový obraz nejde otevřít - pokaždé, ne jednou za běh.
+        if (kind === 'source') {
+          if (message === 'window-closed') void this.applyCaptureSource(true);
+          else this.sourceSwitchFailed = true;
+          return;
+        }
         // Jednou za běh appky - ne při každém startu zásobníku. Okénkem jen
         // mimo start appky (po startu by "jen tak chodila oznámení"), vždycky v okně.
         if (this.warnedOnce.has(kind)) return;
@@ -873,6 +907,7 @@ class KineApp {
     if (id === 'clip') void this.onClipHotkey();
     else if (id === 'record') void this.toggleRecording();
     else if (id === 'brb') this.toggleLiveBrb();
+    else if (id === 'scene') this.nextLiveScene();
     else void this.onToggleHotkey();
   }
 
@@ -1278,6 +1313,8 @@ class KineApp {
       mic: s.liveMic,
       scene: this.liveScene(),
     });
+    // Scéna s vlastním zdrojem (jiný monitor / aplikace) přepne snímání hned na začátku vysílání.
+    void this.applyCaptureSource();
     if (s.liveOpenPage) this.openLivePage();
     return status;
   }
@@ -1288,17 +1325,194 @@ class KineApp {
     this.liveMicMuted = false;
   }
 
-  /** Co je ve vysílání vidět a slyšet navíc k obrazovce (kamera, "Hned jsem zpět", ztlumený mikrofon). */
+  /** Co je ve vysílání vidět a slyšet (scéna: hra s kamerou / jen kamera / text; "Hned jsem zpět", ztlumený mikrofon). */
   private liveScene(): LiveScene {
     const s = this.settings.get();
-    return {
-      camera: s.liveCamera
-        ? { deviceId: s.liveCameraDevice, position: s.liveCameraPosition, size: s.liveCameraSize, shape: s.liveCameraShape, mirror: s.liveCameraMirror }
-        : null,
+    return composeScene(this.activeScene(), s, {
       brb: this.liveBrb,
       brbText: s.liveBrbText.trim() || this.t('liveBrbDefault'),
       micMuted: this.liveMicMuted || (this.liveBrb && s.liveBrbMuteMic),
-    };
+      defaultText: this.t('sceneStartingText'),
+    });
+  }
+
+  // ---- co se nahrává (monitor / aplikace) a scény vysílání ----------------------------------
+
+  private activeScene(): LiveSceneDef {
+    const s = this.settings.get();
+    return findScene(s.liveScenes, s.liveSceneId);
+  }
+
+  private sceneName(scene: LiveSceneDef): string {
+    if (scene.name) return scene.name;
+    return this.t(scene.kind === 'camera' ? 'sceneDefaultCamera' : scene.kind === 'text' ? 'sceneDefaultText' : 'sceneDefaultGame');
+  }
+
+  /** Co má snímání nahrávat: hlavní zdroj (Záznam), během vysílání zdroj scény, která ho má. */
+  private wantedSource(): CaptureSourceRef {
+    const s = this.settings.get();
+    return effectiveSource(mainSource(s), this.activeScene(), this.live?.active() ?? false, this.sourceState?.ref ?? null);
+  }
+
+  /** Okna appky samotné - do výběru aplikací nepatří (nahrávat sám sebe nedává smysl). */
+  private ownMediaSourceIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const win of BrowserWindow.getAllWindows()) {
+      try {
+        if (!win.isDestroyed()) ids.add(win.getMediaSourceId());
+      } catch {
+        // okno bez zdroje
+      }
+    }
+    return ids;
+  }
+
+  /** Popis monitoru jako ve výběru ("Monitor 2 (2560×1440)"). */
+  private displayLabel(d: Electron.Display, index: number): string {
+    return `${d.label || this.t('displayN', { n: index + 1 })} (${d.size.width}×${d.size.height})`;
+  }
+
+  /** Popis zdroje obrazovky z desktopCapturer (podle display_id, jinak podle pořadí). */
+  private screenSourceLabel(source: Electron.DesktopCapturerSource, all: Electron.DesktopCapturerSource[]): string {
+    const displays = screen.getAllDisplays();
+    let index = displays.findIndex((d) => String(d.id) === source.display_id);
+    if (index < 0 && all.every((x) => !x.display_id)) index = all.findIndex((x) => x.id === source.id);
+    return index >= 0 && displays[index] ? this.displayLabel(displays[index], index) : source.name;
+  }
+
+  /**
+   * Monitor / okno -> zdroj z desktopCapturer. Aplikace, která není otevřená,
+   * se nahradí hlavním monitorem (info.missing = její název).
+   */
+  private async resolveSource(ref: CaptureSourceRef): Promise<{ source: Electron.DesktopCapturerSource; kind: 'screen' | 'window'; info: CaptureSourceInfo } | null> {
+    if (ref.kind === 'window') {
+      const own = this.ownMediaSourceIds();
+      const windows = (await desktopCapturer.getSources({ types: ['window'], thumbnailSize: { width: 0, height: 0 } })).filter((w) => !own.has(w.id));
+      const win = pickWindowSource(windows, ref);
+      if (win) return { source: win, kind: 'window', info: { kind: 'window', label: win.name || ref.name, key: sourceKey(ref) } };
+      const fallback = await this.resolveSource({ kind: 'screen', displayId: this.settings.get().displayId });
+      return fallback ? { ...fallback, info: { ...fallback.info, key: sourceKey(ref), missing: ref.name || '?' } } : null;
+    }
+    const screens = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } });
+    const source = pickScreenSource(screens, this.displayRefs(), ref.displayId);
+    if (!source) return null;
+    if (ref.displayId && source.display_id !== ref.displayId) log(`monitor ${ref.displayId}: zdroj podle pořadí (${source.name})`);
+    return { source, kind: 'screen', info: { kind: 'screen', label: this.screenSourceLabel(source, screens), key: sourceKey(ref) } };
+  }
+
+  /** Zdroj, na kterém se snímání rozjíždí (výběr obrazovky pro getDisplayMedia / starší cestu). */
+  private async startingSource(): Promise<{ source: Electron.DesktopCapturerSource; kind: 'screen' | 'window'; info: CaptureSourceInfo } | null> {
+    const ref = this.wantedSource();
+    const resolved = await this.resolveSource(ref);
+    if (!resolved) return null;
+    const wasMissing = this.sourceState?.info.missing;
+    this.sourceState = { wantedKey: sourceKey(ref), ref, actualId: resolved.source.id, info: resolved.info };
+    if (resolved.info.missing && wasMissing !== resolved.info.missing) this.warnSourceMissing(resolved.info);
+    setTimeout(() => {
+      this.updateSourceRetry();
+      this.pushStatus();
+    }, 0);
+    return resolved;
+  }
+
+  private warnSourceMissing(info: CaptureSourceInfo): void {
+    log(`aplikace "${info.missing}" není otevřená - nahrává se ${info.label}`);
+    void this.toast.show(this.t('toastSourceMissing', { app: info.missing ?? '', display: info.label }), 'warn', { onClick: () => this.openSettings('settings') });
+  }
+
+  /** Srovná snímání se zdrojem, který se chce (změna v Záznamu, scéna, začátek / konec vysílání, zavřená aplikace). */
+  private applyCaptureSource(force = false): Promise<void> {
+    const run = this.sourceApplying.then(() => this.doApplyCaptureSource(force));
+    this.sourceApplying = run.catch((e) => log(`zdroj obrazu: ${(e as Error).message}`));
+    return this.sourceApplying;
+  }
+
+  private async doApplyCaptureSource(force: boolean): Promise<void> {
+    if (this.capture.state !== 'on') return;
+    const ref = this.wantedSource();
+    const key = sourceKey(ref);
+    if (!force && this.sourceState?.wantedKey === key) return;
+    const resolved = await this.resolveSource(ref);
+    if (!resolved || this.capture.state !== 'on') return;
+    const prev = this.sourceState;
+    if (prev && prev.actualId === resolved.source.id) {
+      // Pořád to samé (aplikace pořád není, nahrává se dál monitor) - jen si to poznamenat.
+      this.sourceState = { wantedKey: key, ref, actualId: resolved.source.id, info: resolved.info };
+      this.updateSourceRetry();
+      this.pushStatus();
+      return;
+    }
+    this.sourceSwitchFailed = false;
+    await this.capture.switchSource(resolved.source.id, resolved.kind);
+    if (this.sourceSwitchFailed) {
+      this.sourceSwitchFailed = false;
+      void this.toast.show(this.t('toastSourceFailed', { source: resolved.info.label }), 'warn');
+      return;
+    }
+    this.sourceState = { wantedKey: key, ref, actualId: resolved.source.id, info: resolved.info };
+    log(`snímání nahrává: ${resolved.info.label}${resolved.info.missing ? ` (místo "${resolved.info.missing}")` : ''}`);
+    if (resolved.info.missing && prev?.info.missing !== resolved.info.missing) this.warnSourceMissing(resolved.info);
+    this.updateSourceRetry();
+    this.pushStatus();
+  }
+
+  /** Dokud chtěná aplikace není otevřená, zkouší se každých 5 s (pak se na ni snímání přepne samo). */
+  private updateSourceRetry(): void {
+    const missing = !!this.sourceState?.info.missing && this.capture.state === 'on';
+    if (missing && !this.sourceRetryTimer) {
+      this.sourceRetryTimer = setInterval(() => void this.applyCaptureSource(true), 5000);
+      this.sourceRetryTimer.unref?.();
+    } else if (!missing && this.sourceRetryTimer) {
+      clearInterval(this.sourceRetryTimer);
+      this.sourceRetryTimer = null;
+    }
+  }
+
+  /** Monitory a okna s náhledy pro okno "Co nahrávat" (jako sdílení obrazovky na Discordu). */
+  private async listCaptureSources(): Promise<{ screens: CaptureSourceOption[]; windows: CaptureSourceOption[] }> {
+    const own = this.ownMediaSourceIds();
+    const sources = await desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: { width: 320, height: 180 }, fetchWindowIcons: true });
+    const screensRaw = sources.filter((x) => x.id.startsWith('screen:'));
+    const displays = screen.getAllDisplays();
+    const primary = screen.getPrimaryDisplay().id;
+    const noIds = screensRaw.every((x) => !x.display_id);
+    const thumb = (img: Electron.NativeImage | null | undefined) => (img && !img.isEmpty() ? `data:image/jpeg;base64,${img.toJPEG(72).toString('base64')}` : '');
+    const screens: CaptureSourceOption[] = displays.map((d, i) => {
+      const src = screensRaw.find((x) => x.display_id === String(d.id)) ?? (noIds ? screensRaw[i] : undefined);
+      return { kind: 'screen', displayId: String(d.id), label: this.displayLabel(d, i), primary: d.id === primary, width: d.size.width, height: d.size.height, thumb: thumb(src?.thumbnail) };
+    });
+    const windows: CaptureSourceOption[] = sources
+      .filter((x) => x.id.startsWith('window:') && !own.has(x.id) && x.name.trim())
+      .slice(0, 60)
+      .map((x) => ({ kind: 'window', id: x.id, name: x.name.trim().slice(0, 200), thumb: thumb(x.thumbnail), icon: x.appIcon && !x.appIcon.isEmpty() ? x.appIcon.resize({ width: 32 }).toDataURL() : null }));
+    return { screens, windows };
+  }
+
+  /** Scéna vysílání: tlačítko v záložce Živě, lišta, zkratka. Bez vysílání = scéna, kterou vysílání začne. */
+  setLiveScene(id: unknown): boolean {
+    const s = this.settings.get();
+    const scene = s.liveScenes.find((x) => x.id === id);
+    if (!scene) return false;
+    if (s.liveSceneId !== scene.id) this.settings.update({ liveSceneId: scene.id });
+    if (this.live.active()) void this.toast.show(this.t('toastScene', { scene: this.sceneName(scene) }), 'ok', { sound: true });
+    return true;
+  }
+
+  /** Zkratka "Další scéna" - jen během vysílání. */
+  nextLiveScene(): void {
+    if (!this.live.active()) {
+      void this.toast.show(this.t('toastSceneNotLive'), 'warn');
+      return;
+    }
+    const s = this.settings.get();
+    this.setLiveScene(nextSceneId(s.liveScenes, s.liveSceneId));
+  }
+
+  /** Náhled v okně appky (co se nahrává / co vidí diváci) - jen když ho okno ukazuje. */
+  setPreviewWant(want: unknown): void {
+    const kind = want === 'screen' || want === 'record' || want === 'live' ? (want as PreviewKind) : null;
+    this.previewWant = kind;
+    this.capture.setPreview(kind);
   }
 
   /** Obrazovka "Hned jsem zpět": schová hru i kameru (soukromí, pauza) - zkratka, lišta, záložka Živě. */
@@ -1579,6 +1793,8 @@ class KineApp {
 
   /** Po konci vysílání: zásobník, který rozjelo jen vysílání, se zase vypne. */
   private afterLive(): void {
+    // Konec vysílání: snímání se vrátí ke zdroji ze Záznamu (scéna mohla nahrávat jiný monitor / aplikaci).
+    void this.applyCaptureSource();
     const s = this.settings.get();
     const keep = !this.paused && (s.detection === 'always' || (s.detection === 'games' && !!this.games.current()));
     // I ze stavu "chyba": snímací stránka by jinak zůstala viset (vysílání ji rozjelo, nikdo jiný ji nechce).
@@ -1731,7 +1947,8 @@ class KineApp {
       s.clipHotkey !== prev.clipHotkey ||
       s.toggleHotkey !== prev.toggleHotkey ||
       s.recordHotkey !== prev.recordHotkey ||
-      s.liveBrbHotkey !== prev.liveBrbHotkey
+      s.liveBrbHotkey !== prev.liveBrbHotkey ||
+      s.liveSceneHotkey !== prev.liveSceneHotkey
     )
       this.registerHotkeys();
     if (s.storageLimitGb !== prev.storageLimitGb) {
@@ -1745,8 +1962,11 @@ class KineApp {
       this.storageLimitTimer.unref?.();
     }
     // Kamera a text "Hned jsem zpět" se dají měnit i za běhu vysílání - projeví se hned.
-    const sceneKeys: (keyof Settings)[] = ['liveCamera', 'liveCameraDevice', 'liveCameraPosition', 'liveCameraSize', 'liveCameraShape', 'liveCameraMirror', 'liveBrbText', 'liveBrbMuteMic', 'lang'];
+    const sceneKeys: (keyof Settings)[] = ['liveCamera', 'liveCameraDevice', 'liveCameraPosition', 'liveCameraSize', 'liveCameraShape', 'liveCameraMirror', 'liveBrbText', 'liveBrbMuteMic', 'lang', 'liveScenes', 'liveSceneId'];
     if (this.live.active() && sceneKeys.some((k) => s[k] !== prev[k])) this.live.setScene(this.liveScene());
+    // Jiný monitor / aplikace (Záznam) nebo scéna s jiným zdrojem: snímání se přepne bez nového startu (zásobník zůstává).
+    const sourceKeys: (keyof Settings)[] = ['displayId', 'captureWindow', 'liveScenes', 'liveSceneId'];
+    if (sourceKeys.some((k) => s[k] !== prev[k])) void this.applyCaptureSource();
     if (s.startWithSystem !== prev.startWithSystem) this.applyLoginItem();
     if (s.desktopShortcut !== prev.desktopShortcut) this.ensureShortcuts(true);
     if (s.clipsDir !== prev.clipsDir) {
@@ -1760,7 +1980,8 @@ class KineApp {
     if (s.clipCamera && prev.clipCamera && !s.clipCameraSeparate && clipCameraKeys.some((k) => s[k] !== prev[k])) this.capture.setClipCamera(this.clipCameraScene(s));
     if (!s.clipCamera && prev.clipCamera) this.dismissNotice('capture:camera');
     // Kamera zvlášť (vlastní stopa) místo kamery v obraze = jiné recordery - nový start zásobníku.
-    const captureKeys: (keyof Settings)[] = ['maxHeight', 'fps', 'codec', 'videoMbps', 'systemAudio', 'systemAudioDevice', 'microphone', 'microphoneDevice', 'systemGain', 'micGain', 'displayId', 'clipCamera', 'clipCameraSeparate'];
+    // Monitor / aplikace (displayId, captureWindow) sem nepatří: přepne se za běhu (applyCaptureSource).
+    const captureKeys: (keyof Settings)[] = ['maxHeight', 'fps', 'codec', 'videoMbps', 'systemAudio', 'systemAudioDevice', 'microphone', 'microphoneDevice', 'systemGain', 'micGain', 'clipCamera', 'clipCameraSeparate'];
     // Kamera zvlášť nemá povel za běhu - jiná kamera (zařízení) = taky nový start.
     const separateDeviceChanged = s.clipCamera && s.clipCameraSeparate && s.clipCameraDevice !== prev.clipCameraDevice;
     if (captureKeys.some((k) => s[k] !== prev[k]) || separateDeviceChanged) {
@@ -1803,7 +2024,7 @@ class KineApp {
    */
   private registerHotkeys(): void {
     const s = this.settings.get();
-    this.hotkeys.apply({ clip: s.clipHotkey, toggle: s.toggleHotkey, record: s.recordHotkey, brb: s.liveBrbHotkey });
+    this.hotkeys.apply({ clip: s.clipHotkey, toggle: s.toggleHotkey, record: s.recordHotkey, brb: s.liveBrbHotkey, scene: s.liveSceneHotkey });
     this.syncHotkeyNotices();
   }
 
@@ -2055,13 +2276,12 @@ class KineApp {
       async (request, callback) => {
         try {
           const s = this.settings.get();
-          const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } });
-          // Vybraný monitor (klipy i vysílání) - i tam, kde Electron nevyplní display_id (src/shared/displayPick.ts).
-          const source = pickScreenSource(sources, this.displayRefs(), s.displayId);
-          if (!source) throw new Error('no display');
-          if (s.displayId && source.display_id !== s.displayId) log(`monitor ${s.displayId}: zdroj podle pořadí (${source.name})`);
+          // Vybraný monitor nebo aplikace (klipy i vysílání; během vysílání zdroj scény) - i tam,
+          // kde Electron nevyplní display_id (src/shared/displayPick.ts, src/shared/scenes.ts).
+          const picked = await this.startingSource();
+          if (!picked) throw new Error('no display');
           const audio = request.audioRequested && process.platform === 'win32' && s.systemAudio ? 'loopback' : undefined;
-          callback(audio ? { video: source, audio } : { video: source });
+          callback(audio ? { video: picked.source, audio } : { video: picked.source });
         } catch (e) {
           log(`výběr obrazovky selhal: ${(e as Error).message}`);
           callback({});
@@ -2230,7 +2450,18 @@ class KineApp {
     );
     if (onAir) {
       // Během vysílání: "Hned jsem zpět" (schová hru i kameru) a ztlumení mikrofonu - bez přepínání do okna.
+      const sceneSettings = this.settings.get();
       items.push(
+        // Scény vysílání (hra, jen kamera, text...) - přepnout bez okna.
+        {
+          label: this.t('trayLiveScene', { scene: this.sceneName(this.activeScene()) }),
+          submenu: sceneSettings.liveScenes.map((scene) => ({
+            label: this.sceneName(scene),
+            type: 'radio' as const,
+            checked: scene.id === sceneSettings.liveSceneId,
+            click: () => this.setLiveScene(scene.id),
+          })),
+        },
         { label: this.t('trayLiveBrb'), type: 'checkbox', checked: this.liveBrb, click: () => this.toggleLiveBrb() },
         { label: this.t('trayLiveMuteMic'), type: 'checkbox', checked: this.liveMicMuted, click: () => this.setLiveMicMuted(!this.liveMicMuted) }
       );
@@ -2310,12 +2541,27 @@ class KineApp {
     win.on('closed', () => {
       this.settingsWindow = null;
       this.destroyKineView();
+      // Náhled toho, co se nahrává, už nikdo nevidí.
+      this.setPreviewWant(null);
     });
     // Zmenšené okno = web Kine v něm nikdo nevidí - uspat (video, zvuk, běh na pozadí); po obnovení probrat.
-    win.on('minimize', () => this.sleepKineView(true));
-    win.on('hide', () => this.sleepKineView(true));
-    win.on('restore', () => this.sleepKineView(false));
-    win.on('show', () => this.sleepKineView(false));
+    // Totéž náhled nahrávání: snímací stránka ho přestane posílat.
+    win.on('minimize', () => {
+      this.sleepKineView(true);
+      this.capture.setPreview(null);
+    });
+    win.on('hide', () => {
+      this.sleepKineView(true);
+      this.capture.setPreview(null);
+    });
+    win.on('restore', () => {
+      this.sleepKineView(false);
+      this.capture.setPreview(this.previewWant);
+    });
+    win.on('show', () => {
+      this.sleepKineView(false);
+      this.capture.setPreview(this.previewWant);
+    });
     win.webContents.setWindowOpenHandler(({ url }) => {
       if (/^https?:/.test(url)) void shell.openExternal(url);
       return { action: 'deny' };
@@ -2642,6 +2888,7 @@ class KineApp {
     return {
       capture: this.capture.state,
       captureError: this.capture.error,
+      captureSource: this.capture.state === 'on' ? this.sourceState?.info ?? null : null,
       game: game?.name ?? null,
       gameSource: game?.source ?? null,
       gameExe: game?.exe ?? null,
@@ -3277,11 +3524,23 @@ class KineApp {
     ipcMain.on('loopback:stop', (e) => {
       if (fromCapture(e.sender)) this.loopback?.stop();
     });
-    ipcMain.handle('capture:sources', async () => {
+    ipcMain.handle('capture:sources', async (e) => {
+      if (!fromCapture(e.sender)) return [];
       const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } });
-      const picked = pickScreenSource(sources, this.displayRefs(), this.settings.get().displayId);
-      return sources.map((x) => ({ id: x.id, name: x.name, display_id: x.display_id, preferred: x.id === picked?.id }));
+      const picked = await this.startingSource();
+      const list = sources.map((x) => ({ id: x.id, name: x.name, display_id: x.display_id, preferred: x.id === picked?.source.id }));
+      // Aplikace (okno) se snímá starší cestou taky - přidá se do seznamu jako ta vybraná.
+      if (picked && picked.kind === 'window') list.unshift({ id: picked.source.id, name: picked.source.name, display_id: '', preferred: true });
+      return list;
     });
+    ipcMain.on('capture:preview', (e, data: ArrayBuffer | Uint8Array, info: { kind?: unknown; width?: unknown; height?: unknown }) => {
+      if (!fromCapture(e.sender) || !info || typeof info !== 'object') return;
+      const kind = info.kind === 'live' || info.kind === 'record' ? info.kind : 'screen';
+      this.capture.handlePreview(data, { kind, width: Number(info.width) || 0, height: Number(info.height) || 0 });
+    });
+    ipcMain.handle('capture:listSources', () => this.listCaptureSources());
+    ipcMain.handle('preview:want', (_e, want: unknown) => this.setPreviewWant(want));
+    ipcMain.handle('live:scene', (_e, id: unknown) => this.setLiveScene(id));
 
     ipcMain.handle('settings:get', () => this.settings.get());
     ipcMain.handle('settings:update', (_e, patch: Partial<Settings>) => {
@@ -3455,7 +3714,7 @@ class KineApp {
       const primary = screen.getPrimaryDisplay().id;
       return screen.getAllDisplays().map((d, i) => ({
         id: String(d.id),
-        label: `${d.label || this.t('displayN', { n: i + 1 })} (${d.size.width}×${d.size.height})`,
+        label: this.displayLabel(d, i),
         width: d.size.width,
         height: d.size.height,
         primary: d.id === primary,

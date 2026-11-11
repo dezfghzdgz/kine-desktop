@@ -881,6 +881,43 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   `playerFullscreenOk` přes tlačítko v liště, `settingsSectionsOk` (Záznam
   pět oddílů, Appka vzhled / obecné / o appce, staré cíle).
 
+## Novinky 0.14.0
+
+Co se nahrává je teď vidět a jde přepnout - monitor, nebo jen jedna aplikace (jako sdílení
+obrazovky na Discordu) - a vysílání má scény:
+
+- **Co se nahrává** (Záznam → Kvalita, nahoře): živý náhled toho, co jde do klipů (malý obrázek
+  dvakrát za sekundu, jen když je okno vidět), co se právě nahrává a tlačítko **Vybrat monitor
+  nebo aplikaci**. Okno výběru má záložky Obrazovky / Aplikace s náhledy (okna appky samotné
+  v něm nejsou). Monitor i aplikace se přepnou **bez nového startu snímání**: zvuk běží dál,
+  zásobník zůstává (pokračuje novou generací - klip hned po přepnutí na jiné rozměry začne až od
+  přepnutí, jako když hra změní rozlišení) a vysílání se nepřeruší. Dřív změna monitoru
+  zásobník smazala a vysílání na pár vteřin vypadlo.
+- **Aplikace, která není otevřená** (zavřela se, po restartu PC ještě neběží): nahrává se hlavní
+  monitor, appka to řekne a každých 5 s zkouší, jestli se aplikace otevřela - pak se na ni
+  přepne sama. Okno se po restartu aplikace najde podle názvu (u prohlížeče podle části za
+  poslední pomlčkou, "Stránka - Opera"). Zvuk se i u jedné aplikace nahrává z celého počítače.
+- **Scény vysílání** (záložka Živě, panel Co jde do vysílání - teď hned pod stavem vysílání):
+  tlačítka scén, živý náhled toho, co opravdu vidí diváci (během vysílání přímo z vysílání),
+  úprava scény (název; co ukazuje: hru / aplikaci, jen kameru, text na obrazovce; vlastní obraz
+  - jiný monitor nebo aplikace; kamera v rohu), přidat (až 8) / smazat. Výchozí scény: Hra,
+  Jen kamera, Začínáme za chvíli. Přepíná se kliknutím, zkratkou **Další scéna** nebo v liště
+  (Scéna ▸). Bez vysílání tlačítko vybere scénu, kterou vysílání začne. Scéna s vlastním obrazem
+  přepne snímání jen během vysílání, po konci se vrátí na to, co je v Záznamu. "Hned jsem zpět"
+  zůstává zvlášť nad každou scénou.
+- Vysílání drží rozměry proudu: obraz jiného zdroje se do nich vejde celý (černé pruhy po
+  stranách), vysílání, které začíná na aplikaci, má plátno 16:9 podle kvality. Obrazovka
+  s textem (scéna i "Hned jsem zpět") se pošle hned i když obraz stojí - dřív čekala na
+  pohyb ve hře.
+- Kód: `src/shared/scenes.ts` (čistá logika - zdroje, scény, hledání okna), `src/renderer/sourcePicker.ts`
+  (okno výběru, náhled), povel `source` a náhled v `src/renderer/capture.ts`, `setSource`
+  a scény v `src/renderer/liveCompositor.ts`, přepínání v `src/main/main.ts`
+  (`applyCaptureSource`) a `src/main/capture.ts` (`switchSource`). Náhled snímky ze snímání
+  nedrží (jen je hned zmenšeně překreslí) - držet je vyčerpá zásobu snímků a obraz se zastaví.
+- Testy: `tests/scenes.test.mjs`; samočinná zkouška se správcem oken (`KINE_TEST_WM=1 bash
+  tests/e2e.sh`, potřebuje openbox) nahrává cizí okno, přepíná scény za vysílání a hlídá, že
+  vysílání nevypadne (největší mezera mezi snímky při přepnutí 73 ms).
+
 ## Novinky 0.13.6
 
 Oprava „sekání“ zvuku v klipech (hlášení: seká se všechno kromě VP8):

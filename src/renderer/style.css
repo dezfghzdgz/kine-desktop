@@ -846,6 +846,51 @@ textarea.live-description { width: 100%; resize: vertical; min-height: 64px; }
 .corner-picker .corner.bottom-left { left: 6%; bottom: 8%; }
 .corner-picker .corner.bottom-right { right: 6%; bottom: 8%; }
 .live-camera-settings select { width: 100%; }
+/* 0.14.0: co se nahrává (monitor / aplikace), živý náhled, scény vysílání */
+.live-preview img.preview-feed { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }
+.live-preview img.preview-feed.empty { visibility: hidden; }
+.live-preview.camera-full video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.live-preview.camera-full video.mirror { transform: scaleX(-1); }
+.preview-badge {
+  position: absolute; left: 8px; top: 8px; display: inline-flex; align-items: center; gap: 2px; padding: 3px 9px 3px 8px;
+  border-radius: var(--radius-pill); background: rgba(0, 0, 0, 0.6); color: #fff; font-size: var(--fs-2xs); font-weight: 600; letter-spacing: 0.02em; pointer-events: none;
+}
+.preview-badge .rec-dot { width: 7px; height: 7px; margin-right: 5px; }
+.record-source-grid { display: grid; grid-template-columns: minmax(200px, 340px) 1fr; gap: 16px; align-items: center; }
+@media (max-width: 760px) { .record-source-grid { grid-template-columns: 1fr; } }
+.source-current-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.scene-strip { display: flex; flex-wrap: wrap; gap: 8px; }
+.scene-btn {
+  display: inline-flex; align-items: center; gap: 7px; min-height: 36px; padding: 6px 13px; border-radius: var(--radius-sm);
+  background: var(--panel-raised); box-shadow: inset 0 0 0 1px var(--border); color: var(--text-dim); font-weight: 600; cursor: pointer;
+}
+.scene-btn:hover { color: var(--text); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2); }
+.scene-btn.active { color: var(--text); background: var(--brand-soft); box-shadow: inset 0 0 0 1.5px var(--brand); }
+.scene-btn.editing { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35); color: var(--text); }
+.scene-btn.add { padding: 6px 10px; }
+.scene-btn .rec-dot { margin: 0 0 0 2px; }
+.scene-editor { gap: 10px; padding: 12px; border-radius: var(--radius-md); background: rgba(255, 255, 255, 0.025); box-shadow: inset 0 0 0 1px var(--border); }
+.scene-editor input[type=text], .scene-editor select { width: 100%; }
+.live-camera-block { padding-top: 4px; border-top: 1px solid var(--border); }
+.source-dialog { width: min(860px, 100%); }
+.source-body { padding: 14px 16px 16px; gap: 12px; overflow: auto; }
+.source-tabs { gap: 8px; align-items: center; }
+.source-tabs button.active { color: var(--text); background: var(--brand-soft); box-shadow: inset 0 0 0 1px var(--brand); }
+.source-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+.source-card {
+  display: flex; flex-direction: column; gap: 8px; padding: 8px; min-width: 0; border-radius: var(--radius-md); text-align: left; cursor: pointer;
+  background: var(--panel-raised); box-shadow: inset 0 0 0 1px var(--border); color: var(--text);
+}
+.source-card:hover { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25); }
+.source-card.active { box-shadow: inset 0 0 0 2px var(--brand); background: var(--brand-soft); }
+.source-thumb { position: relative; display: grid; place-items: center; aspect-ratio: 16 / 9; border-radius: var(--radius-sm); overflow: hidden; background: #000; }
+.source-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.source-thumb-empty { color: var(--text-faint); }
+.source-check { position: absolute; right: 6px; top: 6px; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--brand); color: #04110e; }
+.source-label { display: flex; align-items: center; gap: 7px; min-width: 0; font-size: var(--fs-sm); }
+.source-label .source-icon { width: 16px; height: 16px; flex: none; }
+.source-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+
 .live-brb-text, .live-title { width: 100%; }
 
 /* Kolik appka bere (Nastavení -> Výkon) */

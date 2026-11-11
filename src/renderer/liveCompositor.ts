@@ -13,7 +13,15 @@ import { cameraRect } from '../shared/liveLayout';
  * heslo, zprávy, pauza). Rytmus dává obrazovka - vysílání nikdy nestojí.
  *
  * Plátno má rozměry snímku obrazovky, takže přepnutí kamery nemění
- * rozlišení proudu (RTMP by to nemusel přežít).
+ * rozlišení proudu (RTMP by to nemusel přežít). Vysílání má rozměry
+ * zamčené (lockSize): když scéna přepne na jiný zdroj (jiný monitor,
+ * okno aplikace), nový obraz se do stejného plátna vejde celý (černé
+ * pruhy po stranách) - proud dál běží beze změny rozlišení (setSource).
+ *
+ * Scény (0.14.0): "Jen kamera" (kamera přes celý obraz) a obrazovka
+ * s textem ("Začínáme za chvíli") - kreslí se stejně jako "Hned jsem
+ * zpět". Když obraz stojí (snímání nové snímky neposílá), obrazovka
+ * s textem se pošle sama, ať diváci hru neuvidí ani na chvíli.
  *
  * Stejné skládání dává kameru i do klipů (nastavení Kamera v klipech):
  * kamera se kreslí do TÉHOŽ snímku jako hra, takže v záznamu sedí přesně -
@@ -42,7 +50,12 @@ export type CompositorDeps = {
   onCamera?: (state: 'starting' | 'on' | 'error', info: { message?: string; width?: number; height?: number }) => void;
   /** Kamera nejde nebo se odpojila: zkusit ji znovu za tolik ms (kamera v klipech běží celé hraní). */
   retryMs?: number;
+  /** Rozměry výstupu napořád (vysílání): podle prvního snímku (true), nebo dané - jiný zdroj se do nich vejde. */
+  lockSize?: boolean | { width: number; height: number };
 };
+
+/** Jak dlouho bez snímku obrazovky (ms), než se obrazovka s textem pošle sama (a pak znovu každých tolik). */
+const TEXT_IDLE_MS = 400;
 
 export class LiveCompositor {
   /** Stopa pro recorder vysílání. */
@@ -71,6 +84,19 @@ export class LiveCompositor {
   private lastTs = -1;
   private lastTsAt = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Zamčené rozměry výstupu (lockSize); 0 = ještě nepřišel žádný snímek. */
+  private outW = 0;
+  private outH = 0;
+  /** Rozměry posledního snímku ven (pro obrazovku s textem, když obraz stojí). */
+  private lastW = 0;
+  private lastH = 0;
+  private idleTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Náhled v okně appky: další snímek, který odejde, se hned nakreslí (zmenšený) tam, kam chce
+   * volající - snímek se NEDRŽÍ. Držet snímky ze snímání déle (kopie posledního) vyčerpá
+   * snímání zásobu snímků a obraz se zastaví (viděno: náhled + vysílání = žádná data).
+   */
+  private grab: ((frame: VideoFrame) => void) | null = null;
 
   static supported(): boolean {
     return typeof W.MediaStreamTrackProcessor === 'function' && typeof W.MediaStreamTrackGenerator === 'function' && typeof OffscreenCanvas === 'function';
@@ -87,8 +113,31 @@ export class LiveCompositor {
     this.reader = processor.readable.getReader();
     this.writer = generator.writable.getWriter();
     this.track = generator;
+    const lock = deps.lockSize;
+    if (lock && typeof lock === 'object' && lock.width > 0 && lock.height > 0) {
+      this.outW = even(lock.width);
+      this.outH = even(lock.height);
+    }
     this.applyCamera();
+    this.idleTimer = setInterval(() => void this.idleTick(), 200);
     void this.loop();
+  }
+
+  /**
+   * Jiný zdroj obrazu za běhu (scéna s jiným monitorem / aplikací): výstupní
+   * stopa zůstává stejná, recorder nic nepozná. Stará stopa patří volajícímu.
+   */
+  setSource(source: MediaStreamTrack): void {
+    if (!this.running) return;
+    const old = this.reader;
+    this.reader = new W.MediaStreamTrackProcessor!({ track: source, maxBufferSize: 2 }).readable.getReader();
+    this.canvasFresh = false;
+    void old.cancel().catch(() => undefined);
+  }
+
+  /** Náhled: další snímek ven se předá `draw` (synchronně, hned se pošle dál); null = zrušit. */
+  grabNext(draw: ((frame: VideoFrame) => void) | null): void {
+    this.grab = draw;
   }
 
   /** Za běhu: kamera jinam / jiná / vypnout, "Hned jsem zpět", text. */
@@ -98,12 +147,17 @@ export class LiveCompositor {
     // Kamera se mohla přesunout / zmenšit - do starého plátna se už nedokresluje (stará by tam zůstala).
     this.canvasFresh = false;
     this.applyCamera();
+    // Obrazovka s textem hned, i když obraz stojí (soukromí: "Hned jsem zpět" nesmí čekat na pohyb ve hře).
+    void this.idleTick(true);
   }
 
   stop(): void {
     this.running = false;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
+    if (this.idleTimer) clearInterval(this.idleTimer);
+    this.idleTimer = null;
+    this.grab = null;
     void this.reader.cancel().catch(() => undefined);
     void this.writer.close().catch(() => undefined);
     this.closeCamera();
@@ -116,17 +170,33 @@ export class LiveCompositor {
   private async loop(): Promise<void> {
     while (this.running) {
       let frame: VideoFrame | undefined;
+      const reader = this.reader;
       try {
-        const result = await this.reader.read();
-        if (result.done) break;
+        const result = await reader.read();
+        if (result.done) {
+          // Zdroj se vyměnil (setSource) - čte se dál z nového.
+          if (this.running && reader !== this.reader) continue;
+          break;
+        }
         frame = result.value;
       } catch {
+        if (this.running && reader !== this.reader) continue;
         break;
       }
       if (!frame) continue;
+      if (reader !== this.reader) {
+        // Poslední snímek starého zdroje po výměně - zahodit.
+        frame.close();
+        continue;
+      }
+      if (this.deps.lockSize && !this.outW && frame.displayWidth && frame.displayHeight) {
+        // Sudé rozměry (H.264); lichý zdroj (okno) se pak kreslí do plátna o pixel menšího.
+        this.outW = even(frame.displayWidth);
+        this.outH = even(frame.displayHeight);
+      }
       this.lastScreenAt = performance.now();
       try {
-        const composed = this.needsCompose() ? this.compose(frame) : null;
+        const composed = this.needsCompose(frame) ? this.compose(frame) : null;
         if (composed) {
           frame.close();
           // Generátor si snímek převezme (a sám zavře).
@@ -147,8 +217,59 @@ export class LiveCompositor {
     this.track.stop();
   }
 
-  private needsCompose(): boolean {
-    return this.scene.brb || (!!this.scene.camera && !!this.camFrame);
+  private needsCompose(frame?: VideoFrame): boolean {
+    if (this.textOnScreen() !== null || this.scene.cameraFull) return true;
+    if (frame && this.outW && (frame.displayWidth !== this.outW || frame.displayHeight !== this.outH)) return true;
+    return !!this.scene.camera && !!this.camFrame;
+  }
+
+  /** Text, který je místo hry vidět ("Hned jsem zpět" nebo scéna s textem); null = hra. */
+  private textOnScreen(): string | null {
+    if (this.scene.brb) return this.scene.brbText || 'BRB';
+    if (typeof this.scene.screenText === 'string') return this.scene.screenText || ' ';
+    return null;
+  }
+
+  /** Rozměry plátna: zamčené (vysílání), jinak podle snímku. */
+  private canvasSize(frame: { displayWidth: number; displayHeight: number } | null): { width: number; height: number } {
+    if (this.outW && this.outH) return { width: this.outW, height: this.outH };
+    if (frame && frame.displayWidth && frame.displayHeight) return { width: frame.displayWidth, height: frame.displayHeight };
+    return { width: this.lastW, height: this.lastH };
+  }
+
+  private ensureCanvas(width: number, height: number): OffscreenCanvasRenderingContext2D | null {
+    if (!this.canvas || this.canvas.width !== width || this.canvas.height !== height) {
+      this.canvas = new OffscreenCanvas(width, height);
+      this.ctx = this.canvas.getContext('2d', { alpha: false, desynchronized: true }) as OffscreenCanvasRenderingContext2D | null;
+      this.brbDrawn = '';
+    }
+    return this.ctx;
+  }
+
+  /**
+   * Obraz stojí a scéna je obrazovka s textem: poslat ji sama (hned po
+   * přepnutí a pak každých TEXT_IDLE_MS), ať vysílání nemá poslední
+   * snímek hry. Bez známých rozměrů (ještě žádný snímek) nic.
+   */
+  private async idleTick(now = false): Promise<void> {
+    if (!this.running || this.refreshing || this.textOnScreen() === null) return;
+    if (!now && performance.now() - this.lastScreenAt < TEXT_IDLE_MS) return;
+    if (!now && performance.now() - this.lastTsAt < TEXT_IDLE_MS) return;
+    const { width, height } = this.canvasSize(null);
+    if (!width || !height) return;
+    this.refreshing = true;
+    try {
+      const ctx = this.ensureCanvas(width, height);
+      if (!ctx || !this.canvas) return;
+      this.drawText(ctx, width, height);
+      this.canvasFresh = false;
+      const timestamp = this.lastTs + Math.max(1, Math.round((performance.now() - this.lastTsAt) * 1000));
+      await this.push(new VideoFrame(this.canvas, { timestamp }));
+    } catch {
+      // Nevadí - zkusí se to znovu.
+    } finally {
+      this.refreshing = false;
+    }
   }
 
   /** Snímek ven. Čas snímku jen roste - po dokreslených snímcích by ho skutečný snímek mohl mít menší. */
@@ -160,6 +281,17 @@ export class LiveCompositor {
     }
     this.lastTs = out.timestamp;
     this.lastTsAt = performance.now();
+    this.lastW = out.displayWidth;
+    this.lastH = out.displayHeight;
+    if (this.grab) {
+      const draw = this.grab;
+      this.grab = null;
+      try {
+        draw(out);
+      } catch {
+        // náhled počká na další snímek
+      }
+    }
     await this.writer.write(out);
   }
 
@@ -170,10 +302,11 @@ export class LiveCompositor {
    * kreslí na stejné místo, takže stará kamera se jen přepíše.
    */
   private async refresh(): Promise<void> {
-    if (this.refreshing || !this.canvasFresh || !this.canvas || !this.ctx || !this.camFrame || !this.scene.camera || this.scene.brb) return;
+    if (this.refreshing || !this.canvasFresh || !this.canvas || !this.ctx || !this.camFrame || !this.scene.camera || this.textOnScreen() !== null) return;
     this.refreshing = true;
     try {
-      this.drawCamera(this.ctx, this.canvas.width, this.canvas.height, this.camFrame);
+      if (this.scene.cameraFull) this.drawCameraFull(this.ctx, this.canvas.width, this.canvas.height, this.camFrame);
+      else this.drawCamera(this.ctx, this.canvas.width, this.canvas.height, this.camFrame);
       const timestamp = this.lastTs + Math.max(1, Math.round((performance.now() - this.lastTsAt) * 1000));
       await this.push(new VideoFrame(this.canvas, { timestamp }));
     } catch {
@@ -184,30 +317,75 @@ export class LiveCompositor {
   }
 
   private compose(frame: VideoFrame): VideoFrame | null {
-    const width = frame.displayWidth;
-    const height = frame.displayHeight;
+    if (!frame.displayWidth || !frame.displayHeight) return null;
+    const { width, height } = this.canvasSize(frame);
     if (!width || !height) return null;
-    if (!this.canvas || this.canvas.width !== width || this.canvas.height !== height) {
-      this.canvas = new OffscreenCanvas(width, height);
-      this.ctx = this.canvas.getContext('2d', { alpha: false, desynchronized: true }) as OffscreenCanvasRenderingContext2D | null;
-      this.brbDrawn = '';
-    }
-    const ctx = this.ctx;
-    if (!ctx) return null;
-    if (this.scene.brb) {
+    const ctx = this.ensureCanvas(width, height);
+    if (!ctx || !this.canvas) return null;
+    if (this.textOnScreen() !== null) {
       this.canvasFresh = false;
-      const key = `${width}x${height}:${this.scene.brbText}`;
-      if (this.brbDrawn !== key) {
-        this.drawBrb(ctx, width, height);
-        this.brbDrawn = key;
-      }
+      this.drawText(ctx, width, height);
+    } else if (this.scene.cameraFull) {
+      this.brbDrawn = '';
+      if (this.camFrame) this.drawCameraFull(ctx, width, height, this.camFrame);
+      else this.drawBackground(ctx, width, height);
+      this.canvasFresh = !!this.camFrame;
     } else {
       this.brbDrawn = '';
-      ctx.drawImage(frame, 0, 0, width, height);
+      this.drawSource(ctx, width, height, frame);
       if (this.scene.camera && this.camFrame) this.drawCamera(ctx, width, height, this.camFrame);
       this.canvasFresh = true;
     }
     return new VideoFrame(this.canvas, { timestamp: frame.timestamp });
+  }
+
+  /** Obraz zdroje do plátna: stejné rozměry = celý, jinak se vejde celý doprostřed (černé pruhy). */
+  private drawSource(ctx: OffscreenCanvasRenderingContext2D, width: number, height: number, frame: VideoFrame): void {
+    const fw = frame.displayWidth;
+    const fh = frame.displayHeight;
+    if (fw === width && fh === height) {
+      ctx.drawImage(frame, 0, 0, width, height);
+      return;
+    }
+    const r = fitRect(fw, fh, width, height);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(frame, r.x, r.y, r.w, r.h);
+  }
+
+  /** Text místo hry - nakreslí se jednou a pak se plátno jen posílá dál. */
+  private drawText(ctx: OffscreenCanvasRenderingContext2D, width: number, height: number): void {
+    const text = this.textOnScreen() ?? '';
+    const key = `${width}x${height}:${text}`;
+    if (this.brbDrawn === key) return;
+    this.drawBrb(ctx, width, height, text);
+    this.brbDrawn = key;
+  }
+
+  private drawBackground(ctx: OffscreenCanvasRenderingContext2D, width: number, height: number): void {
+    const bg = ctx.createLinearGradient(0, 0, width, height);
+    bg.addColorStop(0, '#08080b');
+    bg.addColorStop(1, '#16161d');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, width, height);
+  }
+
+  /** Scéna "Jen kamera": kamera vyplní celý obraz (ořízne se, co přečnívá), zrcadlo podle nastavení. */
+  private drawCameraFull(ctx: OffscreenCanvasRenderingContext2D, width: number, height: number, cam: VideoFrame): void {
+    const cw = cam.displayWidth || 1280;
+    const ch = cam.displayHeight || 720;
+    const scale = Math.max(width / cw, height / ch);
+    const sw = width / scale;
+    const sh = height / scale;
+    const sx = (cw - sw) / 2;
+    const sy = (ch - sh) / 2;
+    ctx.save();
+    if (this.scene.camera?.mirror) {
+      ctx.translate(width, 0);
+      ctx.scale(-1, 1);
+    }
+    ctx.drawImage(cam, sx, sy, sw, sh, 0, 0, width, height);
+    ctx.restore();
   }
 
   private drawCamera(ctx: OffscreenCanvasRenderingContext2D, width: number, height: number, cam: VideoFrame): void {
@@ -238,13 +416,8 @@ export class LiveCompositor {
     ctx.restore();
   }
 
-  private drawBrb(ctx: OffscreenCanvasRenderingContext2D, width: number, height: number): void {
-    const bg = ctx.createLinearGradient(0, 0, width, height);
-    bg.addColorStop(0, '#08080b');
-    bg.addColorStop(1, '#16161d');
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, width, height);
-    const text = this.scene.brbText || 'BRB';
+  private drawBrb(ctx: OffscreenCanvasRenderingContext2D, width: number, height: number, text: string): void {
+    this.drawBackground(ctx, width, height);
     const size = Math.max(18, Math.round(height * 0.075));
     ctx.fillStyle = '#f2f2f0';
     ctx.textAlign = 'center';
@@ -323,8 +496,11 @@ export class LiveCompositor {
         reported = true;
         this.deps.onCamera?.('on', { width: frame.displayWidth, height: frame.displayHeight });
       }
-      // Obraz stojí - kamera se dokreslí sama (viz refresh).
-      if (this.canvasFresh && performance.now() - this.lastScreenAt > SCREEN_IDLE_MS) void this.refresh();
+      // Obraz stojí - kamera se dokreslí sama (viz refresh); "Jen kamera" ještě nic nenakreslila - poprvé taky.
+      if (performance.now() - this.lastScreenAt > SCREEN_IDLE_MS) {
+        if (this.scene.cameraFull && !this.canvasFresh) this.primeCameraFull();
+        if (this.canvasFresh) void this.refresh();
+      }
     }
     // Kamera skončila sama (odpojená, vzal si ji jiný program): z obrazu pryč - zamrzlý obličej
     // by vypadal jako chyba - a kamera v klipech to za chvíli zkusí znovu.
@@ -356,6 +532,29 @@ export class LiveCompositor {
     this.camFrame?.close();
     this.camFrame = null;
   }
+
+  /** "Jen kamera" a obraz stojí: plátno se připraví podle známých rozměrů, ať kamera jde ven i bez pohybu ve hře. */
+  private primeCameraFull(): void {
+    const { width, height } = this.canvasSize(null);
+    if (!width || !height || !this.camFrame) return;
+    const ctx = this.ensureCanvas(width, height);
+    if (!ctx) return;
+    this.drawCameraFull(ctx, width, height, this.camFrame);
+    this.canvasFresh = true;
+  }
+}
+
+function even(n: number): number {
+  return Math.max(2, Math.floor(n / 2) * 2);
+}
+
+/** Obdélník, do kterého se obraz w×h vejde celý doprostřed plátna W×H (poměr stran zůstane). */
+export function fitRect(w: number, h: number, W: number, H: number): { x: number; y: number; w: number; h: number } {
+  if (!w || !h || !W || !H) return { x: 0, y: 0, w: W, h: H };
+  const scale = Math.min(W / w, H / h);
+  const rw = Math.round(w * scale);
+  const rh = Math.round(h * scale);
+  return { x: Math.round((W - rw) / 2), y: Math.round((H - rh) / 2), w: rw, h: rh };
 }
 
 /** Proč kamera nejde - srozumitelně (obsazená jiným programem je nejčastější). */

@@ -12,16 +12,16 @@ import { log } from './log';
  * Který motor se použije, řeší tahle třída; zbytek appky jen dostane
  * "zkratka X stisknuta".
  */
-/** brb = obrazovka "Hned jsem zpět" ve vysílání (jen když ji hráč nastaví). */
-export type HotkeyId = 'clip' | 'toggle' | 'record' | 'brb';
-const HOTKEY_IDS: HotkeyId[] = ['clip', 'toggle', 'record', 'brb'];
+/** brb = obrazovka "Hned jsem zpět" ve vysílání, scene = další scéna vysílání (obě jen když je hráč nastaví). */
+export type HotkeyId = 'clip' | 'toggle' | 'record' | 'brb' | 'scene';
+const HOTKEY_IDS: HotkeyId[] = ['clip', 'toggle', 'record', 'brb', 'scene'];
 
 export type HotkeyProblem = { id: HotkeyId; hotkey: string; reason: HotkeyReason };
 export type HotkeyReason = 'in-use' | 'unsupported' | 'helper-down' | 'invalid';
 
 export class HotkeyManager {
   private chordIds: HotkeyId[] = [];
-  private wanted: Record<HotkeyId, string> = { clip: '', toggle: '', record: '', brb: '' };
+  private wanted: Record<HotkeyId, string> = { clip: '', toggle: '', record: '', brb: '', scene: '' };
   private problems: HotkeyProblem[] = [];
   private registered = new Set<string>();
 

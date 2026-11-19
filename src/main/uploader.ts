@@ -5,7 +5,7 @@ import { gameHashtag } from '../shared/clipNaming';
 import { parseHashtags } from '../shared/upload';
 import type { ClipLibrary } from './clips';
 import { KineApiError, type KineApi } from './kineApi';
-import { TusAborted, tusUpload } from './tus';
+import { TusAborted, TusError, tusUpload } from './tus';
 
 /** Chyba nahrání "nejsi přihlášený" (server 401) - okno ji ukáže přeloženou. */
 export const UPLOAD_ERROR_LOGIN = 'login-required';
@@ -457,13 +457,13 @@ export class Uploader {
     let videoId = resumable && prev && (prev.state === 'paused' || prev.state === 'uploading') ? prev.videoId : undefined;
     const startPercent = resumable && prev && 'percent' in prev ? prev.percent : 0;
     let mode: 'tus' | 'basic' = 'tus';
+    // Délka jde Kine (rezerva u Cloudflare a limity - na webu lib/uploadLimits.ts). Upravený
+    // klip (zpomalení, střih) může mít jinou délku než originál - pak ji Kine odhadne sama.
+    const duration = file === clip.file && Number.isFinite(clip.durationSeconds) && clip.durationSeconds > 0 ? clip.durationSeconds : null;
 
     if (!tusUrl || !videoId) {
       // Staré rozjeté nahrávání, na které se už nenaváže (nová kopie souboru): ať na Kine nedrží místo.
       if (prev && (prev.state === 'paused' || prev.state === 'uploading') && prev.videoId) this.releaseOnKine(prev.videoId);
-      // Délka jde Kine (rezerva u Cloudflare a limity - na webu lib/uploadLimits.ts). Upravený
-      // klip (zpomalení, střih) může mít jinou délku než originál - pak ji Kine odhadne sama.
-      const duration = file === clip.file && Number.isFinite(clip.durationSeconds) && clip.durationSeconds > 0 ? clip.durationSeconds : null;
       const target = await api.createUploadUrl(size, duration, signal);
       tusUrl = target.uploadURL;
       videoId = target.videoId;
@@ -477,13 +477,18 @@ export class Uploader {
     };
     setProgress(Math.round((startPercent / 100) * size));
 
-    if (mode === 'tus') {
+    const send = async (url: string, from: number): Promise<void> => {
+      if (mode !== 'tus') {
+        await basicUpload(url, file, signal, this.deps.fetchImpl ?? fetch);
+        setProgress(size);
+        return;
+      }
       const handle = await openFile(file, 'r');
       try {
         await tusUpload({
-          url: tusUrl,
+          url,
           size,
-          offset: Math.floor((startPercent / 100) * size),
+          offset: from,
           // Čte se asynchronně: kus má až 64 MiB a synchronní čtení by na pomalém
           // disku na chvíli zastavilo hlavní proces (okna, zkratky, oznámení).
           read: async (offset, length) => {
@@ -503,9 +508,26 @@ export class Uploader {
       } finally {
         await handle.close().catch(() => undefined);
       }
-    } else {
-      await basicUpload(tusUrl, file, signal, this.deps.fetchImpl ?? fetch);
-      setProgress(size);
+    };
+
+    try {
+      await send(tusUrl, Math.floor((startPercent / 100) * size));
+    } catch (e) {
+      if (signal.aborted || !uploadLinkGone(e)) throw e;
+      // Odkaz u Cloudflare už neplatí: platí 30 minut od vytvoření (Kine od 0148 déle), takže
+      // nahrávání pozastavené přes dlouhou hru nebo pomalé nahrávání velkého souboru na něj
+      // narazilo a končilo chybou "HEAD 400". Teď se vezme nový odkaz a nahraje se znovu od
+      // začátku (staré místo na Kine se uvolní) - jednou; když ani to nejde, je to chyba.
+      this.deps.log(`nahrávání: odkaz u Cloudflare už neplatí (${(e as Error).message}) - znovu od začátku: ${clip.title}`);
+      this.releaseOnKine(videoId);
+      const target = await api.createUploadUrl(size, duration, signal);
+      tusUrl = target.uploadURL;
+      videoId = target.videoId;
+      mode = target.mode;
+      if (run) run.videoId = videoId;
+      if (signal.aborted) throw new TusAborted();
+      setProgress(0);
+      await send(tusUrl, 0);
     }
 
     // Soubor je celý u Cloudflare: od teď se ukládá na Kine a nic se neruší.
@@ -544,6 +566,14 @@ export class Uploader {
     this.watchReady(clip.id, id, url);
     return url;
   }
+}
+
+/**
+ * Odkaz na nahrávání u Cloudflare vypršel nebo zmizel (HEAD / PATCH 400, 404, 410) - nahrávání
+ * se na něj už nenaváže, musí se začít s novým odkazem. 403 a jiné chyby ne (zkusit znovu nepomůže).
+ */
+export function uploadLinkGone(e: unknown): boolean {
+  return e instanceof TusError && (e.status === 400 || e.status === 404 || e.status === 410);
 }
 
 /** Hashtagy, když si hráč žádné nenapsal: "klip", hra a to, co má v nastavení. */

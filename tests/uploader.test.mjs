@@ -25,6 +25,8 @@ function startMockServer() {
   let hangIfSize = null;
   // Cloudflare kus odmítne (403) - nahrávání skončí chybou.
   let failPatch = false;
+  // Odkazy, které u Cloudflare vypršely (platí 30 min): HEAD i PATCH vrací 400.
+  const expired = new Set();
   async function handle(req, res) {
     const chunks = [];
     for await (const c of req) chunks.push(c);
@@ -38,6 +40,7 @@ function startMockServer() {
       return res.end(JSON.stringify({ mode: 'tus', uploadURL: `http://127.0.0.1:${server.address().port}/tus/${id}`, videoId: id }));
     }
     if (url.pathname.startsWith('/tus/')) {
+      if (expired.has(url.pathname.slice(5))) { res.writeHead(400); return res.end(); }
       const up = uploads.get(url.pathname.slice(5));
       if (!up) { res.writeHead(404); return res.end(); }
       if (req.method === 'HEAD') { res.writeHead(200, { 'Upload-Offset': String(up.data.length) }); return res.end(); }
@@ -96,7 +99,7 @@ function startMockServer() {
       resolve({
         server, uploads, confirmed, statusCalls, canceled,
         setSlow: (v) => (slowPatch = v), setProcessing: (n) => (processingLeft = n),
-        hangIfSize: (n) => (hangIfSize = n), failPatch: (v) => (failPatch = v),
+        hangIfSize: (n) => (hangIfSize = n), failPatch: (v) => (failPatch = v), expire: (id) => expired.add(id),
         port: server.address().port,
       })
     )
@@ -647,6 +650,47 @@ test('nepovedené nahrávání se na Kine uvolní; Zkusit znovu ho nahraje', asy
   assert.equal(uploader.restart('c1'), true);
   await done;
   assert.equal(mock.confirmed[0].cloudflareVideoId, 'cf2');
+  uploader.stopWaiting();
+  mock.server.close();
+});
+
+test('odkaz u Cloudflare vypršel (HEAD 400 po dlouhé hře): nový odkaz a znovu od začátku, staré místo se uvolní', async () => {
+  const mock = await startMockServer();
+  const { library } = makeLibrary(4096);
+  mock.expire('stare');
+  // Z minula: pozastavené nahrávání na 50 % - hra trvala přes hodinu, odkaz mezitím vypršel.
+  library.setUpload('c1', { state: 'paused', percent: 50, reason: 'game', tusUrl: `http://127.0.0.1:${mock.port}/tus/stare`, videoId: 'stare' });
+  const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${mock.port}`, getToken: async () => 'token-123' });
+  const logs = [];
+  const uploader = new Uploader({ library, api, blocked: () => null, settings: () => settings, log: (m) => logs.push(m), readySchedule: fast });
+  const errors = [];
+  uploader.on((e) => e.type === 'error' && errors.push(e));
+  const done = new Promise((resolve) => uploader.on((e) => e.type === 'done' && resolve(e)));
+  uploader.restoreFromLibrary();
+  await done;
+  assert.deepEqual(errors, [], 'žádná chyba "HEAD 400"');
+  assert.equal(mock.uploads.get('cf1').data.length, 4096, 'celý soubor novým odkazem');
+  assert.equal(mock.confirmed.length, 1);
+  assert.equal(mock.confirmed[0].cloudflareVideoId, 'cf1');
+  assert.ok(await until(() => mock.canceled.includes('stare')), 'staré místo na Kine uvolněné');
+  assert.ok(logs.some((m) => m.includes('HEAD 400')));
+  uploader.stopWaiting();
+  mock.server.close();
+});
+
+test('vypršelý odkaz i během nahrávání (PATCH 400 + HEAD 400): jen jeden nový pokus, pak chyba', async () => {
+  const mock = await startMockServer();
+  const { library } = makeLibrary(2048);
+  mock.expire('cf1');
+  mock.expire('cf2');
+  const api = createKineApi({ siteUrl: () => `http://127.0.0.1:${mock.port}`, getToken: async () => 'token-123' });
+  const uploader = new Uploader({ library, api, blocked: () => null, settings: () => settings, log: () => {}, readySchedule: fast });
+  const failed = new Promise((resolve) => uploader.on((e) => e.type === 'error' && resolve(e)));
+  uploader.enqueue([{ clipId: 'c1', visibility: 'private' }]);
+  const e = await failed;
+  assert.match(e.message, /HEAD 400/);
+  assert.equal(mock.uploads.size, 2, 'jeden nový odkaz, ne donekonečna');
+  assert.equal(library.get('c1').upload.state, 'error');
   uploader.stopWaiting();
   mock.server.close();
 });

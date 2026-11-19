@@ -881,6 +881,17 @@ Kine, kterou má hráč u loga na webu, appka převezme z jeho účtu.
   `playerFullscreenOk` přes tlačítko v liště, `settingsSectionsOk` (Záznam
   pět oddílů, Appka vzhled / obecné / o appce, staré cíle).
 
+## Novinky 0.14.1
+
+- **Chyba "HEAD 400" při nahrávání klipů opravená**: odkaz na nahrávání u Cloudflare platil jen
+  30 minut. Appka nahrávání během hraní pozastaví, takže po delší hře (nebo u pomalého nahrávání
+  velké nahrávky) navazovala na prošlý odkaz - Cloudflare odpověděl 400 a klip skončil chybou.
+  Teď si appka při 400 / 404 / 410 od Cloudflare vezme od Kine nový odkaz a nahraje klip znovu
+  od začátku (staré místo na Kine uvolní) - jednou, sama, bez chyby (`uploadLinkGone`
+  v `src/main/uploader.ts`). Web Kine od dodávky 0148 dává odkazy platné skoro 6 hodin.
+- Testy: dva nové případy v `tests/uploader.test.mjs` (prošlý odkaz po hře; prošlý i nový
+  odkaz = jen jeden nový pokus a pak chyba).
+
 ## Novinky 0.14.0
 
 Co se nahrává je teď vidět a jde přepnout - monitor, nebo jen jedna aplikace (jako sdílení
